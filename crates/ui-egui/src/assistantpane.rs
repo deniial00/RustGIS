@@ -25,6 +25,8 @@ const SUGGESTIONS: &[&str] = &[
 pub struct AssistantState {
     pub(crate) agent: Option<Agent>,
     pub input: String,
+    /// The input box's height, set by dragging the grip above it (0 until dragged: two lines).
+    input_height: f32,
     /// A message to send on the next frame (`ui.pane.assistant {"ask": …}`).
     pub queued: Option<String>,
     /// The request out: its generation and where its response lands.
@@ -1130,6 +1132,10 @@ fn account_row(_app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, _cfg: &mut Config
     ui.label(RichText::new(tl!("Signing in with ChatGPT works in the desktop app.")).small().color(t.text_dim));
 }
 
+/// The input box's least height (two lines), and how tall it grows with text before it scrolls.
+const INPUT_HEIGHT: f32 = 44.0;
+const INPUT_GROWS: f32 = 160.0;
+
 fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egui::Context) {
     // Agent threads on this computer, working or waiting for a follow-up.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1188,14 +1194,28 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
             }
         }
     }
-    ui.add(
-        egui::TextEdit::multiline(&mut app.assistant.input)
-            .id(id)
-            .desired_rows(2)
-            .desired_width(f32::INFINITY)
-            .font(regular(13.0))
-            .hint_text(tl!("Ask about the map, or tell it what to do…")),
-    );
+    // A grip above the box: dragging it up makes the box taller, up to half the window.
+    let most = (ui.ctx().content_rect().height() * 0.5).max(INPUT_HEIGHT);
+    let (grip, drag) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), egui::Sense::drag());
+    let drag = drag.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(tl!("Drag to resize the message box"));
+    if drag.dragged() {
+        app.assistant.input_height = (app.assistant.input_height.max(INPUT_HEIGHT) - drag.drag_delta().y).clamp(INPUT_HEIGHT, most);
+    }
+    let color = if drag.hovered() || drag.dragged() { t.text } else { t.text_dim.gamma_multiply(0.6) };
+    ui.painter().line_segment([grip.center() - vec2(14.0, 0.0), grip.center() + vec2(14.0, 0.0)], egui::Stroke::new(2.0, color));
+    let height = app.assistant.input_height.clamp(INPUT_HEIGHT, most);
+    // The box grows with what is typed, past the height set, then scrolls.
+    egui::ScrollArea::vertical().id_salt("assistant_input_scroll").max_height(height.max(INPUT_GROWS).min(most)).show(ui, |ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut app.assistant.input)
+                .id(id)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .min_size(vec2(0.0, height))
+                .font(regular(13.0))
+                .hint_text(tl!("Ask about the map, or tell it what to do…")),
+        );
+    });
     ui.horizontal(|ui| {
         // Room for the button; the hint gives way in long languages.
         let w = (ui.available_width() - 84.0).max(0.0);
@@ -1892,6 +1912,36 @@ mod tests {
         let after = right_pane(&h);
         assert!((after.min.x - (edge.x - 150.0)).abs() < 3.0, "the pane did not follow the drag: {before:?} to {after:?}");
         assert!(after.max.x <= window.max.x + 0.5, "the pane's edge left the window: {after:?} in {window:?}");
+    }
+
+    /// Dragging the grip above the input box up makes the box taller; Send stays in the window.
+    #[test]
+    fn input_box_resizes_by_its_grip() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = chat(Vec::new(), "m");
+        let input = |h: &egui_kittest::Harness<'_, RustGisApp>| h.get_by_role(egui::accesskit::Role::MultilineTextInput).rect();
+        let before = input(&h);
+        let grip = egui::pos2(before.center().x, before.min.y - 4.0);
+        h.hover_at(grip);
+        h.step();
+        h.drag_at(grip);
+        h.step();
+        for dy in [40.0, 80.0, 120.0] {
+            h.hover_at(grip - vec2(0.0, dy));
+            h.step();
+        }
+        h.event(egui::Event::PointerButton {
+            pos: grip - vec2(0.0, 120.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        for _ in 0..4 {
+            h.step();
+        }
+        let after = input(&h);
+        assert!((after.height() - before.height() - 120.0).abs() < 4.0, "the box did not follow the drag: {before:?} to {after:?}");
+        assert!(h.get_by_label("Send").rect().max.y <= h.ctx.content_rect().max.y);
     }
 
     #[test]
