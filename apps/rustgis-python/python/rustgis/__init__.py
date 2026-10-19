@@ -317,6 +317,10 @@ class _Api:
         """
         raise NotImplementedError
 
+    def _root(self) -> "Session":
+        """The session that holds the project: this one, or the one a :class:`Map` shows."""
+        raise NotImplementedError
+
     def _data_command(self, path: PathLike) -> Tuple[str, Dict[str, Any]]:
         """The command adding a file, and its parameters.
 
@@ -466,6 +470,8 @@ class _Api:
             RustGISError: When the map has no such layer.
         """
         if isinstance(layer, Layer):
+            if layer.session._root() is not self._root():
+                raise RustGISError(f"{layer!r} belongs to another session")
             layer = layer.id
         if isinstance(layer, bool) or not isinstance(layer, (int, str)):
             raise RustGISError(f"a layer is a name or an id, not {layer!r}")
@@ -719,6 +725,10 @@ class Session(_Api):
             selected: Only its selected features.
         """
         return self._engine.layer_geojson(layer, selected)
+
+    def _root(self) -> "Session":
+        """The session that holds the project: this one."""
+        return self
 
     # Projects ------------------------------------------------------------------------------
 

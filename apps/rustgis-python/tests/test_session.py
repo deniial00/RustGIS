@@ -199,3 +199,12 @@ def test_a_layer_named_like_another_layers_id_reads_its_own_features(sample):
     assert len(cities.to_geojson()["features"]) == cities.count != decoy.count
     assert decoy.to_geojson()["features"][0]["properties"]["name"] == "Hong Kong"
     assert True not in sample
+
+
+def test_a_layer_of_another_session_is_refused(sample):
+    other = rustgis.Session(sample=True)
+    stranger = other["Cities"]
+    assert stranger not in sample
+    with pytest.raises(rustgis.RustGISError, match="another session"):
+        sample.remove_layer(stranger)
+    assert "Cities" in sample

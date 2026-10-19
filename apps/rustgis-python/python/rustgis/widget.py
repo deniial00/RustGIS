@@ -157,6 +157,10 @@ class Map(anywidget.AnyWidget, _Api):
         """
         return self._session._layer_geojson(layer, selected)
 
+    def _root(self) -> Session:
+        """The session that holds the project: the one the widget shows."""
+        return self._session
+
     def _data_command(self, path: PathLike) -> Tuple[str, Dict[str, Any]]:
         """The command adding a file: a file of up to 2 MB travels with the project, so the app
         shows it too; a larger one is read from its path, which only Python can see: it draws in

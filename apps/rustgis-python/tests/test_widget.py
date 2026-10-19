@@ -82,6 +82,8 @@ def test_layers_of_a_map_change_the_app():
     m = rustgis.Map()
     sites = m.add_geojson(POINT, name="Sites")
     assert sites.session is m and m["Sites"] == sites
+    # The Map and its session hold one project: a layer of either is good for both.
+    assert sites in m.session and m.session["Sites"] in m
     before = m._project
     sites.rename("Places")
     assert m._project != before and "Places" in m._project
