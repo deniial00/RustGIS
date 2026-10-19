@@ -83,6 +83,19 @@ class Layer:
         self.session = session
         self.id: int = session._find_layer(layer)["id"]
 
+    @classmethod
+    def _of(cls, session: "_Api", layer_id: int) -> "Layer":
+        """A handle on a layer whose id is known to exist, without looking it up again.
+
+        Args:
+            session: The session (or :class:`Map`) the layer belongs to.
+            layer_id: The layer's id.
+        """
+        layer = cls.__new__(cls)
+        layer.session = session
+        layer.id = layer_id
+        return layer
+
     @property
     def info(self) -> Dict[str, Any]:
         """The layer's summary: id, name, type, feature count, fields, extent, renderer,
@@ -322,10 +335,10 @@ class _Api:
         if isinstance(result, dict):
             added = result.get("layer")
             if isinstance(added, int) and not isinstance(added, bool):
-                return Layer(self, added)
+                return Layer._of(self, added)
             many = result.get("layers")
             if isinstance(many, list) and many and not result.get("tables"):
-                return [Layer(self, i) for i in many if isinstance(i, int)]
+                return [Layer._of(self, i) for i in many if isinstance(i, int) and not isinstance(i, bool)]
         return result
 
     # Commands ------------------------------------------------------------------------------
@@ -370,7 +383,8 @@ class _Api:
     def run_tool(self, tool: str, /, **params: Any) -> Any:
         """Runs a geoprocessing tool (``gp.run``).
 
-        Layers can be given as :class:`Layer` objects or by name. :meth:`describe` lists a
+        Layers can be given as :class:`Layer` objects or by name; tools take layers by name,
+        so of two layers with the same name, the upper one is used. :meth:`describe` lists a
         tool's parameters.
 
         Args:
@@ -453,15 +467,19 @@ class _Api:
         """
         if isinstance(layer, Layer):
             layer = layer.id
+        if isinstance(layer, bool) or not isinstance(layer, (int, str)):
+            raise RustGISError(f"a layer is a name or an id, not {layer!r}")
         layers = self.layers()
         if isinstance(layer, int):
             found = [entry for entry in layers if entry.get("id") == layer]
         else:
             found = [entry for entry in layers if entry.get("name") == layer]
-            found = found or [entry for entry in layers if str(entry.get("name", "")).lower() == layer.lower()]
+            folded = layer.lower()
+            found = found or [entry for entry in layers if str(entry.get("name", "")).lower() == folded]
             found = found or [entry for entry in layers if str(entry.get("id")) == layer.strip()]
         if not found:
-            raise RustGISError(f"no layer with id {layer}" if isinstance(layer, int) else f"no layer named '{layer}'")
+            what = f"with id {layer}" if isinstance(layer, int) else f"named '{layer}'"
+            raise RustGISError(f"no layer {what}")
         return found[0]
 
     def __getitem__(self, name: Union[str, int]) -> Layer:
@@ -477,7 +495,7 @@ class _Api:
 
     def __contains__(self, name: object) -> bool:
         """Whether the active map has a layer of this name or id (or this :class:`Layer`)."""
-        if not isinstance(name, (str, int, Layer)):
+        if isinstance(name, bool) or not isinstance(name, (str, int, Layer)):
             return False
         try:
             self._find_layer(name)
@@ -487,7 +505,7 @@ class _Api:
 
     def __iter__(self) -> Iterator[Layer]:
         """The active map's layers, top first."""
-        return iter([Layer(self, int(entry["id"])) for entry in self.layers()])
+        return iter([Layer._of(self, int(entry["id"])) for entry in self.layers()])
 
     def add_data(self, path: PathLike, name: Optional[str] = None, **params: Any) -> Any:
         """Adds a file as a layer, or as a standalone table when it has no geometry.
@@ -661,7 +679,8 @@ class Session(_Api):
         ``Session.describe(id)`` one of them. The dict is positional only, so a command's own
         ``params`` parameter (``gp.run`` has one) can be a keyword:
         ``s.run("gp.run", tool="buffer", params={"input": "Cities", "distance": 100})``.
-        A :class:`Layer` given as a parameter is sent as its name.
+        A :class:`Layer` given as a parameter is sent as its name (a layer of the same name
+        above it is taken instead; layer commands also take ``layer=`` an id).
 
         Args:
             command: The command id, e.g. ``"layer.symbology"`` or ``"gp.run"``.
@@ -699,7 +718,7 @@ class Session(_Api):
             layer: The layer's id.
             selected: Only its selected features.
         """
-        return self._engine.layer_geojson(str(layer), selected)
+        return self._engine.layer_geojson(layer, selected)
 
     # Projects ------------------------------------------------------------------------------
 

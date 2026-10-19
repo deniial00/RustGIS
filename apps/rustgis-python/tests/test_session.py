@@ -7,6 +7,12 @@ import pytest
 import rustgis
 
 
+POINTS = {"type": "FeatureCollection", "features": [
+    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [114.17, 22.3]}, "properties": {"name": "Hong Kong"}},
+    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [113.26, 23.13]}, "properties": {"name": "Guangzhou"}},
+]}
+
+
 @pytest.fixture
 def sample():
     """A session with the World Atlas sample open."""
@@ -186,7 +192,10 @@ def test_the_view(sample):
     assert sample.info()["basemap"] == "paper"
 
 
-POINTS = {"type": "FeatureCollection", "features": [
-    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [114.17, 22.3]}, "properties": {"name": "Hong Kong"}},
-    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [113.26, 23.13]}, "properties": {"name": "Guangzhou"}},
-]}
+
+def test_a_layer_named_like_another_layers_id_reads_its_own_features(sample):
+    cities = sample["Cities"]
+    decoy = sample.add_geojson(POINTS, name=str(cities.id))
+    assert len(cities.to_geojson()["features"]) == cities.count != decoy.count
+    assert decoy.to_geojson()["features"][0]["properties"]["name"] == "Hong Kong"
+    assert True not in sample

@@ -16,6 +16,13 @@ use serde_json::Value;
 
 create_exception!(_rustgis, RustGISError, PyException, "A RustGIS command or file operation failed.");
 
+/// A layer as Python names it: by id (a `Layer` keeps its id), or by name.
+#[derive(FromPyObject)]
+enum LayerRef {
+    Id(u32),
+    Name(String),
+}
+
 /// One RustGIS session: a project with its maps, layers, undo history and selection.
 ///
 /// Usable from any thread (Jupyter delivers a widget's messages on one of its own): every method
@@ -57,14 +64,20 @@ impl Engine {
         Ok(PyBytes::new(py, &png))
     }
 
-    /// Layer `layer` (a name or an id) of the active map as GeoJSON text: its features as they are
+    /// Layer `layer` (an id, or a name: a name that is a number is read as an id after the names) of the active map as GeoJSON text: its features as they are
     /// in memory (a large file read in place holds the features of the last view; run
     /// `layer.loadAll` first for all of them), or only its selected ones when `selected`.
     #[pyo3(signature = (layer, selected=false))]
-    fn layer_geojson(&self, layer: &str, selected: bool) -> PyResult<String> {
+    fn layer_geojson(&self, layer: LayerRef, selected: bool) -> PyResult<String> {
         let map = self.session.map();
-        let found = map.layer_by_name(layer).or_else(|| layer.trim().parse::<u32>().ok().and_then(|id| map.layer(id)));
-        let found = found.ok_or_else(|| RustGISError::new_err(format!("no layer named '{layer}'")))?;
+        let found = match &layer {
+            LayerRef::Id(id) => map.layer(*id).ok_or_else(|| format!("no layer with id {id}")),
+            LayerRef::Name(name) => map
+                .layer_by_name(name)
+                .or_else(|| name.trim().parse::<u32>().ok().and_then(|id| map.layer(id)))
+                .ok_or_else(|| format!("no layer named '{name}'")),
+        };
+        let found = found.map_err(RustGISError::new_err)?;
         if !selected {
             return Ok(rustgis_engine::data::io::to_geojson(&found.dataset).to_string());
         }
