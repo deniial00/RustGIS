@@ -64,9 +64,10 @@ impl Engine {
         Ok(PyBytes::new(py, &png))
     }
 
-    /// Layer `layer` (an id, or a name: a name that is a number is read as an id after the names) of the active map as GeoJSON text: its features as they are
-    /// in memory (a large file read in place holds the features of the last view; run
-    /// `layer.loadAll` first for all of them), or only its selected ones when `selected`.
+    /// Layer `layer` of the active map as GeoJSON text: an id, or a name (a name that is a number
+    /// is read as an id after the names). Its features as they are in memory (a large file read
+    /// in place holds the features of the last view; run `layer.loadAll` first for all of them),
+    /// or only its selected ones when `selected`.
     #[pyo3(signature = (layer, selected=false))]
     fn layer_geojson(&self, layer: LayerRef, selected: bool) -> PyResult<String> {
         let map = self.session.map();
