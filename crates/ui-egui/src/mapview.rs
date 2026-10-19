@@ -629,6 +629,12 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         }
                     }
                 }
+                // The arrival throttle ran against the frame shown before `take`. If this
+                // completion advanced it, never queue that older generation again: doing
+                // so resets the throttle on every completion and keeps the worker busy.
+                if let Some(shown) = app.map.key {
+                    key.tiles = key.tiles.max(shown.tiles);
+                }
                 if !tiled_motion && app.map.camera_moved {
                     app.session.record_extent();
                     app.map.camera_moved = false;
@@ -2772,6 +2778,66 @@ mod picture_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A newer worker frame can finish inside the tile-arrival throttle window. Its
+    /// completion must not schedule the older generation that was displayed at frame start.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_finished_tile_frame_never_queues_an_older_generation() {
+        // The tile cache is process-global; isolate simulated arrivals from other tests.
+        if std::env::var_os("RUSTGIS_TEST_TILE_COMPLETION").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mapview::tests::a_finished_tile_frame_never_queues_an_older_generation", "--nocapture"])
+                .env("RUSTGIS_TEST_TILE_COMPLETION", "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            assert!(stdout.contains("1 passed"), "the isolated test did not run: {stdout}");
+            return;
+        }
+        use rustgis_engine::map::{TileKind, TileLayer};
+        use rustgis_engine::render::rustgis_tiles::cache;
+        let mut app = RustGisApp::with_sample();
+        app.run("project.new", json!({"name": "Tile completion"})).unwrap();
+        app.map.gpu_enabled = false;
+        // Exercise tiled-frame scheduling without network requests or unrelated arrivals.
+        let mut tile = TileLayer::new("Hidden", TileKind::Raster, "https://completion.test/{z}/{x}/{y}.png");
+        tile.visible = false;
+        app.session.map_mut().tiles.push(tile);
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(900.0, 550.0)).with_step_dt(0.01).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state().map.key.is_none() || h.state().map.drawing() {
+            assert!(std::time::Instant::now() < end, "initial frame did not arrive");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            h.step();
+        }
+        let old = h.state().map.key.unwrap();
+        cache::clear();
+        let latest = cache::generation();
+        assert!(latest > old.tiles);
+        let ctx = h.ctx.clone();
+        let time = ctx.input(|i| i.time);
+        let app = h.state_mut();
+        let (w, hgt) = app.map.tex_size;
+        let view = View { width: w, height: hgt, pixels_per_point: 1.0, camera: app.session.map().camera, sky: true };
+        app.map.last_render = time;
+        app.map.tilt_settle.start(&ctx, Key { tiles: latest, ..old }, app.session.map().clone(), view);
+        while h.state().map.key.unwrap().tiles != latest {
+            assert!(std::time::Instant::now() < end, "newer frame did not arrive");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            // Freeze UI time inside the throttle window, regardless of worker speed.
+            h.input_mut().time = Some(time);
+            h.step();
+        }
+        assert!(!h.state().map.drawing(), "accepting a newer frame queued the throttled older generation");
+    }
 
     #[test]
     fn a_globe_visibility_preview_drops_the_old_labels() {
