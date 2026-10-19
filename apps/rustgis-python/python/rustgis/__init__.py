@@ -279,10 +279,10 @@ class Layer:
         return self.session.run("share.exportLayer", params)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Layer) and other.session is self.session and other.id == self.id
+        return isinstance(other, Layer) and other.session._root() is self.session._root() and other.id == self.id
 
     def __hash__(self) -> int:
-        return hash((id(self.session), self.id))
+        return hash((id(self.session._root()), self.id))
 
     def __repr__(self) -> str:
         try:
