@@ -21,6 +21,7 @@ pub mod mvt;
 pub mod nldi;
 pub mod overpass;
 pub mod overture;
+mod picture;
 pub mod pmtiles;
 pub mod portal;
 pub mod remote;
@@ -34,5 +35,5 @@ pub mod style;
 pub mod template;
 pub mod usgis;
 
-pub use draw::{Drawn, Frame, Label, PlacedTiles, Placement, draw, place, place_with_labels};
+pub use draw::{Drawn, Frame, Label, PlacedTiles, Placement, draw, place};
 pub use source::{Kind, Spec};

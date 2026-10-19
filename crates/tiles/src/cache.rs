@@ -171,7 +171,8 @@ pub fn clear() {
     drop(c);
     // Styles, TileJSON documents and PMTiles archives are read again too.
     crate::source::forget();
-    crate::draw::forget();
+    crate::picture::forget();
+    crate::draw::forget_boxes();
     crate::sprite::forget();
     crate::pmtiles::forget();
     crate::mbtiles::forget();

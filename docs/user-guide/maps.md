@@ -340,8 +340,8 @@ until they arrive. Vector tile styles such as OpenFreeMap reuse painted tiles in
 the GPU keeps those pictures as tile textures too, with labels placed separately. Their cache is
 bounded and refreshed when the style, zoom, source data or sprite changes. On the desktop, CPU
 basemap redraws and vector tile preparation run in the background during navigation as well as
-after it settles. Circle styles, blended tile layers, group transparency and very large vector tile overzooms
-use the full-view renderer. GPU Rendering is off by default, and the setting is
+after it settles. Blended tile layers and views too wide for tile pictures use the full-view
+renderer. GPU Rendering is off by default, and the setting is
 remembered across sessions (`ui.map.gpu` is the command; `RUSTGIS_GPU=1` forces it on for
 development). The globe, view effects and the colour-vision simulator always render on the CPU,
 and exports are unaffected — the choice only changes the on-screen flat map. A turned or tilted

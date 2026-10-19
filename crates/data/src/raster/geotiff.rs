@@ -119,7 +119,7 @@ pub(crate) fn cog_geo<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Option<(Cr
         Some(c) => c,
         None if geo.geographic_model => Crs::LonLat,
         None => match geo.unknown_epsg {
-            Some(code) => return Err(err(format!("the coordinate system EPSG:{code} isn't supported"))),
+            Some(code) => return Err(err(super::crs::unusable_epsg(code))),
             None => {
                 return Err(match geo.custom_error {
                     Some(e) => DataError::Format(e),
@@ -1009,7 +1009,7 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
             let degrees = [transform.origin_x, right].iter().all(|x| (-180.0..=180.0).contains(x))
                 && [transform.origin_y, bottom].iter().all(|y| (-90.0..=90.0).contains(y));
             if let Some(code) = geo.unknown_epsg {
-                return Err(err(format!("the coordinate system EPSG:{code} isn't supported")));
+                return Err(err(super::crs::unusable_epsg(code)));
             }
             if let Some(e) = &geo.custom_error
                 && !degrees
@@ -1269,6 +1269,21 @@ mod tests {
         assert_eq!(back.color, ColorHint::Rgb { alpha: false });
         assert_eq!(back.value(2, 1, 0), Some(60.0));
         assert_eq!(back.data_type, "UInt8");
+    }
+
+    /// An Equi7 tile (a Sentinel-1 product on TU Wien's grid, say) names its system by its EPSG
+    /// code, 27707 for South America: read as that system, not refused.
+    #[test]
+    fn an_equi7_tile_is_read() {
+        let gt = GeoTransform { origin_x: 8_400_000.0, origin_y: 5_400_000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let r =
+            Raster::new("e7", 2, 2, vec![vec![1.0, 2.0, 3.0, 4.0]], gt, Crs::from_epsg(27707).unwrap(), None, ColorHint::Gray, "Float32")
+                .unwrap();
+        let back = read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap();
+        assert_eq!(back.crs.epsg(), 27707);
+        // Brasília is in it: about 8,609 km east and 5,356 km north of the grid's corner.
+        let at = back.crs.transformer().unwrap().to_lonlat(rustgis_geom::Coord::new(8608845.8731, 5356292.7056)).unwrap();
+        assert!((at.x + 47.88).abs() < 1e-6 && (at.y + 15.79).abs() < 1e-6, "{at:?}");
     }
 
     #[test]
