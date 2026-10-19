@@ -585,18 +585,33 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // cached flat picture keeps navigation and layer changes responsive while they finish.
     let tiled_flat = !globe_view && cam.bearing == 0.0 && cam.pitch == 0.0 && !app.session.map().tiles.is_empty();
     let settling = (tilted || globe_view || tiled_flat) && !moving && app.ws.playing.is_none();
+    // A moving tiled picture is expensive too: filling a pan gap must not rasterize the
+    // whole basemap on the event thread. Raster-only GPU scenes can still move their quads.
+    let tiled_motion = tiled_flat
+        && moving
+        && app.ws.playing.is_none()
+        && (!gpu_ok
+            || app.map.gpu_frame.as_ref().is_none_or(|f| f.has_images)
+            || app
+                .session
+                .map()
+                .tiles
+                .iter()
+                .any(|t| t.visible && !matches!(t.kind, rustgis_engine::map::TileKind::Raster | rustgis_engine::map::TileKind::Cog)))
+        && cfg!(not(target_arch = "wasm32"));
+    let composing = settling || tiled_motion;
     let mut tilt_draped = tilt_draped;
     // A frame finishing during a new gesture is obsolete. Drain it now so it neither holds
     // the worker slot nor keeps screenshot/idle waiters waiting for a frame we will not show.
-    if !settling && let Some((_, done)) = app.map.tilt_settle.take() {
+    if !composing && let Some((_, done)) = app.map.tilt_settle.take() {
         app.session.map_mut().adopt_caches(&done.map);
     }
-    if settling {
+    if composing {
         let same_view = |a: Key, b: Key| Key { tiles: b.tiles, sources: b.sources, ..a } == b;
         if let Some((k, done)) = app.map.tilt_settle.take() {
             app.session.map_mut().adopt_caches(&done.map);
             // One drawn before tiles or data arrived still shows; the next follows.
-            if same_view(k, key)
+            if (same_view(k, key) || (tiled_motion && k.rev == key.rev && k.size == key.size))
                 && let Some(r) = done.rendered
             {
                 app.map.render_ms = done.ms;
@@ -614,19 +629,31 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         }
                     }
                 }
-                if app.map.camera_moved {
+                if !tiled_motion && app.map.camera_moved {
                     app.session.record_extent();
                     app.map.camera_moved = false;
                 }
             }
         }
-        if app.map.key != Some(key) && !app.map.tilt_settle.busy() {
-            let view = View { width: w, height: h, pixels_per_point: ppp as f64, camera: cam, sky: true };
+        let covered = if gpu_ok && app.map.gpu_frame.as_ref().is_some_and(|f| !f.has_images) {
+            scene_covers(app.map.tex_camera, cam, w, h)
+        } else {
+            tex_rect(app, cam, rect, false).expand(0.5).contains_rect(rect)
+        };
+        let stretch = app.map.tex_camera.res / cam.res;
+        let refresh = !tiled_motion
+            || !covered
+            || app.map.key.is_none_or(|k| k.rev != key.rev || k.size != key.size)
+            || (time - app.map.last_render >= motion_gap(app.map.motion_cost)
+                && (stretch > MOTION_STRETCH || app.map.key.is_some_and(|k| k.tiles != key.tiles)));
+        if app.map.key != Some(key) && refresh && !app.map.tilt_settle.busy() {
+            let span = if tiled_motion && !gpu_ok { GAP_SPAN } else { 1.0 };
+            let view = View { width: w * span, height: h * span, pixels_per_point: ppp as f64, camera: cam, sky: true };
             if tilted {
                 rustgis_engine::render::sync_tilted_view(app.session.map_mut(), &view);
             }
             let backend = if gpu_ok { rustgis_engine::render::Backend::Gpu } else { rustgis_engine::render::Backend::Cpu };
-            app.map.tilt_settle.start_backend(ui.ctx(), key, app.session.map().clone(), view, backend);
+            app.map.tilt_settle.start_backend(ui.ctx(), Key { draft: tiled_motion, ..key }, app.session.map().clone(), view, backend);
         }
         let shown = (app.map.texture.is_some() || app.map.gpu_frame.is_some())
             && app.map.key.is_some_and(|k| same_view(Key { draft: false, ..k }, key));
@@ -638,7 +665,10 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 draped = app.map.drape.prepare(ui.ctx(), app.session.map_mut(), drape_key, tiles, w, h, ppp, time);
             } else if tilted {
                 tilt_draped = app.map.tilt_drape.prepare(ui.ctx(), app.session.map_mut(), drape_key, tiles, w, h, ppp, time);
-            } else if app.map.preview_attempt != Some(key) {
+            } else if app.map.preview_attempt != Some(key)
+                && !tiled_motion
+                && (!tiled_flat || app.map.key.is_none_or(|k| k.rev != key.rev || k.size != key.size))
+            {
                 // A small preview shows a visibility change immediately. The exact frame is
                 // already on its way. Even a failed preview is attempted only once per key.
                 app.map.preview_attempt = Some(key);
@@ -677,6 +707,14 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let has_picture = app.map.texture.is_some() || gpu_picture;
     let cam_only = app.map.key.is_some_and(|k| (Key { cam: k.cam, ..key }) == k);
     let mut fast_engaged = false;
+    if tiled_motion
+        && let (Some(gf), Some(rs)) = (&app.map.gpu_frame, &app.map.render_state)
+        && !gf.has_images
+        && gf.fits(&cam)
+    {
+        gf.set_camera(&rs.queue, &cam);
+        fast_engaged = true;
+    }
     if stale
         && gpu_ok
         && (interacting || app.ws.playing.is_some())
@@ -728,7 +766,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let (vw, vh, vppp) = motion.unwrap_or((w, h, render_ppp));
     if stale
         && !fast_engaged
-        && !settling
+        && !composing
         && !draped
         && !tilt_draped
         && (motion.is_some()

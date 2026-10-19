@@ -164,6 +164,9 @@ fn zooming_a_planet_with_raster_tiles_reuses_the_gpu_frame() {
     h.state_mut().map.invalidate();
     h.input_mut().events.push(egui::Event::PointerMoved(from + egui::vec2(16.0, 0.0)));
     h.step();
+    // Filling a tiled pan gap is asynchronous too: the old CPU preview stays responsive
+    // until the first GPU scene is ready.
+    wait_for_frame(&mut h);
     assert_gpu_picture_matches_cpu(&mut h);
 }
 

@@ -20,6 +20,12 @@ use crate::sprite::{self, Load, Sprite};
 use crate::style::{FeatureCtx, LayerKind, Rgba, Source, StyleLayer, Val};
 use crate::template::{self, Placed, TileId};
 
+mod painted;
+
+pub(crate) fn forget() {
+    painted::forget();
+}
+
 /// Where the pixmap is: the Web Mercator point at its top-left corner and the metres per
 /// (device) pixel, with the device pixels per logical point.
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +98,18 @@ struct Item {
 
 /// Draws `spec` into `pm` at `opacity`. Labels are collected when `labels` is set.
 pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: bool) -> Drawn {
+    let view = frame.extent(pm.width(), pm.height());
+    if let Some(p) = place_with_labels(spec, opacity, frame, &view, &view, labels.then_some((pm.width(), pm.height()))) {
+        for tile in &p.tiles {
+            draw_placed(pm, tile, frame);
+        }
+        return Drawn { labels: p.labels, attribution: p.attribution, pending: p.pending, error: p.error };
+    }
+    draw_uncached(pm, spec, opacity, frame, labels)
+}
+
+// The exact vector path remains available for very large overzooms and group opacity.
+fn draw_uncached(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: bool) -> Drawn {
     let mut out = Drawn::default();
     let r = match resolve(spec) {
         Resolve::Ready(r) => r,
@@ -189,7 +207,7 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
     out
 }
 
-/// One raster tile placed on the map, for a renderer that draws each tile itself (the GPU map
+/// One raster or painted vector tile placed on the map, for a renderer that draws each tile itself (the GPU map
 /// keeps a texture per tile picture and moves the tiles with the camera, as MapLibre does).
 #[derive(Clone)]
 pub struct Placement {
@@ -203,19 +221,33 @@ pub struct Placement {
     pub opacity: f32,
 }
 
-/// A raster tile layer as placed tiles, bottom first, rather than drawn into a pixmap.
+/// A tile layer as placed pictures, bottom first, with its separate symbol candidates.
 #[derive(Default)]
 pub struct PlacedTiles {
     pub tiles: Vec<Placement>,
+    pub labels: Vec<Label>,
     pub attribution: Vec<String>,
     pub pending: bool,
     pub error: Option<String>,
 }
 
-/// `spec` as placed raster tiles over `view` (fetching those missing) and out to `reach` (only
+/// `spec` as placed raster or painted vector tiles over `view` (fetching those missing) and out to `reach` (only
 /// those already in the cache, so a camera moving there finds tiles to show), or `None` when it
-/// draws anything but raster tiles, which [`draw`] then draws into a pixmap.
+/// group opacity or a very large overzoom needs the exact vector path instead.
 pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Extent) -> Option<PlacedTiles> {
+    place_with_labels(spec, opacity, frame, view, reach, None)
+}
+
+/// As [`place`], with symbol candidates for a `(width, height)` device-pixel viewport.
+/// Labels stay separate from tile pictures so their placement and size survive navigation.
+pub fn place_with_labels(
+    spec: &Spec,
+    opacity: f32,
+    frame: &Frame,
+    view: &Extent,
+    reach: &Extent,
+    labels: Option<(u32, u32)>,
+) -> Option<PlacedTiles> {
     let mut out = PlacedTiles::default();
     let r = match resolve(spec) {
         Resolve::Ready(r) => r,
@@ -234,25 +266,112 @@ pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Ex
     }
     let zoom = template::style_zoom(frame.m_per_px * f64::from(frame.ppp));
     let shown: Vec<&StyleLayer> = r.style.layers.iter().filter(|l| l.visible_at(zoom) && l.kind != LayerKind::Other).collect();
-    // Raster layers only; several are composited together before the layer's opacity applies.
-    if shown.iter().any(|l| l.kind != LayerKind::Raster) || (shown.len() > 1 && opacity < 0.999) {
+    // Several overlapping style layers must be composited before group opacity applies.
+    // Circles may cross tile boundaries without being duplicated in their neighbours:
+    // preserve those marks with the original vector path.
+    if (shown.len() > 1 && opacity < 0.999) || shown.iter().any(|l| l.kind == LayerKind::Circle) {
         return None;
     }
+    let needs_sprite = shown.iter().any(|l| pattern(l).is_some() || (labels.is_some() && l.has_layout("icon-image")));
+    let sheet = if needs_sprite {
+        match r.sprite.as_deref().map(|b| sprite::load(b, frame.ppp >= 1.5)) {
+            Some(Load::Ready(s)) => Some(s),
+            Some(Load::Pending) => {
+                out.pending = true;
+                None
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let mut items: HashMap<&str, Vec<Item>> = HashMap::new();
-    for layer in shown {
+    let mut i = 0;
+    while let Some(layer) = r.style.layers.get(i) {
+        let start = i;
+        i += 1;
+        if !layer.visible_at(zoom) || layer.kind == LayerKind::Other {
+            continue;
+        }
+        if layer.kind == LayerKind::Background {
+            if let Some(c) = layer.background_color(zoom) {
+                let mut pm = Pixmap::new(1, 1)?;
+                pm.fill(color(c, layer.background_opacity(zoom)));
+                out.tiles.push(Placement { picture: Arc::new(Payload::Image(pm)), at: *reach, clip: *reach, opacity });
+            }
+            continue;
+        }
         let Some(src_id) = layer.source.as_deref() else { continue };
         if !items.contains_key(src_id) {
             let Some(src) = r.style.sources.iter().find(|s| s.0 == src_id).map(|s| &s.1) else { continue };
             items.insert(src_id, tiles_in(src, view, Some(reach), frame, zoom, &mut out.pending));
         }
-        let o = (layer.raster_opacity(zoom) * opacity).clamp(0.0, 1.0);
-        for it in items.get(src_id).into_iter().flatten() {
-            if matches!(*it.payload, Payload::Image(_)) {
-                out.tiles.push(Placement { picture: it.payload.clone(), at: it.at, clip: it.clip, opacity: o });
+        let list = items.get(src_id)?;
+        if layer.kind == LayerKind::Symbol {
+            if let Some((w, h)) = labels {
+                for it in list {
+                    collect_labels(&mut out.labels, it, layer, frame, zoom, placement_rank(start), sheet.as_deref(), (w as f32, h as f32));
+                }
             }
+            continue;
+        }
+        if layer.kind == LayerKind::Raster {
+            let o = (layer.raster_opacity(zoom) * opacity).clamp(0.0, 1.0);
+            for it in list {
+                if matches!(*it.payload, Payload::Image(_)) {
+                    out.tiles.push(Placement { picture: it.payload.clone(), at: it.at, clip: it.clip, opacity: o });
+                }
+            }
+            continue;
+        }
+        // Consecutive geometry layers of one source paint into one reusable picture per
+        // tile. Raster layers, backgrounds and other sources retain their exact z-order.
+        while let Some(next) = r.style.layers.get(i) {
+            if next.visible_at(zoom)
+                && next.kind != LayerKind::Other
+                && (next.kind == LayerKind::Symbol
+                    || next.kind == LayerKind::Background
+                    || next.kind == LayerKind::Raster
+                    || next.source.as_deref() != Some(src_id))
+            {
+                break;
+            }
+            i += 1;
+        }
+        for it in list {
+            if !matches!(&*it.payload, Payload::Vector(_)) {
+                continue;
+            }
+            let picture = painted::tile(&r, it, start..i, frame, zoom, sheet.as_ref())?;
+            out.tiles.push(Placement { picture, at: it.at, clip: it.clip, opacity });
         }
     }
     Some(out)
+}
+
+/// Blits a placed picture; shared tile edges are rounded once, without antialiasing seams.
+fn draw_placed(pm: &mut Pixmap, tile: &Placement, frame: &Frame) {
+    let Payload::Image(img) = &*tile.picture else { return };
+    let (x0, y0) = frame.px(tile.at.min_x, tile.at.max_y);
+    let (x1, y1) = frame.px(tile.at.max_x, tile.at.min_y);
+    let (cx0, cy0) = frame.px(tile.clip.min_x, tile.clip.max_y);
+    let (cx1, cy1) = frame.px(tile.clip.max_x, tile.clip.min_y);
+    let Some(clip) = Rect::from_ltrb(
+        cx0.round().max(0.0),
+        cy0.round().max(0.0),
+        cx1.round().min(pm.width() as f32),
+        cy1.round().min(pm.height() as f32),
+    ) else {
+        return;
+    };
+    let (sx, sy) = ((x1 - x0) / img.width().max(1) as f32, (y1 - y0) / img.height().max(1) as f32);
+    if !(sx.is_finite() && sy.is_finite() && sx > 0.0 && sy > 0.0) {
+        return;
+    }
+    let quality = if (sx - 1.0).abs() < 0.01 && (sy - 1.0).abs() < 0.01 { FilterQuality::Nearest } else { FilterQuality::Bilinear };
+    let shader =
+        Pattern::new(img.as_ref(), SpreadMode::Pad, quality, tile.opacity.clamp(0.0, 1.0), Transform::from_row(sx, 0.0, 0.0, sy, x0, y0));
+    pm.fill_rect(clip, &Paint { shader, anti_alias: false, ..Paint::default() }, Transform::identity(), None);
 }
 
 /// A vector tile feature under a point (see [`pick`]).
@@ -714,6 +833,11 @@ fn collect_labels(
     let to = to_px(it, l.extent, frame);
     let ppp = frame.ppp.max(0.1);
     for f in l.features.iter().filter(|f| f.kind == GeomKind::Point) {
+        let Some(pt) = f.geometry.first().and_then(|g| g.first()) else { continue };
+        let (x, y) = to(pt);
+        if !inside(x, y, bounds) {
+            continue;
+        }
         let ctx = FeatureCtx { zoom, kind: f.kind, id: f.id, props: &f.props };
         if !layer.matches(&ctx) {
             continue;
@@ -722,11 +846,6 @@ fn collect_labels(
         let text = layer.text_field(&ctx).map(|t| t.trim().to_string()).unwrap_or_default();
         let icon = sheet.and_then(|s| icon(s, layer, &ctx));
         if text.is_empty() && icon.is_none() {
-            continue;
-        }
-        let Some(pt) = f.geometry.first().and_then(|g| g.first()) else { continue };
-        let (x, y) = to(pt);
-        if !inside(x, y, bounds) {
             continue;
         }
         let size = layer.text_size(&ctx).clamp(4.0, 64.0);
@@ -979,6 +1098,122 @@ mod tests {
     fn world_frame() -> Frame {
         let half = crate::template::HALF_WORLD;
         Frame { left: -half, top: half, m_per_px: 2.0 * half / 64.0, ppp: 1.0 }
+    }
+
+    #[test]
+    fn painted_tiles_reuse_geometry_across_pans_clips_and_previews() {
+        let r = Arc::new(crate::source::Resolved {
+            style: crate::style::Style::parse(&serde_json::json!({"version": 8, "sources": {}, "layers": [
+                {"id": "fill", "type": "fill", "source-layer": "l", "paint": {"fill-color": "#c03020"}},
+                {"id": "line", "type": "line", "source-layer": "l", "paint": {"line-color": "#ffffff", "line-width": 2}}
+            ]}))
+            .unwrap(),
+            sprite: None,
+            attribution: vec![],
+        });
+        let mut it = item(vec![crate::mvt::Feature {
+            id: None,
+            kind: GeomKind::Polygon,
+            geometry: vec![vec![[100.0, 100.0], [3900.0, 100.0], [3900.0, 3900.0], [100.0, 3900.0], [100.0, 100.0]]],
+            props: vec![],
+        }]);
+        let frame = world_frame();
+        let first = painted::tile(&r, &it, 0..2, &frame, 0.0, None).unwrap();
+        let Payload::Image(picture) = &*first else { panic!("picture") };
+        let mut exact = Pixmap::new(64, 64).unwrap();
+        for l in &r.style.layers {
+            draw_vector(&mut exact, &it, l, &frame, 0.0, None);
+        }
+        assert_eq!(picture.data(), exact.data(), "tile painting preserves style order and antialiasing");
+        it.clip.max_x = it.at.center().x;
+        let pan = Frame { left: frame.left + frame.m_per_px * 3.0, ..frame };
+        let next = painted::tile(&r, &it, 0..2, &pan, 0.0, None).unwrap();
+        assert!(Arc::ptr_eq(&first, &next), "a shifted view and a clipped parent reuse the same complete tile");
+        let retina = Frame { m_per_px: frame.m_per_px / 2.0, ppp: 2.0, ..frame };
+        let sharp = painted::tile(&r, &it, 0..2, &retina, 0.0, None).unwrap();
+        assert!(!Arc::ptr_eq(&first, &sharp), "higher density upgrades the painting");
+        let preview = painted::tile(&r, &it, 0..2, &frame, 0.0, None).unwrap();
+        assert!(Arc::ptr_eq(&sharp, &preview), "previews reuse the sharper painting");
+        let zoom = painted::tile(&r, &it, 0..2, &frame, 0.5, None).unwrap();
+        assert!(!Arc::ptr_eq(&sharp, &zoom), "zoom-dependent paint is refreshed");
+        let changed = Arc::new(crate::source::Resolved { style: r.style.clone(), sprite: None, attribution: vec![] });
+        assert!(
+            !Arc::ptr_eq(&preview, &painted::tile(&changed, &it, 0..2, &frame, 0.0, None).unwrap()),
+            "another style never reuses an old painting"
+        );
+        let overzoom = Frame { m_per_px: frame.m_per_px / 100.0, ..frame };
+        assert!(painted::tile(&r, &it, 0..2, &overzoom, 0.0, None).is_none(), "large overzooms keep the exact vector path");
+    }
+
+    #[test]
+    fn painted_patterns_refresh_when_the_sprite_arrives() {
+        let r = Arc::new(crate::source::Resolved {
+            style: crate::style::Style::parse(&serde_json::json!({"version": 8, "sources": {}, "layers": [
+                {"id": "pattern", "type": "fill", "source-layer": "l", "paint": {"fill-pattern": "red"}}
+            ]}))
+            .unwrap(),
+            sprite: None,
+            attribution: vec![],
+        });
+        let it = item(vec![crate::mvt::Feature {
+            id: None,
+            kind: GeomKind::Polygon,
+            props: vec![],
+            geometry: vec![vec![[0.0, 0.0], [4096.0, 0.0], [4096.0, 4096.0], [0.0, 4096.0], [0.0, 0.0]]],
+        }]);
+        let frame = world_frame();
+        let missing = painted::tile(&r, &it, 0..1, &frame, 0.0, None).unwrap();
+        let sheet = Arc::new(sheet());
+        let ready = painted::tile(&r, &it, 0..1, &frame, 0.0, Some(&sheet)).unwrap();
+        let Payload::Image(a) = &*missing else { panic!("picture") };
+        let Payload::Image(b) = &*ready else { panic!("picture") };
+        assert_eq!(a.pixel(32, 32).unwrap().alpha(), 0);
+        assert_eq!(b.pixel(32, 32).unwrap().red(), 255);
+        assert!(Arc::ptr_eq(&ready, &painted::tile(&r, &it, 0..1, &frame, 0.0, Some(&sheet)).unwrap()));
+    }
+
+    #[test]
+    fn painted_tiles_keep_buffered_strokes_at_their_edges() {
+        let r = Arc::new(crate::source::Resolved {
+            style: crate::style::Style::parse(&serde_json::json!({"version": 8, "sources": {}, "layers": [
+                {"id": "road", "type": "line", "source-layer": "l", "paint": {"line-color": "#ff0000", "line-width": 4}}
+            ]}))
+            .unwrap(),
+            sprite: None,
+            attribution: vec![],
+        });
+        // MVT buffers include a neighbouring road whose centreline is just outside this
+        // tile: its stroke still covers pixels inside the tile, keeping the road seamless.
+        let it = item(vec![crate::mvt::Feature {
+            id: None,
+            kind: GeomKind::LineString,
+            props: vec![],
+            geometry: vec![vec![[-16.0, 500.0], [-16.0, 3500.0]]],
+        }]);
+        let picture = painted::tile(&r, &it, 0..1, &world_frame(), 0.0, None).unwrap();
+        let Payload::Image(pm) = &*picture else { panic!("picture") };
+        assert!(pm.pixel(0, 32).unwrap().red() > 200, "buffered strokes must reach the tile edge");
+    }
+
+    #[test]
+    fn painted_circle_styles_keep_the_exact_path_for_marks_crossing_tile_edges() {
+        let spec = Spec {
+            kind: crate::Kind::Vector,
+            url: "https://circle.test/{z}/{x}/{y}.pbf".into(),
+            subdomains: vec![],
+            min_zoom: 0,
+            max_zoom: 14,
+            tile_size: 512,
+            tms: false,
+            attribution: String::new(),
+            layers: vec![],
+            style_layers: serde_json::json!([{"id": "points", "type": "circle", "source-layer": "l",
+                "paint": {"circle-radius": 10, "circle-color": "#ff0000"}}])
+            .to_string(),
+        };
+        let frame = world_frame();
+        let view = frame.extent(64, 64);
+        assert!(place(&spec, 1.0, &frame, &view, &view).is_none(), "circles can extend into neighbours without duplicated features there");
     }
 
     #[test]

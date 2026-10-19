@@ -64,8 +64,8 @@ pub fn style_view(t: &TileLayer) -> Result<Option<rustgis_tiles::style::StyleVie
     }
 }
 
-/// Where a GPU scene's tile layers go: raster tile layers as [`DrawCmd::Tiles`] in `cmds`,
-/// anything else drawn into the accumulator pixmap (`dirty` then set), which is flushed to `cmds`
+/// Where a GPU scene's tile layers go: reusable pictures as [`DrawCmd::Tiles`] in `cmds`,
+/// unsupported styles drawn into the accumulator pixmap (`dirty` then set), which is flushed to `cmds`
 /// first so the layers keep their order.
 pub(crate) struct Gpu<'a> {
     pub cmds: &'a mut Vec<DrawCmd>,
@@ -73,7 +73,7 @@ pub(crate) struct Gpu<'a> {
 }
 
 /// Draws the map's visible tile layers, bottom first. With `gpu`, on the flat Web Mercator map,
-/// raster tile layers are placed as tiles for the GPU instead.
+/// raster and painted vector tiles are placed as pictures for the GPU instead.
 pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels: bool, mut gpu: Option<Gpu<'_>>) -> TileOutput {
     let mut out = TileOutput::default();
     let layers: Vec<&TileLayer> = map.tiles.iter().rev().filter(|t| t.visible && t.opacity > 0.0).collect();
@@ -145,7 +145,14 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
         for t in layers {
             if let Some(g) = gpu.as_mut()
                 && t.blend == Blend::Normal
-                && let Some(p) = rustgis_tiles::place(&spec(t), t.opacity, &frame, &fetch, &reach)
+                && let Some(p) = rustgis_tiles::place_with_labels(
+                    &spec(t),
+                    t.opacity,
+                    &frame,
+                    &fetch,
+                    &reach,
+                    labels.then_some((pm.width(), pm.height())),
+                )
             {
                 // What the accumulator holds goes first, under the tiles; with no room for a new
                 // accumulator the layer is drawn into this one instead.
@@ -154,7 +161,7 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
                     if !p.tiles.is_empty() {
                         g.cmds.push(DrawCmd::Tiles { origin, tiles: p.tiles.iter().map(|q| quad(q, origin)).collect() });
                     }
-                    let d = rustgis_tiles::Drawn { labels: Vec::new(), attribution: p.attribution, pending: p.pending, error: p.error };
+                    let d = rustgis_tiles::Drawn { labels: p.labels, attribution: p.attribution, pending: p.pending, error: p.error };
                     collect(d, &t.name, &mut out);
                     continue;
                 }
@@ -528,7 +535,7 @@ mod tests {
             DrawCmd::Image { .. } => false,
             _ => true,
         }));
-        // Blended, or a style that draws more than raster tiles: still a picture.
+        // Blended tiles still use a picture of the view.
         m.tiles[0].opacity = 1.0;
         m.tiles[0].blend = rustgis_map::effects::Blend::Multiply;
         let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &view, Backend::Gpu) else { panic!("a gpu scene") };
@@ -539,8 +546,12 @@ mod tests {
         crate::render_complete(&mut m, &view).unwrap();
         let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &view, Backend::Gpu) else { panic!("a gpu scene") };
         let kinds: Vec<bool> = scene.cmds.iter().map(|c| matches!(c, DrawCmd::Tiles { .. })).collect();
-        // The red tiles under the style's picture, in order.
-        assert_eq!(kinds, [true, false], "{kinds:?}");
+        // Both layers now use tiles; the style's solid background still covers the red
+        // raster layer, in exactly the same drawing order.
+        assert_eq!(kinds, [true, true], "{kinds:?}");
+        let Some(DrawCmd::Tiles { tiles, .. }) = scene.cmds.last() else { panic!("style tiles") };
+        let p = tiles.first().and_then(|q| q.pixmap()).and_then(|pm| pm.pixel(0, 0)).unwrap();
+        assert_eq!([p.red(), p.green(), p.blue()], [0x20, 0x50, 0xe0]);
     }
 
     /// A tile on its way is stood in for by its children already in the cache, which are sharper,

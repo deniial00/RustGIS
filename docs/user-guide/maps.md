@@ -336,8 +336,12 @@ large datasets. Raster tile layers (XYZ, TMS and WMS tiles, and raster PMTiles, 
 styles) are drawn there as one texture per tile, moved with the camera like the vector layers,
 rather than as a picture of the view stretched until the map settles; zoomed in a little past the
 tiles' own zoom, the next zoom's tiles are placed, their parents and cached children standing in
-until they arrive. Vector tile styles and blended tile layers are still drawn as a picture of the
-view, shifted and scaled while the map moves. GPU Rendering is off by default, and the setting is
+until they arrive. Vector tile styles such as OpenFreeMap reuse painted tiles in both renderers;
+the GPU keeps those pictures as tile textures too, with labels placed separately. Their cache is
+bounded and refreshed when the style, zoom, source data or sprite changes. On the desktop, CPU
+basemap redraws and vector tile preparation run in the background during navigation as well as
+after it settles. Circle styles, blended tile layers, group transparency and very large vector tile overzooms
+use the full-view renderer. GPU Rendering is off by default, and the setting is
 remembered across sessions (`ui.map.gpu` is the command; `RUSTGIS_GPU=1` forces it on for
 development). The globe, view effects and the colour-vision simulator always render on the CPU,
 and exports are unaffected — the choice only changes the on-screen flat map. A turned or tilted
