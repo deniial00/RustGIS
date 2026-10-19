@@ -647,13 +647,17 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             tex_rect(app, cam, rect, false).expand(0.5).contains_rect(rect)
         };
         let stretch = app.map.tex_camera.res / cam.res;
+        // One worker already bounds the amount of background work. The synchronous
+        // renderer's cost-based delay would leave it idle after every completion, and
+        // zooming out needs refinement just as zooming in does.
         let refresh = !tiled_motion
             || !covered
-            || app.map.key.is_none_or(|k| k.rev != key.rev || k.size != key.size)
-            || (time - app.map.last_render >= motion_gap(app.map.motion_cost)
-                && (stretch > MOTION_STRETCH || app.map.key.is_some_and(|k| k.tiles != key.tiles)));
+            || app.map.key.is_none_or(|k| k.rev != key.rev || k.size != key.size || k.sources != key.sources || k.tiles != key.tiles)
+            || !(1.0 / MOTION_STRETCH..=MOTION_STRETCH).contains(&stretch);
         if app.map.key != Some(key) && refresh && !app.map.tilt_settle.busy() {
-            let span = if tiled_motion && !gpu_ok { GAP_SPAN } else { 1.0 };
+            // Overscan buys room for panning at the same scale. During zoom it makes
+            // every newly rasterized view 2.25 times as large, delaying fresh detail.
+            let span = if tiled_motion && !gpu_ok && app.map.tex_camera.res == cam.res { GAP_SPAN } else { 1.0 };
             let view = View { width: w * span, height: h * span, pixels_per_point: ppp as f64, camera: cam, sky: true };
             if tilted {
                 rustgis_engine::render::sync_tilted_view(app.session.map_mut(), &view);
@@ -2837,6 +2841,58 @@ mod tests {
             h.step();
         }
         assert!(!h.state().map.drawing(), "accepting a newer frame queued the throttled older generation");
+    }
+
+    /// A background frame finishing mid-zoom must hand the worker straight to the latest
+    /// camera. The delay used for synchronous redraws leaves zoomed content visibly stale.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_finished_navigation_frame_immediately_refines_the_current_zoom() {
+        use rustgis_engine::map::{TileKind, TileLayer};
+        let mut app = RustGisApp::with_sample();
+        app.run("project.new", json!({"name": "Zoom refresh"})).unwrap();
+        app.map.gpu_enabled = false;
+        let mut tile = TileLayer::new("Hidden", TileKind::Raster, "https://zoom.test/{z}/{x}/{y}.png");
+        tile.visible = false;
+        app.session.map_mut().tiles.push(tile);
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(900.0, 550.0)).with_step_dt(0.01).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state().map.key.is_none() || h.state().map.drawing() {
+            assert!(std::time::Instant::now() < end, "initial frame did not arrive");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            h.step();
+        }
+        let key = h.state().map.key.unwrap();
+        let ctx = h.ctx.clone();
+        let time = ctx.input(|i| i.time);
+        let app = h.state_mut();
+        let (w, hgt) = app.map.tex_size;
+        let view = View { width: w, height: hgt, pixels_per_point: 1.0, camera: app.session.map().camera, sky: true };
+        app.session.map_mut().camera.res /= 1.3;
+        app.map.last_interaction = time;
+        app.map.tilt_settle.start(&ctx, Key { draft: true, ..key }, app.session.map().clone(), view);
+        while !h.state().map.key.unwrap().draft {
+            assert!(std::time::Instant::now() < end, "moving frame did not arrive");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            h.input_mut().time = Some(time);
+            h.step();
+        }
+        assert!(h.state().map.drawing(), "worker stayed idle while the current zoom needed refinement");
+        let (_, done) = loop {
+            if let Some(done) = h.state_mut().map.tilt_settle.take() {
+                break done;
+            }
+            assert!(std::time::Instant::now() < end, "zoom refinement did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert_eq!(done.view.camera, h.state().session.map().camera);
+        assert_eq!((done.view.width, done.view.height), h.state().session.view_size, "zoom must not paint pan overscan");
     }
 
     #[test]
