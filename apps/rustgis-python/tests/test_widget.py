@@ -76,3 +76,13 @@ def test_add_data_parameters_can_override_the_file_name(tmp_path):
     m = rustgis.Map()
     m.add_data(path, name="Renamed", fileName="other.geojson")
     assert [layer["name"] for layer in m.layers()] == ["Renamed"]
+
+
+def test_layers_of_a_map_change_the_app():
+    m = rustgis.Map()
+    sites = m.add_geojson(POINT, name="Sites")
+    assert sites.session is m and m["Sites"] == sites
+    before = m._project
+    sites.rename("Places")
+    assert m._project != before and "Places" in m._project
+    assert m.layer_names() == ["Places"]

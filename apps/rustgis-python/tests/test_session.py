@@ -111,3 +111,82 @@ def test_project_json_reopens_as_the_same_project():
     other = rustgis.Session()
     other.run("project.openText", text=s.project_json())
     assert [layer["name"] for layer in other.layers()] == [layer["name"] for layer in s.layers()]
+
+
+def test_layers_by_name_and_id(sample):
+    cities = sample["Cities"]
+    assert cities == sample.layer(cities.id) == sample["cities"]
+    assert cities.type == "Point" and cities.count > 200 and "pop_max" in cities.fields
+    west, south, east, north = cities.bounds
+    assert west < east and south < north
+    assert "Cities" in sample and cities in sample and "No such layer" not in sample
+    assert [layer.name for layer in sample] == sample.layer_names()
+    with pytest.raises(KeyError):
+        sample["No such layer"]
+
+
+def test_a_layer_is_the_same_after_a_rename(sample):
+    cities = sample["Cities"]
+    cities.rename("Towns")
+    assert cities.name == "Towns" and "Cities" not in sample
+    cities.visible = False
+    assert not cities.visible and not sample["Towns"].info["visible"]
+    cities.remove()
+    assert "Towns" not in sample
+    with pytest.raises(rustgis.RustGISError):
+        cities.name
+    assert "removed" in repr(cities)
+
+
+def test_styling_filtering_and_selection(sample):
+    countries = sample["Countries"].style("graduated", field="pop_est", classes=5)
+    assert "Graduated" in countries.info["renderer"]
+    cities = sample["Cities"]
+    n = cities.select("pop_max > 10000000")
+    assert n == cities.selected > 0
+    selected = cities.to_geojson(selected=True)["features"]
+    assert len(selected) == n and all(f["properties"]["pop_max"] > 10_000_000 for f in selected)
+    cities.clear_selection()
+    assert cities.selected == 0 and cities.to_geojson(selected=True)["features"] == []
+    cities.filter("pop_max > 10000000")
+    assert cities.info["definitionQuery"]
+    cities.filter(None)
+    assert not cities.info["definitionQuery"]
+
+
+def test_run_tool_returns_its_layer(sample):
+    buffers = sample.run_tool("buffer", input=sample["Cities"], distance=100)
+    assert isinstance(buffers, rustgis.Layer) and buffers.type == "Polygon"
+    assert buffers.count == sample["Cities"].count
+    assert sample.describe("buffer")["name"] == "Buffer"
+    assert "params" in sample.describe("layer.symbology")
+    with pytest.raises(KeyError):
+        sample.describe("no.such.thing")
+
+
+def test_adding_data_returns_the_layer(sample, tmp_path):
+    sites = sample.add_geojson(POINTS, name="Sites")
+    assert isinstance(sites, rustgis.Layer) and sites.name == "Sites" and sites.count == 2
+    out = tmp_path / "sites.gpkg"
+    sites.to_file(out)
+    again = sample.add_data(out, name="Again")
+    assert again.count == 2 and again.name == "Again"
+    sample.remove_layer("Again")
+    assert "Again" not in sample
+
+
+def test_the_view(sample):
+    sample.zoom_to(sample["Cities"])
+    sample.zoom_to((0, 0, 10, 10))
+    west, south, east, north = sample.bounds
+    assert west <= 0 and east >= 10 and south <= 0 and north >= 10
+    sample.set_center(114.17, 22.3, scale=1_000_000)
+    assert abs(sample.info()["center"]["lon"] - 114.17) < 0.01
+    sample.set_basemap("paper")
+    assert sample.info()["basemap"] == "paper"
+
+
+POINTS = {"type": "FeatureCollection", "features": [
+    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [114.17, 22.3]}, "properties": {"name": "Hong Kong"}},
+    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [113.26, 23.13]}, "properties": {"name": "Guangzhou"}},
+]}

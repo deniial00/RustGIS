@@ -17,7 +17,7 @@ from urllib.parse import quote
 import anywidget
 import traitlets
 
-from . import Layer, PathLike, RustGISError, Session
+from . import PathLike, RustGISError, Session, _Api
 
 #: The web app the widget shows; ``RUSTGIS_WEB_URL`` points it at another build (a local
 #: ``trunk serve``, a self-hosted copy).
@@ -35,8 +35,11 @@ _EMBEDDABLE = {
 }
 
 
-class Map(anywidget.AnyWidget):
+class Map(anywidget.AnyWidget, _Api):
     """The RustGIS app in a notebook cell, driven from Python.
+
+    It has the methods of :class:`~rustgis.Session` (``run``, ``run_tool``, ``add_data``,
+    ``m["Cities"]``...); what they change shows in the app.
 
     Args:
         session: The session to show; a new one when left out.
@@ -49,7 +52,7 @@ class Map(anywidget.AnyWidget):
 
     Example:
         >>> m = rustgis.Map(sample=True)
-        >>> m.run("layer.symbology", layer="Countries", type="graduated", field="pop_est")
+        >>> m["Countries"].style("graduated", field="pop_est")
         >>> m
     """
 
@@ -126,14 +129,6 @@ class Map(anywidget.AnyWidget):
         merged.update(kwargs)
         self.send({"type": "run", "command": command, "params": merged})
 
-    def commands(self) -> List[Dict[str, Any]]:
-        """Every command: its id, label, ribbon location and parameters."""
-        return self._session.commands()
-
-    def tools(self) -> Any:
-        """The geoprocessing tools, with their parameters."""
-        return self._session.tools()
-
     def notices(self) -> List[Tuple[str, bool]]:
         """What the session and the app have reported since the last call.
 
@@ -144,125 +139,33 @@ class Map(anywidget.AnyWidget):
             held, self._held = self._held, []
         return held + self._session.notices()
 
-    def undo(self) -> Any:
-        """Undoes the last change made from Python."""
-        return self.run("edit.undo")
-
-    def redo(self) -> Any:
-        """Redoes the last undone change."""
-        return self.run("edit.redo")
-
-    # Projects ------------------------------------------------------------------------------
-
-    def load_project(self, path: PathLike) -> Any:
-        """Opens a project file (``.rgis``), replacing the current project.
+    def _query(self, command: str, /, **params: Any) -> Any:
+        """Runs a command that only reads the project, without showing anything in the app.
 
         Args:
-            path: The project file.
+            command: The command id.
+            **params: Its parameters.
         """
-        return self.run("project.open", path=os.fspath(path))
+        return self._session.run(command, **params)
 
-    def save(self, path: PathLike) -> Any:
-        """Saves the project, with what was done in the app, to ``path`` (``.rgis``).
+    def _layer_geojson(self, layer: int, selected: bool) -> str:
+        """A layer as GeoJSON text.
 
         Args:
-            path: Where to save.
+            layer: The layer's id.
+            selected: Only its selected features.
         """
-        return self.run("project.saveAs", path=os.fspath(path))
+        return self._session._layer_geojson(layer, selected)
 
-    def info(self) -> Dict[str, Any]:
-        """The project's summary: the active map, basemap, view and layers."""
-        return self._session.info()
-
-    # Layers --------------------------------------------------------------------------------
-
-    def layers(self) -> List[Dict[str, Any]]:
-        """The active map's layers, top first."""
-        return self._session.layers()
-
-    def layer(self, name: str) -> Layer:
-        """Layer ``name`` of the active map.
+    def _data_command(self, path: PathLike) -> Tuple[str, Dict[str, Any]]:
+        """The command adding a file: a file of up to 2 MB travels with the project, so the app
+        shows it too; a larger one is read from its path, which only Python can see: it draws in
+        :meth:`to_png` but not in the app.
 
         Args:
-            name: The layer's name (or its id, as text).
+            path: The file.
         """
-        return self._session.layer(name)
-
-    def add_data(self, path: PathLike, name: Optional[str] = None, **params: Any) -> Any:
-        """Adds a file as a layer.
-
-        A file of up to 2 MB travels with the project, so the app shows it too; a larger one is
-        read from its path, which only Python can see: it draws in :meth:`to_png` but not in the
-        app.
-
-        Args:
-            path: The file (GeoJSON, CSV, Shapefile, GeoPackage, GeoParquet, GeoTIFF, ...).
-            name: The layer's name (the file's name when left out).
-            **params: More ``layer.addData`` parameters.
-        """
-        command, args = _data_args(path)
-        if name is not None:
-            params["name"] = name
-        return self.run(command, {**args, **params})
-
-    def add_geojson(self, data: Union[Dict[str, Any], str, PathLike], name: str = "GeoJSON") -> Any:
-        """Adds GeoJSON as a layer.
-
-        Args:
-            data: A GeoJSON dict, GeoJSON text, or the path of a GeoJSON file.
-            name: The layer's name.
-        """
-        try:
-            return self._session.add_geojson(data, name=name)
-        finally:
-            self._push()
-
-    def add_geopandas(self, gdf: Any, name: str = "GeoDataFrame") -> Any:
-        """Adds a ``geopandas.GeoDataFrame`` as a layer.
-
-        Args:
-            gdf: The GeoDataFrame.
-            name: The layer's name.
-        """
-        try:
-            return self._session.add_geopandas(gdf, name=name)
-        finally:
-            self._push()
-
-    def add_tiles(self, url: str, name: Optional[str] = None, **params: Any) -> Any:
-        """Adds a web tile layer: an XYZ template, a WMS, vector tiles or a MapLibre style.
-
-        Args:
-            url: The address, e.g. ``"https://tile.openstreetmap.org/{z}/{x}/{y}.png"``.
-            name: The layer's name.
-            **params: More ``map.addTiles`` parameters (``kind``, ``attribution``, ...).
-        """
-        if name is not None:
-            params["name"] = name
-        return self.run("map.addTiles", url=url, **params)
-
-    # The view ------------------------------------------------------------------------------
-
-    def set_center(self, lon: float, lat: float, scale: Optional[float] = None) -> Any:
-        """Centres the map on a longitude and latitude.
-
-        Args:
-            lon: Longitude in degrees.
-            lat: Latitude in degrees.
-            scale: The map scale's denominator (``2_000_000`` for 1:2,000,000).
-        """
-        params: Dict[str, Any] = {"lon": lon, "lat": lat}
-        if scale is not None:
-            params["scale"] = scale
-        return self.run("map.goToXY", params)
-
-    def zoom_to(self, layer: str) -> Any:
-        """Zooms the map to a layer's features.
-
-        Args:
-            layer: The layer's name.
-        """
-        return self.run("layer.zoomTo", layer=layer)
+        return _data_args(path)
 
     def to_png(
         self,
@@ -337,7 +240,7 @@ class Map(anywidget.AnyWidget):
             self._hold([(str(content.get("error", "the command failed")), True)])
 
     def __repr__(self) -> str:
-        return f"Map(layers={[layer.get('name') for layer in self.layers()]!r})"
+        return f"Map(layers={self.layer_names()!r})"
 
 
 def _app_src(url: Optional[str], lang: Optional[str]) -> str:

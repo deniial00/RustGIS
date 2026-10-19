@@ -59,12 +59,20 @@ impl Engine {
 
     /// Layer `layer` (a name or an id) of the active map as GeoJSON text: its features as they are
     /// in memory (a large file read in place holds the features of the last view; run
-    /// `layer.loadAll` first for all of them).
-    fn layer_geojson(&self, layer: &str) -> PyResult<String> {
+    /// `layer.loadAll` first for all of them), or only its selected ones when `selected`.
+    #[pyo3(signature = (layer, selected=false))]
+    fn layer_geojson(&self, layer: &str, selected: bool) -> PyResult<String> {
         let map = self.session.map();
         let found = map.layer_by_name(layer).or_else(|| layer.trim().parse::<u32>().ok().and_then(|id| map.layer(id)));
         let found = found.ok_or_else(|| RustGISError::new_err(format!("no layer named '{layer}'")))?;
-        Ok(rustgis_engine::data::io::to_geojson(&found.dataset).to_string())
+        if !selected {
+            return Ok(rustgis_engine::data::io::to_geojson(&found.dataset).to_string());
+        }
+        let mut ds = rustgis_engine::data::Dataset::new(found.name.clone(), found.geometry_type(), found.dataset.fields.clone());
+        for f in found.selection.iter().filter_map(|r| found.dataset.features.get(*r)) {
+            ds.push(f.geometry.clone(), f.attrs.clone());
+        }
+        Ok(rustgis_engine::data::io::to_geojson(&ds).to_string())
     }
 
     /// The project as `.rgis` JSON text, as `project.saveAs` writes it (what `project.openText`
