@@ -637,7 +637,9 @@ impl Chunks {
         let rows = self.ch.min(self.h.saturating_sub(y0));
         // The chunk's row length: the data width, or the full tile width when padded. The tiff
         // crate gives a bottom tile of every band after the first, when the bands are stored
-        // apart, its padding rows too (issue #544), so the row count can't tell it alone.
+        // apart, its padding rows too (issue #544), so the row count can't tell it alone. Where two
+        // shapes have the same size, the data width wins: both the tiff crate and our LZW decoder
+        // return chunks as wide as the data.
         let per_pixel = self.samples.max(1);
         let dw = self.cw.min(self.w.saturating_sub(x0)) as usize;
         let shapes = [(dw, rows), (dw, self.ch), (self.cw as usize, rows), (self.cw as usize, self.ch)];
@@ -921,12 +923,15 @@ fn read_limited(r: Reader<'_>, name: &str, max: usize, open: Option<Opener<'_>>)
     // in RGBI orthophotos) a tile row at a time, and writes a padded edge tile's whole width into
     // the image: past its edge, over the start of the next row (issue #162). Such tiled images
     // are read a tile at a time, as their chunks come back only as wide as the image.
+    let tile_rows = dec.find_tag_unsigned::<u32>(Tag::TileLength).ok().flatten();
     let tiled = dec.find_tag_unsigned::<u32>(Tag::TileWidth).ok().flatten().is_some();
     let extra_samples = !planar && samples(&mut dec) > nbands && tiled;
-    // The decoder asserts (panics) on the edge tiles of a tiled image whose bands are stored
-    // apart, read whole (issue #544): such an image is read a tile at a time.
-    let planar_tiles = planar && nbands > 1 && tiled;
-    if planar_tiles && bits(&mut dec) < 8 {
+    // The decoder asserts (panics) on the padded bottom tiles of the later bands of a tiled image
+    // whose bands are stored apart, read whole (issue #544): such an image is read a tile at a
+    // time, which can't be done below 8 bits a sample.
+    let planar_tiles = planar && nbands > 1 && tiled && bits(&mut dec) >= 8;
+    let padded = tile_rows.is_none_or(|t| t == 0 || h % t != 0);
+    if planar && nbands > 1 && tiled && !planar_tiles && decimate_by == 1 && padded {
         return Err(err("tiled bands stored apart at fewer than 8 bits a sample aren't supported"));
     }
     // A large image, from a file, is read a chunk at a time on several threads (not one of
