@@ -7186,6 +7186,23 @@ fn params_name_every_key_a_command_reads() {
 }
 
 #[test]
+fn needs_input_reads_descriptions() {
+    use crate::needs_input;
+    assert!(!needs_input("{}"));
+    assert!(!needs_input(r#"{"layer"?, "name"?: text}"#));
+    assert!(needs_input(r#"{"layer": raster, "points"?: [[column, row, lon, lat], …]}"#));
+    assert!(needs_input(r#"{"path": folder | "url": "https://…", "name"?: text}"#));
+    assert!(needs_input(r#"{"url": "https://…/x.json?f=json"}"#));
+    assert!(!needs_input(r#"{"steps"?: [{"required": value}], "url"?: "https://…/?q=x"}"#));
+    assert!(needs_input("a GeoJSON text: {type: …}"));
+    assert!(!needs_input("a GeoJSON text"));
+    assert!(needs_input("a service URL: https://…/query?f=json"));
+    let s = Session::new(Project::default());
+    assert!(s.registry.get("raster.georeference").is_some_and(crate::CommandSpec::needs_input));
+    assert!(s.registry.get("map.zoomIn").is_some_and(|c| !c.needs_input()));
+}
+
+#[test]
 fn param_keys_reads_descriptions() {
     use crate::param_keys;
     assert_eq!(param_keys("{}"), Some(vec![]));

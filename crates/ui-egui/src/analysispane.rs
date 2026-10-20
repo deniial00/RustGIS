@@ -148,16 +148,16 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     let numeric = fields_of(&app.workflow.layer, true);
     let w = &mut app.workflow;
-    if w.layer.is_empty() || !(rasters.contains(&w.layer) || features.contains(&w.layer)) {
-        w.layer = match w.section {
-            "rasterFunctions" | "functionEditor" | "suitability" | "visibility" | "lineOfSight" => {
-                rasters.first().cloned().unwrap_or_default()
-            }
-            "interpolate" => points.first().cloned().unwrap_or_default(),
-            "network" => lines.first().cloned().unwrap_or_default(),
-            "simulation" => polygons.first().cloned().unwrap_or_default(),
-            _ => features.first().cloned().unwrap_or_default(),
-        };
+    let inputs = match w.section {
+        "rasterFunctions" | "functionEditor" | "suitability" | "visibility" | "lineOfSight" | "georeference" | "change" | "spectral"
+        | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "process" | "pixels" | "mensuration" | "reality" => &rasters,
+        "interpolate" => &points,
+        "network" => &lines,
+        "simulation" => &polygons,
+        _ => &features,
+    };
+    if !inputs.contains(&w.layer) {
+        w.layer = inputs.first().cloned().unwrap_or_default();
     }
     ui.add_space(6.0);
     match app.workflow.section {
