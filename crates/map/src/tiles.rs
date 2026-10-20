@@ -98,7 +98,7 @@ pub struct TileLayer {
     pub url: String,
     /// Advertised longitude/latitude coverage (west, south, east, north), kept from service
     /// capabilities so Zoom To Layer works without fetching the service again.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_bounds")]
     pub bounds: Option<[f64; 4]>,
     /// Subdomains that `{s}` takes in turn (`a`, `b`, `c` when empty and the URL has `{s}`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -158,6 +158,12 @@ pub fn is_web(url: &str) -> bool {
 /// Half a degree of tolerance matches service capabilities parsing.
 pub fn valid_bounds([w, s, e, n]: &[f64; 4]) -> bool {
     [*w, *s, *e, *n].iter().all(|v| v.is_finite()) && -180.5 <= *w && *w < *e && *e <= 180.5 && -90.5 <= *s && *s < *n && *n <= 90.5
+}
+
+/// Discards malformed optional project metadata after consuming its entire JSON value.
+fn lenient_bounds<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<[f64; 4]>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 fn is_zero(x: &f64) -> bool {

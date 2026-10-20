@@ -4979,6 +4979,45 @@ fn explicit_tile_bounds_are_rejected_without_replacing_the_layer() {
     assert_eq!(r["bounds"], json!([5.0, 45.0, 15.0, 55.0]));
 }
 
+/// Bad optional coverage must not prevent loading the tiles or the rest of the project.
+#[test]
+fn malformed_saved_tile_bounds_do_not_prevent_opening_the_project() {
+    let mut s = world();
+    let url = "https://tiles.example.com/{z}/{x}/{y}.png";
+    s.run("map.addTiles", &json!({"url": url, "name": "Coverage", "bounds": [5, 45, 15, 55], "opacity": 0.5})).unwrap();
+    s.run("map.addTiles", &json!({"url": "https://other.example.com/{z}/{x}/{y}.png", "name": "Valid", "bounds": [1, 2, 3, 4]})).unwrap();
+    let mut project = serde_json::to_value(&s.project).unwrap();
+    let coverage = project["maps"][0]["tiles"].as_array().unwrap().iter().position(|t| t["name"] == "Coverage").unwrap();
+    for bounds in [
+        json!([0, 0, 10]),
+        json!([0, 0, 10, 10, 20]),
+        json!([0, "south", 10, 10]),
+        json!([0, {"nested": [1, 2]}, 10, 10]),
+        json!([[0], 0, 10, 10]),
+        json!([]),
+        json!({"nested": [1, 2]}),
+        json!("x"),
+        json!(true),
+        json!(42),
+        Value::Null,
+        json!([20, 0, 10, 10]),
+    ] {
+        project["maps"][0]["tiles"][coverage]["bounds"] = bounds.clone();
+        let loaded = Project::from_json(&project.to_string()).unwrap_or_else(|e| panic!("{bounds}: {e}"));
+        let tile = loaded.map().tiles.iter().find(|t| t.name == "Coverage").unwrap();
+        assert_eq!(tile.bounds, None, "{bounds}");
+        assert_eq!((tile.url.as_str(), tile.opacity, tile.visible), (url, 0.5, true), "{bounds}");
+        assert_eq!(loaded.map().tiles.iter().find(|t| t.name == "Valid").unwrap().bounds, Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(
+            loaded.map().layer_by_name("Countries").unwrap().dataset.features.len(),
+            s.map().layer_by_name("Countries").unwrap().dataset.features.len()
+        );
+    }
+    project["maps"][0]["tiles"][coverage].as_object_mut().unwrap().remove("bounds");
+    let loaded = Project::from_json(&project.to_string()).unwrap();
+    assert_eq!(loaded.map().tiles.iter().find(|t| t.name == "Coverage").unwrap().bounds, None);
+}
+
 /// An MBTiles file of one red picture tile: added by path or as an upload, it is a tile layer that
 /// draws, survives a project round trip (by path), and a file that isn't an archive is refused.
 #[test]
