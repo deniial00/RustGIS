@@ -69,6 +69,9 @@ pub fn start() {
             log::error!("missing <canvas id=\"{CANVAS_ID}\">");
             return;
         };
+        if let Err(e) = crate::tile_worker::install() {
+            log::warn!("background tile painting is unavailable: {e}");
+        }
         let dirty = Rc::new(Cell::new(false));
         // Inside another page (`?embed`) the page holds the work, so leaving it doesn't ask.
         let embedded = flag(&query(), "embed");
@@ -424,9 +427,21 @@ fn storage() -> Option<web_sys::Storage> {
 
 /// Downloads `url`, or the byte range it asks for (a PMTiles archive's part: see
 /// `rustgis_tiles::cache::split_range`).
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
+    let fetch = |url: &str, init: Option<&web_sys::RequestInit>| -> Result<js_sys::Promise, String> {
+        if let Some(window) = web_sys::window() {
+            return Ok(match init {
+                Some(init) => window.fetch_with_str_and_init(url, init),
+                None => window.fetch_with_str(url),
+            });
+        }
+        let scope = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>().map_err(|e| err(e.into()))?;
+        Ok(match init {
+            Some(init) => scope.fetch_with_str_and_init(url, init),
+            None => scope.fetch_with_str(url),
+        })
+    };
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
     // A data download carries its caller's budget (at most MAX_DOWNLOAD); other fetches use 64 MB.
     let (url, limit) = cache::split_download_limit(url);
@@ -456,9 +471,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         if prepared.signed {
             init.set_redirect(web_sys::RequestRedirect::Error);
         }
-        window.fetch_with_str_and_init(url, &init)
+        fetch(url, Some(&init))?
     } else {
-        window.fetch_with_str(url)
+        fetch(url, None)?
     };
     // A refused fetch is an opaque TypeError ("Failed to fetch") by design: the browser doesn't
     // say why, so the likely reasons are named, with the browser's own message but not its stack.

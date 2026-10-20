@@ -21,11 +21,17 @@ mod geolibre;
 #[cfg(target_arch = "wasm32")]
 mod parts;
 #[cfg(target_arch = "wasm32")]
+mod tile_worker;
+#[cfg(target_arch = "wasm32")]
 mod web;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    web::start();
+    if web_sys::window().is_some() {
+        web::start();
+    } else if let Err(e) = tile_worker::run() {
+        log::error!("could not start tile worker: {e}");
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

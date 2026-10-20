@@ -22,7 +22,7 @@ use crate::template::{self, Placed, TileId};
 
 /// Where the pixmap is: the Web Mercator point at its top-left corner and the metres per
 /// (device) pixel, with the device pixels per logical point.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     pub left: f64,
     pub top: f64,
@@ -111,7 +111,7 @@ pub fn draw(pm: &mut Pixmap, spec: &Spec, opacity: f32, frame: &Frame, labels: b
     let (w, h) = (pm.width(), pm.height());
     // A style drawing vector shapes draws them from tile pictures drawn once (see `picture`):
     // a map moving across them only puts them in place.
-    if let Some(pictures) = crate::picture::cover(&r, frame, &frame.extent(w, h), None, &mut out.pending) {
+    if let Some(pictures) = crate::picture::cover(spec, &r, frame, &frame.extent(w, h), None, &mut out.pending) {
         for it in &pictures {
             draw_raster(pm, it, frame, opacity);
         }
@@ -282,7 +282,7 @@ pub fn place(spec: &Spec, opacity: f32, frame: &Frame, view: &Extent, reach: &Ex
     if !(frame.m_per_px.is_finite() && frame.m_per_px > 0.0) || opacity <= 0.0 {
         return Some(out);
     }
-    if let Some(pictures) = crate::picture::cover(&r, frame, view, Some(reach), &mut out.pending) {
+    if let Some(pictures) = crate::picture::cover(spec, &r, frame, view, Some(reach), &mut out.pending) {
         let opacity = opacity.clamp(0.0, 1.0);
         out.tiles = pictures.into_iter().map(|it| Placement { picture: it.payload, at: it.at, clip: it.clip, opacity }).collect();
         if let Some(size) = labels {
@@ -595,13 +595,7 @@ fn draw_raster(pm: &mut Pixmap, it: &Item, frame: &Frame, opacity: f32) {
         copy_over(pm, img, clip, (x0, y0), k, opacity);
         return;
     }
-    let quality = FilterQuality::Bilinear;
-    let shader = Pattern::new(img.as_ref(), SpreadMode::Pad, quality, opacity.clamp(0.0, 1.0), Transform::from_row(k, 0.0, 0.0, k, x0, y0));
-    // Without anti-aliasing, neighbouring tiles meet without a seam.
-    let paint = Paint { shader, anti_alias: false, ..Paint::default() };
-    // Only the part in the pixmap.
-    let Some(clip) = clip.intersect(&Rect::from_ltrb(0.0, 0.0, pm.width() as f32, pm.height() as f32).unwrap_or(clip)) else { return };
-    pm.fill_rect(clip, &paint, Transform::identity(), None);
+    resample_over(pm, img, clip, (x0, y0), k, opacity);
 }
 
 /// Draws a picture at its own size (`k`, the pixmap's pixels to one of its own, near 1) over the
@@ -634,6 +628,64 @@ fn copy_over(pm: &mut Pixmap, img: &Pixmap, clip: Rect, at: (f32, f32), k: f32, 
                 }
             } else if a > 0 {
                 for (d, s) in d.iter_mut().zip(s) {
+                    *d = (s + u32::from(*d) * (255 - a) / 255).min(255) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// A scaled tile needs only a separable bilinear sample and source-over. Going through a
+/// general path/shader pipeline for each rectangle is particularly expensive without SIMD
+/// in WASM, and stalls navigation while older-zoom pictures stand in for arriving ones.
+fn resample_over(pm: &mut Pixmap, img: &Pixmap, clip: Rect, at: (f32, f32), k: f32, opacity: f32) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    let (iw, ih) = (img.width() as usize, img.height() as usize);
+    if !(k.is_finite() && k > 0.0) || iw == 0 || ih == 0 {
+        return;
+    }
+    let (x0, y0) = (clip.left().max(0.0) as usize, clip.top().max(0.0) as usize);
+    let (x1, y1) = ((clip.right().max(0.0) as usize).min(w), (clip.bottom().max(0.0) as usize).min(h));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let sample = |p: usize, origin: f32, size: usize| {
+        let pos = (p as f32 + 0.5 - origin) / k - 0.5;
+        let floor = pos.floor();
+        let i = floor as i64;
+        (
+            i.clamp(0, size as i64 - 1) as usize,
+            i.saturating_add(1).clamp(0, size as i64 - 1) as usize,
+            ((pos - floor) * 256.0).round().clamp(0.0, 256.0) as u32,
+        )
+    };
+    let cols: Vec<_> = (x0..x1).map(|x| sample(x, at.0, iw)).collect();
+    let o = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let src = img.data().as_chunks::<4>().0;
+    let dst = pm.data_mut().as_chunks_mut::<4>().0;
+    for y in y0..y1 {
+        let (a, b, wy) = sample(y, at.1, ih);
+        let (Some(top), Some(bottom), Some(row)) =
+            (src.get(a * iw..(a + 1) * iw), src.get(b * iw..(b + 1) * iw), dst.get_mut(y * w + x0..y * w + x1))
+        else {
+            continue;
+        };
+        for (d, &(a, b, wx)) in row.iter_mut().zip(&cols) {
+            let (Some(tl), Some(tr), Some(bl), Some(br)) = (top.get(a), top.get(b), bottom.get(a), bottom.get(b)) else { continue };
+            let mut rgba = [0u8; 4];
+            for ((out, (&tl, &tr)), (&bl, &br)) in rgba.iter_mut().zip(tl.iter().zip(tr)).zip(bl.iter().zip(br)) {
+                let t = u32::from(tl) * (256 - wx) + u32::from(tr) * wx;
+                let b = u32::from(bl) * (256 - wx) + u32::from(br) * wx;
+                *out = ((t * (256 - wy) + b * wy + 32768) >> 16) as u8;
+            }
+            if o == 255 && rgba[3] == 255 {
+                *d = rgba;
+                continue;
+            }
+            let rgba = rgba.map(|v| u32::from(v) * o / 255);
+            let a = rgba[3];
+            if a > 0 {
+                for (d, s) in d.iter_mut().zip(rgba) {
                     *d = (s + u32::from(*d) * (255 - a) / 255).min(255) as u8;
                 }
             }
@@ -1501,6 +1553,36 @@ mod tests {
         assert!(near(&pieces[0].0, &[(0.0, 5.0), (5.0, 5.0), (5.0, 10.0)]) && (pieces[0].1 - 10.0).abs() < 1e-3, "{pieces:?}");
         assert!(near(&pieces[1].0, &[(5.0, 10.0), (5.0, 0.0)]) && (pieces[1].1 - 50.0).abs() < 1e-3, "{pieces:?}");
         assert!(clip_line_along(&[(f32::NAN, 0.0), (1.0, 1.0)], [0.0, 0.0, 10.0, 10.0]).len() <= 1);
+    }
+
+    #[test]
+    fn scaled_tile_blits_match_bilinear_patterns_with_alpha_and_clips() {
+        let mut image = Pixmap::new(19, 17).unwrap();
+        for (i, p) in image.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let a = (50 + i % 205) as u8;
+            *p = [a / 2, a / 3, a / 4, a];
+        }
+        let at = (3.25, -2.375);
+        for k in [0.37, 0.75, 1.3, 2.7] {
+            for opacity in [0.0, 0.4, 1.0] {
+                let mut expected = Pixmap::new(53, 47).unwrap();
+                expected.fill(tiny_skia::Color::from_rgba8(35, 75, 120, 200));
+                let mut actual = expected.clone();
+                let clip = Rect::from_ltrb(5.0, 3.0, 48.0, 43.0).unwrap();
+                let mut paint = Paint { anti_alias: false, ..Paint::default() };
+                paint.shader = Pattern::new(
+                    image.as_ref(),
+                    SpreadMode::Pad,
+                    FilterQuality::Bilinear,
+                    opacity,
+                    Transform::from_row(k, 0.0, 0.0, k, at.0, at.1),
+                );
+                expected.fill_rect(clip, &paint, Transform::identity(), None);
+                resample_over(&mut actual, &image, clip, at, k, opacity);
+                let worst = actual.data().iter().zip(expected.data()).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+                assert!(worst <= 2, "scale={k} opacity={opacity}: worst color error {worst}");
+            }
+        }
     }
 
     #[test]

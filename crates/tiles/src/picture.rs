@@ -12,7 +12,7 @@
 //! for pixel). Its square is a tile a level or more below the vector tiles drawn there: 256 to
 //! 512 pixels a side at one or two pixels a point, about as much at others (192 to 384 at 1.5).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use rustgis_geom::Extent;
@@ -22,7 +22,10 @@ use crate::cache::{self, Payload};
 use crate::draw::{Drawn, Frame, Item, Pass, draw_layers, overhang};
 use crate::source::Resolved;
 use crate::style::{LayerKind, Source};
+
 use crate::template::{self, Placed, TileId};
+
+pub mod worker;
 
 /// The zooms a level a picture is drawn at.
 const STEPS: f32 = 256.0;
@@ -60,6 +63,10 @@ struct Store {
     bytes: usize,
     /// Counts the calls to [`cover`], for the least recently used.
     tick: u64,
+    pending: HashMap<Key, (u64, u64)>,
+    failed: HashSet<usize>,
+    epoch: u64,
+    ticket: u64,
 }
 
 fn lock() -> MutexGuard<'static, Store> {
@@ -72,6 +79,9 @@ pub(crate) fn forget() {
     let mut s = lock();
     s.entries.clear();
     s.bytes = 0;
+    s.pending.clear();
+    s.failed.clear();
+    s.epoch = s.epoch.wrapping_add(1);
 }
 
 /// Whether the style draws shapes from vector tiles at `zoom`.
@@ -86,7 +96,14 @@ fn draws_shapes(r: &Resolved, zoom: f32) -> bool {
 /// The pictures of `r`'s shapes over `view`, drawing those missing, and out to `reach` (only
 /// those already drawn), bottom first; `None` when the style draws no vector shapes here, or the
 /// view is too wide for pictures (the whole world on the globe). `frame` gives the scale.
-pub(crate) fn cover(r: &Arc<Resolved>, frame: &Frame, view: &Extent, reach: Option<&Extent>, pending: &mut bool) -> Option<Vec<Item>> {
+pub(crate) fn cover(
+    spec: &crate::Spec,
+    r: &Arc<Resolved>,
+    frame: &Frame,
+    view: &Extent,
+    reach: Option<&Extent>,
+    pending: &mut bool,
+) -> Option<Vec<Item>> {
     let ppp = frame.ppp;
     if !(ppp.is_finite() && ppp > 0.0 && frame.m_per_px.is_finite() && frame.m_per_px > 0.0) || view.width() > template::HALF_WORLD {
         return None;
@@ -143,7 +160,8 @@ pub(crate) fn cover(r: &Arc<Resolved>, frame: &Frame, view: &Extent, reach: Opti
     // How far past its square a picture looks for shapes, in points: a line or circle drawn from
     // a neighbouring tile reaches into it by up to half its width.
     let reach = r.style.layers.iter().filter(|l| l.visible_at(zoom)).map(|l| overhang(l, zoom)).fold(0.0f32, f32::max);
-    let drawn = draw_all(r, &todo, side, m_per_px, ppp, f64::from(reach));
+    let deferred = worker::enqueue(spec, r, &todo, &key, side, m_per_px, ppp, pending);
+    let drawn = if deferred { Vec::new() } else { draw_all(r, &todo, side, m_per_px, ppp, f64::from(reach)) };
     {
         let mut s = lock();
         let tick = s.tick;
@@ -165,7 +183,16 @@ pub(crate) fn cover(r: &Arc<Resolved>, frame: &Frame, view: &Extent, reach: Opti
             evict(&mut s);
         }
     }
-    Some(found.into_iter().filter_map(|(p, picture)| Some(Item { payload: picture?, at: p.extent(), z, clip: p.extent() })).collect())
+    let s = lock();
+    Some(
+        found
+            .into_iter()
+            .flat_map(|(p, picture)| match picture {
+                Some(payload) => vec![Item { payload, at: p.extent(), z, clip: p.extent() }],
+                None => worker::fallback(&s, r, &key(p.id), &p),
+            })
+            .collect(),
+    )
 }
 
 /// Drops the least recently used pictures past the budget, and those of styles gone. Those
@@ -373,6 +400,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn background_pictures_are_deferred_reused_bounded_and_ignore_obsolete_answers() {
+        if std::env::var_os("RUSTGIS_TEST_TILE_WORKER").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "picture::tests::background_pictures_are_deferred_reused_bounded_and_ignore_obsolete_answers",
+                    "--nocapture",
+                ])
+                .env("RUSTGIS_TEST_TILE_WORKER", "1")
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+            assert!(text.contains("1 passed"), "isolated test did not run");
+            return;
+        }
+        #[derive(Default)]
+        struct Host {
+            jobs: Mutex<Vec<(worker::Request, worker::Done)>>,
+        }
+        impl worker::Painter for Host {
+            fn paint(&self, request: worker::Request, done: worker::Done) {
+                self.jobs.lock().unwrap().push((request, done));
+            }
+            fn cancel(&self, id: u64) {
+                let old = {
+                    let mut jobs = self.jobs.lock().unwrap();
+                    jobs.iter().position(|(r, _)| r.id == id).map(|i| jobs.remove(i))
+                };
+                if let Some((_, done)) = old {
+                    done(Ok(None));
+                }
+            }
+        }
+        let (spec, dir) = spec("background");
+        let r = resolved(&spec);
+        let host = Arc::new(Host::default());
+        worker::set_painter(Some(host.clone()));
+        let f = frame(2.2, 1.0);
+        let view = f.extent(300, 200);
+        let first = place(&spec, 1.0, &f, &view, &view, None).unwrap();
+        assert!(first.pending && first.tiles.is_empty(), "a missing picture must not be painted on the caller");
+        let jobs = std::mem::take(&mut *host.jobs.lock().unwrap());
+        assert!(!jobs.is_empty());
+        for (request, done) in jobs {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let pixels = loop {
+                if let Some(pm) = worker::draw(&request.spec, &request.frame, request.side).unwrap() {
+                    break pm;
+                }
+                assert!(std::time::Instant::now() < end, "archive did not finish loading");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            };
+            done(Ok(Some(pixels)));
+        }
+        let ready = place(&spec, 1.0, &f, &view, &view, None).unwrap();
+        assert!(!ready.pending && !ready.tiles.is_empty());
+        let zoom = Frame { m_per_px: f.m_per_px / 1.03, ..f };
+        let view = zoom.extent(300, 200);
+        let waiting = place(&spec, 1.0, &zoom, &view, &view, None).unwrap();
+        assert!(waiting.pending && !waiting.tiles.is_empty(), "the previous zoom stands in while painting");
+        assert!(waiting.tiles.iter().all(|p| ready.tiles.iter().any(|old| Arc::ptr_eq(&p.picture, &old.picture))));
+        let n = host.jobs.lock().unwrap().len();
+        place(&spec, 1.0, &zoom, &view, &view, None);
+        assert_eq!(host.jobs.lock().unwrap().len(), n, "pending work is coalesced");
+        for i in 1..100 {
+            let f = frame(2.2 + f64::from(i) / 100.0, 1.0);
+            let e = f.extent(300, 200);
+            place(&spec, 1.0, &f, &e, &e, None);
+            assert!(host.jobs.lock().unwrap().len() <= 64, "obsolete zoom jobs grow without bound");
+        }
+        let old = std::mem::take(&mut *host.jobs.lock().unwrap());
+        cache::clear();
+        for (request, done) in old {
+            done(Ok(Pixmap::new(request.side, request.side)));
+        }
+        assert!(lock().entries.is_empty(), "clearing the cache must invalidate outstanding answers");
+        worker::set_painter(None);
+        drop(r);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_picture_fallbacks_use_one_density_and_clip_child_tiles() {
+        let (spec, dir) = spec("fallback-clips");
+        let r = resolved(&spec);
+        let style = Arc::as_ptr(&r) as usize;
+        let mut store = Store::default();
+        for (z, ppp) in [(3, 1.0_f32), (4, 2.0_f32)] {
+            let factor = 1u32 << (z - 2);
+            for y in 0..factor {
+                for x in 0..factor {
+                    let k = Key { style, tile: TileId { z, x: 2 * factor + x, y: factor + y }, step: 515, ppp: ppp.to_bits() };
+                    let pm = Pixmap::new(1, 1).unwrap();
+                    store.entries.insert(
+                        k,
+                        Entry { style: Arc::downgrade(&r), picture: Arc::new(Payload::Image(pm)), bytes: 4, used: 0, waiting: None },
+                    );
+                }
+            }
+        }
+        let cell = Placed { id: TileId { z: 2, x: 2, y: 1 }, wx: 2 };
+        let wanted = Key { style, tile: cell.id, step: 510, ppp: 1.5_f32.to_bits() };
+        let fallback = worker::fallback(&store, &r, &wanted, &cell);
+        assert_eq!(fallback.len(), 16, "only the closer 2x density is drawn");
+        let mut area = 0.0;
+        for item in &fallback {
+            assert!(item.clip.min_x >= item.at.min_x && item.clip.max_x <= item.at.max_x);
+            assert!(item.clip.min_y >= item.at.min_y && item.clip.max_y <= item.at.max_y);
+            area += item.clip.width() * item.clip.height();
+        }
+        let e = cell.extent();
+        assert!((area / (e.width() * e.height()) - 1.0).abs() < 1e-12, "fallbacks must cover the cell once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn worker_pixels_and_dimensions_are_checked_before_allocation() {
+        assert!(worker::from_pixels(0, Vec::new()).is_none());
+        assert!(worker::from_pixels(u32::MAX, Vec::new()).is_none());
+        assert!(worker::from_pixels(2, vec![0; 15]).is_none());
+        assert!(worker::from_pixels(2, vec![0; 16]).is_some());
+        let (spec, dir) = spec("bad-worker-frame");
+        for m_per_px in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let frame = Frame { left: 0.0, top: 0.0, m_per_px, ppp: 1.0 };
+            assert!(worker::draw(&spec, &frame, 256).is_err());
+        }
+        assert!(worker::draw(&spec, &frame(2.0, 1.0), u32::MAX).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn pictures_are_drawn_once() {
         let (spec, dir) = spec("once");
@@ -393,16 +553,16 @@ mod tests {
         let r = resolved(&spec);
         let mut pending = false;
         let world = Extent::new(-template::HALF_WORLD * 1.5, -1e6, template::HALF_WORLD * 1.5, 1e6);
-        assert!(cover(&r, &f, &world, None, &mut pending).is_none());
+        assert!(cover(&spec, &r, &f, &world, None, &mut pending).is_none());
         // More squares than a covering holds: drawn straight too, not left blank.
         let near = frame(12.0, 1.0);
         let huge = near.extent(20_000, 10_000);
         assert!(huge.width() < template::HALF_WORLD);
-        assert!(cover(&r, &near, &huge, None, &mut pending).is_none());
+        assert!(cover(&spec, &r, &near, &huge, None, &mut pending).is_none());
         for m_per_px in [0.0, f64::NAN, f64::INFINITY] {
-            assert!(cover(&r, &Frame { m_per_px, ..f }, &view, None, &mut pending).is_none());
+            assert!(cover(&spec, &r, &Frame { m_per_px, ..f }, &view, None, &mut pending).is_none());
         }
-        assert!(cover(&r, &Frame { ppp: f32::NAN, ..f }, &view, None, &mut pending).is_none());
+        assert!(cover(&spec, &r, &Frame { ppp: f32::NAN, ..f }, &view, None, &mut pending).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

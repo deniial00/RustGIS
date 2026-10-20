@@ -16,7 +16,7 @@ use crate::style::{Source, Style};
 use crate::{address, cog, mbtiles, pmtiles, template};
 
 /// The kind of address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Raster,
     Vector,
@@ -30,7 +30,7 @@ pub enum Kind {
 }
 
 /// A tile layer, as far as fetching and drawing it goes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Spec {
     pub kind: Kind,
     pub url: String,
