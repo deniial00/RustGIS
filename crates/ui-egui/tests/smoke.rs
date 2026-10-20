@@ -108,7 +108,8 @@ fn command_search_adds_sample_template_and_encoded_polyline_layers() {
     h.get_by_label("Add").click();
     h.step();
     let route = h.state().session.map().layer_by_name("Route").unwrap();
-    assert_eq!(route.dataset.features[0].geometry.as_ref().unwrap().extent().min_x, -126.453);
+    let min_x = route.dataset.features[0].geometry.as_ref().unwrap().extent().min_x;
+    assert!((min_x - -126.453).abs() < 1e-9, "{min_x}");
     assert_eq!(h.state().dialogs.open, None);
 }
 
