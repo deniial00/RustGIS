@@ -87,6 +87,18 @@ fn command_search_basemap_gallery_selects_and_can_open_tile_dialog() {
 }
 
 #[test]
+fn command_search_celestial_body_opens_body_picker() {
+    let mut h = harness();
+    search_layer_command(&mut h, "map.body");
+    assert_eq!(h.state().dialogs.open, Some("body"));
+    assert!(h.state().session.map().body().is_earth(), "opening the picker must not change the body");
+    h.get_by_label("Moon").click();
+    h.step();
+    assert_eq!(h.state().session.map().body().id, "moon");
+    assert_eq!(h.state().dialogs.open, None);
+}
+
+#[test]
 fn command_search_adds_sample_template_and_encoded_polyline_layers() {
     let mut h = harness();
     h.state_mut().run("project.new", json!(null)).unwrap();

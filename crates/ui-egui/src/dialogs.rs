@@ -58,6 +58,7 @@ impl Dialogs {
             "camera" => "camera",
             "addTiles" => "addTiles",
             "basemap" => "basemap",
+            "body" => "body",
             "addSample" => "addSample",
             "layerTemplate" => "layerTemplate",
             "addPolyline" => "addPolyline",
@@ -136,6 +137,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "camera" => "Camera",
         "addTiles" => "Add Tile Layer",
         "basemap" => "Basemap",
+        "body" => "Celestial Body",
         "addSample" => "Add Sample Data",
         "layerTemplate" => "Layer Template",
         "addPolyline" => "Add Encoded Polyline",
@@ -196,7 +198,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 });
             }
             "coordinateSystem" => close = coordinate_system(app, ui, &t),
-            "basemap" | "addSample" | "layerTemplate" => {
+            "basemap" | "body" | "addSample" | "layerTemplate" => {
                 // Menu items close their nearest closable parent. Keep that local to the
                 // gallery so picking an item doesn't persistently collapse the Window's body.
                 let gallery = ui.scope_builder(egui::UiBuilder::new().closable(), |ui| {
@@ -204,6 +206,8 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                         egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 180.0).max(120.0)).show(ui, |ui| {
                             crate::ribbon::basemap_gallery(ui, app);
                         });
+                    } else if which == "body" {
+                        crate::ribbon::body_menu(ui, app);
                     } else if which == "addSample" {
                         crate::ribbon::sample_data_gallery(ui, app);
                     } else {
