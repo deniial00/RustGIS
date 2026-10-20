@@ -203,8 +203,10 @@ tiles are reprojected. From scripts: `map.addTiles`, `map.removeTiles`, `map.set
 `map.zoomToTiles` and `map.tiles`. `map.addTiles` accepts optional `"bounds": [west, south, east,
 north]` in longitude/latitude; `service.add` retains the bounds advertised by map and tile services.
 Explicit bounds must form a finite, ordered geographic rectangle; an invalid value rejects the
-command without adding or replacing a layer. Invalid bounds in a saved project are instead
-discarded, leaving the tile layer usable without that coverage metadata.
+command without adding or replacing a layer. In a saved project, a four-number bounds array with
+invalid geographic values is discarded, leaving the tile layer usable without that coverage
+metadata. A malformed bounds value (the wrong number of coordinates or nonnumeric entries) is
+a project-format error and prevents the project from opening.
 
 ### Other worlds
 
