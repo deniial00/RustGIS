@@ -222,8 +222,9 @@ strict encryption on servers that support it. A private authority can be supplie
 `?ca=/path/to/ca.pem`, and `hostname-in-certificate` overrides the expected certificate name.
 For a self-signed server, `?trust-server-certificate=true` disables certificate checking; the
 layer reports that it is unchecked. `?encrypt=false` (also `optional` or `no`) requests encryption
-for login only, not subsequent traffic; the layer reports this too. `connect-timeout` sets a
-positive connection deadline in seconds (default: 10).
+for login only, not subsequent traffic; certificate validation still applies during login unless
+explicitly disabled with `trust-server-certificate=true`. `connect-timeout` sets a positive
+connection deadline in seconds (default: 10, maximum: 300).
 
 ```sh
 rustgis-cli run --cmd 'layer.addDatabase={"database":"mssql://gis@db.example:1433/city","password":"…"}' \
@@ -231,8 +232,11 @@ rustgis-cli run --cmd 'layer.addDatabase={"database":"mssql://gis@db.example:143
 ```
 
 SQL Server logins work on every desktop platform. On Windows, `DOMAIN%5Cuser` with a password
-uses a Windows login; leaving the user out signs in as the current Windows user. These Windows
-logins are not supported on macOS or Linux: give a SQL Server login instead.
+uses a Windows login: `%5C` is the URL encoding of `\`, and a literal `DOMAIN\user` is also accepted
+in the address (escape it as `DOMAIN\\user` inside JSON). Leaving the user out signs in as the
+current Windows user. These Windows logins are not supported on macOS or Linux: give a SQL Server
+login instead. Passwords can be supplied in user-info or the `password`, `pass`, `pwd`, or `passwd`
+query parameters; the separate password field overrides an address's password.
 
 Large tables read a view at a time using their spatial index, with a server-numbered sample when
 more rows match than a view draws; small tables are loaded whole. Curves are linearized and

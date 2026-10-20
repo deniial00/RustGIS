@@ -18,6 +18,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 const STATEMENT_TIMEOUT: u64 = 120;
 const PROBE_TIMEOUT: u64 = 10;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONNECT_TIMEOUT_SECS: u64 = 300;
 const EXACT_COUNT_BELOW: u64 = 2_000_000;
 const EXTENT_SAMPLE: usize = 20_000;
 const LIST_LIMIT: usize = 10_000;
@@ -120,7 +121,7 @@ fn config(address: &str) -> Result<Config> {
                 if let Ok(s) = v.trim().parse::<u64>()
                     && s > 0
                 {
-                    c.connect_timeout = Duration::from_secs(s);
+                    c.connect_timeout = Duration::from_secs(s.min(MAX_CONNECT_TIMEOUT_SECS));
                 }
             }
             _ => {}
@@ -207,7 +208,7 @@ async fn open_client(config: &Config, password: Option<&str>) -> std::result::Re
         Encrypt::Strict => tiberius::EncryptionLevel::Strict,
         Encrypt::Off => tiberius::EncryptionLevel::Off,
     });
-    if config.trust_cert || config.encrypt == Encrypt::Off {
+    if config.trust_cert {
         cfg.trust_cert();
     } else if let Some(ca) = &config.ca {
         cfg.trust_cert_ca(ca.display());
@@ -519,10 +520,7 @@ pub struct SqlServerSource {
     family: Option<Family>,
     raw_srid: u32,
     geography: bool,
-    select: Vec<String>,
-    numbered: bool,
-    order: String,
-    numbered_cols: String,
+    projection: Projection,
     reproject: Reproject,
 }
 impl std::fmt::Debug for SqlServerSource {
@@ -542,6 +540,42 @@ fn field_cast(data_type: &str, col: &str) -> Option<(FieldType, String)> {
         }
         _ => (FieldType::Text, format!("CAST({col} AS NVARCHAR(MAX))")),
     })
+}
+
+struct Projection {
+    select: Vec<String>,
+    numbered: bool,
+    order: String,
+    raw: String,
+}
+
+/// Gives every source column a positional name before adding row-number and count columns.
+/// Original names remain only in the table projection and field metadata.
+fn projection(geometry: &str, columns: impl IntoIterator<Item = (String, String)>, key: Option<&str>) -> (Vec<Field>, Projection) {
+    let mut pk = None;
+    let mut fields = Vec::new();
+    let mut casts = Vec::new();
+    let mut raw = vec![format!("t.{} AS i0", ident(geometry))];
+    for (name, ty) in columns {
+        if name == geometry {
+            continue;
+        }
+        let alias = format!("i{}", raw.len());
+        if let Some((ft, cast)) = field_cast(&ty, &alias) {
+            if key == Some(name.as_str()) && matches!(ty.as_str(), "tinyint" | "smallint" | "int" | "bigint") {
+                pk = Some((ident(&name), alias.clone()));
+            }
+            casts.push(cast);
+            raw.push(format!("t.{} AS {alias}", ident(&name)));
+            fields.push(Field::new(name, ft));
+        }
+    }
+    let numbered = pk.is_none();
+    let order = pk.as_ref().map(|(name, _)| format!("ORDER BY t.{name}")).unwrap_or_else(|| "ORDER BY (SELECT NULL)".into());
+    let id = pk.map(|(_, alias)| format!("CAST({alias} AS BIGINT)")).unwrap_or_else(|| "[rustgis rn]".into());
+    let mut select = vec![id, "i0.STCurveToLine().STAsBinary()".into()];
+    select.extend(casts);
+    (fields, Projection { select, numbered, order, raw: raw.join(", ") })
 }
 
 impl SqlServerSource {
@@ -573,44 +607,20 @@ impl SqlServerSource {
         if conn.config.encrypt == Encrypt::Off {
             notes.push("the connection isn't encrypted after login (encrypt=false)".into());
         }
-        if conn.config.trust_cert && conn.config.encrypt != Encrypt::Off {
+        if conn.config.trust_cert {
             notes.push("the server's certificate isn't checked (trust-server-certificate=true)".into());
         }
         let reproject = Reproject::from_epsg(Some(srid), &mut notes);
-        let wkb = format!("{g}.STCurveToLine().STAsBinary()");
         let cols = conn.query("SELECT COLUMN_NAME, LOWER(DATA_TYPE) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2 ORDER BY ORDINAL_POSITION", &[&table.schema, &table.name])?;
         let keys = conn.query("SELECT k.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS c JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k ON k.CONSTRAINT_SCHEMA = c.CONSTRAINT_SCHEMA AND k.CONSTRAINT_NAME = c.CONSTRAINT_NAME WHERE c.CONSTRAINT_TYPE = 'PRIMARY KEY' AND c.TABLE_SCHEMA = @P1 AND c.TABLE_NAME = @P2", &[&table.schema, &table.name])?;
         let key = if keys.len() == 1 { keys.first().and_then(|r| text_of(at(r, 0))) } else { None };
-        let mut pk = None;
-        let mut fields = Vec::new();
-        let mut casts = Vec::new();
-        let mut raw = vec![format!("t.{g}")];
-        for r in &cols {
-            let (Some(name), Some(ty)) = (text_of(at(r, 0)), text_of(at(r, 1))) else {
-                continue;
-            };
-            if key.as_deref() == Some(&name) && matches!(ty.as_str(), "tinyint" | "smallint" | "int" | "bigint") {
-                pk = Some(name.clone());
-            }
-            if name == table.column {
-                continue;
-            }
-            if let Some((ft, cast)) = field_cast(&ty, &ident(&name)) {
-                casts.push(cast);
-                raw.push(format!("t.{}", ident(&name)));
-                fields.push(Field::new(name, ft));
-            }
-        }
-        let numbered = pk.is_none();
-        if numbered {
+        let columns = cols.iter().filter_map(|r| Some((text_of(at(r, 0))?, text_of(at(r, 1))?)));
+        let (fields, projection) = projection(&table.column, columns, key.as_deref());
+        if projection.numbered {
             notes.push(
                 "no single-column integer key: features are numbered as read, so their ids can change from one read to the next".into(),
             );
         }
-        let order = pk.as_deref().map(|k| format!("ORDER BY t.{}", ident(k))).unwrap_or_else(|| "ORDER BY (SELECT NULL)".into());
-        let id = pk.map(|k| format!("CAST({} AS BIGINT)", ident(&k))).unwrap_or_else(|| "[rustgis rn]".into());
-        let mut select = vec![id, wkb];
-        select.extend(casts);
         let mut src = SqlServerSource {
             info: SourceInfo {
                 name: table.label(),
@@ -628,10 +638,7 @@ impl SqlServerSource {
             family,
             raw_srid,
             geography,
-            select,
-            numbered,
-            order,
-            numbered_cols: raw.join(", "),
+            projection,
             reproject,
         };
         src.info.indexed = src.has_index();
@@ -737,25 +744,26 @@ impl SqlServerSource {
         let window = native_window(req, self.info.extent, &self.reproject, self.geography, self.conn.compatibility);
         let filter = self.filter(window.as_deref());
         let from = self.table.sql_from();
-        let cols = self.select.iter().enumerate().map(|(i, e)| format!("{e} AS c{i}")).collect::<Vec<_>>().join(", ");
+        let cols = self.projection.select.iter().enumerate().map(|(i, e)| format!("{e} AS c{i}")).collect::<Vec<_>>().join(", ");
         let numbered = |every: &str| {
             format!(
                 "SELECT TOP ({limit}) {cols}, [rustgis total] FROM (SELECT {}, ROW_NUMBER() OVER ({}) AS [rustgis rn], {} AS [rustgis total] FROM {from} t WHERE {filter}) s WHERE ([rustgis rn] - 1) % {every} = 0 ORDER BY [rustgis rn]",
-                self.numbered_cols,
-                self.order,
+                self.projection.raw,
+                self.projection.order,
                 if window.is_some() { "COUNT_BIG(*) OVER ()" } else { "0" }
             )
         };
         let (matched, rows) = if window.is_some() {
             let rows = query(&numbered(&format!("CAST(CEILING([rustgis total] / {limit}.0) AS BIGINT)")))?;
-            let matched = rows.first().and_then(|r| int_of(at(r, self.select.len()))).and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
+            let matched =
+                rows.first().and_then(|r| int_of(at(r, self.projection.select.len()))).and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
             (matched, rows)
         } else {
             // Concurrent edits may change the rows between this count and the read.
             let matched = first_count(&query(&format!("SELECT COUNT_BIG(*) FROM {from} WHERE {filter}"))?).unwrap_or(0);
             let step = stride(matched, limit);
-            let sql = if step <= 1 && !self.numbered {
-                format!("SELECT TOP ({limit}) {cols} FROM {from} WHERE {filter}")
+            let sql = if step <= 1 && !self.projection.numbered {
+                format!("SELECT TOP ({limit}) {cols} FROM (SELECT {} FROM {from} t WHERE {filter}) s", self.projection.raw)
             } else {
                 numbered(&step.to_string())
             };
@@ -835,10 +843,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_columns_cannot_shadow_numbering_or_count() {
+        // The projection and window syntax is shared with SQLite; exercise real name resolution
+        // locally without needing a SQL Server or evaluating its spatial methods.
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let columns = [("rustgis rn", "geometry"), ("rustgis total", "int"), ("i0", "int"), ("c0", "int")]
+            .map(|(name, ty)| (name.to_string(), ty.to_string()));
+        let (_, projection) = projection("rustgis rn", columns, Some("rustgis total"));
+        let id = projection.select.first().unwrap();
+        let sql = format!(
+            "SELECT {id}, i0, i1, i2, i3, [rustgis rn], [rustgis total] FROM \
+             (SELECT {}, ROW_NUMBER() OVER ({}) AS [rustgis rn], COUNT(*) OVER () AS [rustgis total] \
+             FROM (SELECT 101 AS [rustgis rn], 37 AS [rustgis total], 55 AS i0, 77 AS c0 \
+                   UNION ALL SELECT 202, 19, 66, 88) t) s ORDER BY [rustgis rn]",
+            projection.raw, projection.order
+        );
+        let mut statement = db.prepare(&sql).unwrap();
+        let rows: Vec<[i64; 7]> = statement
+            .query_map([], |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?]))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, [[19, 202, 19, 66, 88, 1, 2], [37, 101, 37, 55, 77, 2, 2]]);
+    }
+
+    #[test]
     fn addresses_take_secure_defaults_and_logins() {
         let c = config("mssql://sa@h/gis").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!((c.port, c.encrypt, c.trust_cert, c.login), (Some(1433), Encrypt::Required, false, Login::Sql("sa".into())));
         assert_eq!(config("mssql://CORP%5Cana@h").map(|c| c.login).ok(), Some(Login::Windows("CORP\\ana".into())));
+        assert_eq!(config(r"mssql://CORP\ana@h").map(|c| c.login).ok(), Some(Login::Windows("CORP\\ana".into())));
         assert_eq!(config("mssql://h").map(|c| c.login).ok(), Some(Login::Integrated));
         assert_eq!(config("mssql://u@h?instance=SQLEXPRESS").map(|c| c.port).ok(), Some(None));
         let c = config("MSSQL://u@[::1]:1500/my%20db?ENCRYPT=strict&trust_server_certificate=yes&ca=/x%20y.pem&hostname-in-certificate=db&connect-timeout=2").unwrap_or_else(|e| panic!("{e}"));
@@ -857,6 +891,14 @@ mod tests {
         for a in ["mssql://h?encrypt=nope", "mssql://h:port", "mssql://[::1", "postgres:host=h", "mssql://h?trust-server-certificate=maybe"]
         {
             assert!(config(a).is_err(), "{a}");
+        }
+    }
+
+    #[test]
+    fn connection_deadlines_are_bounded() {
+        for (given, expected) in [("1", 1), ("300", 300), ("301", 300), ("18446744073709551615", 300), ("0", 10), ("invalid", 10)] {
+            let c = config(&format!("mssql://sa@h/gis?connect-timeout={given}")).unwrap();
+            assert_eq!(c.connect_timeout, Duration::from_secs(expected), "{given}");
         }
     }
 

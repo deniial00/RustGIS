@@ -13,6 +13,13 @@ pub fn split_password(s: &str) -> Option<(String, Option<String>)> {
         return None;
     }
     let (mut public, password) = super::myconn::split_userinfo_password(s.trim())?;
+    let password = password.or_else(|| {
+        let (_, query) = public.split_once('?')?;
+        query.split('&').find_map(|kv| {
+            let (key, value) = kv.split_once('=')?;
+            (key.eq_ignore_ascii_case("pwd") || key.eq_ignore_ascii_case("passwd")).then(|| super::pgconn::percent_decode(value))
+        })
+    });
     super::credentials::redact_query(&mut public);
     Some((public, password))
 }
@@ -40,5 +47,24 @@ mod tests {
         assert!(is_address(" MSSQL://h/gis "));
         assert!(split_password("mysql://h").is_none());
         assert_eq!(database_name("mssql://u@h:1433/my%20db?x=1").as_deref(), Some("my db"));
+    }
+
+    #[test]
+    fn password_aliases_preserve_precedence_and_decoding() {
+        for (query, expected) in [
+            ("pwd=p%40ss", "p@ss"),
+            ("PaSsWd=hello%20world", "hello world"),
+            ("PWD=first&passwd=second", "first"),
+            ("passwd=first&pwd=second", "first"),
+            ("pwd=ignored&password=chosen", "chosen"),
+            ("passwd=ignored&pass=chosen", "chosen"),
+            ("pwd=&passwd=second", ""),
+        ] {
+            let (public, password) = split_password(&format!("mssql://sa@h/gis?{query}&encrypt=strict")).unwrap();
+            assert_eq!(password.as_deref(), Some(expected), "{query}");
+            assert_eq!(public, "mssql://sa@h/gis?encrypt=strict", "{query}");
+        }
+        let (_, password) = split_password("mssql://sa:userinfo@h/gis?password=query&pwd=alias").unwrap();
+        assert_eq!(password.as_deref(), Some("userinfo"));
     }
 }
