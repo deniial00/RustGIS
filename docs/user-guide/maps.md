@@ -202,6 +202,9 @@ meanwhile; exports and `rustgis-cli` wait for them. On the globe and in other pr
 tiles are reprojected. From scripts: `map.addTiles`, `map.removeTiles`, `map.setTiles`,
 `map.zoomToTiles` and `map.tiles`. `map.addTiles` accepts optional `"bounds": [west, south, east,
 north]` in longitude/latitude; `service.add` retains the bounds advertised by map and tile services.
+Explicit bounds must form a finite, ordered geographic rectangle; an invalid value rejects the
+command without adding or replacing a layer. Invalid bounds in a saved project are instead
+discarded, leaving the tile layer usable without that coverage metadata.
 
 ### Other worlds
 

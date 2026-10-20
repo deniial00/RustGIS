@@ -154,6 +154,12 @@ pub fn is_web(url: &str) -> bool {
     scheme.starts_with("https://") || scheme.starts_with("http://")
 }
 
+/// Whether coverage is a finite, ordered geographic rectangle (west, south, east, north).
+/// Half a degree of tolerance matches service capabilities parsing.
+pub fn valid_bounds([w, s, e, n]: &[f64; 4]) -> bool {
+    [*w, *s, *e, *n].iter().all(|v| v.is_finite()) && -180.5 <= *w && *w < *e && *e <= 180.5 && -90.5 <= *s && *s < *n && *n <= 90.5
+}
+
 fn is_zero(x: &f64) -> bool {
     *x == 0.0
 }
@@ -259,9 +265,7 @@ impl TileLayer {
         }
         // Bounds from a project must describe a finite geographic rectangle. Invalid metadata
         // doesn't make the tiles unreadable; it only leaves their coverage unknown.
-        self.bounds = self.bounds.filter(|[w, s, e, n]| {
-            [*w, *s, *e, *n].iter().all(|v| v.is_finite()) && -180.5 <= *w && *w < *e && *e <= 180.5 && -90.5 <= *s && *s < *n && *n <= 90.5
-        });
+        self.bounds = self.bounds.filter(valid_bounds);
         self.max_zoom = self.max_zoom.min(MAX_ZOOM);
         self.min_zoom = self.min_zoom.min(self.max_zoom);
         self.tile_size = if self.tile_size >= 384 { 512 } else { 256 };

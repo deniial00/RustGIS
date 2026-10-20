@@ -4951,6 +4951,34 @@ fn pmtiles_archives_frame_the_map_on_their_bounds() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn explicit_tile_bounds_are_rejected_without_replacing_the_layer() {
+    let mut s = Session::new(Project::default());
+    let url = "https://tiles.example.com/{z}/{x}/{y}.png";
+    s.run("map.addTiles", &json!({"url": url, "name": "Coverage", "bounds": [5, 45, 15, 55]})).unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    for bounds in [
+        json!([20, 0, 10, 10]),
+        json!([0, 20, 10, 10]),
+        json!([10, 0, 10, 10]),
+        json!([0, 10, 10, 10]),
+        json!([-181, 0, 10, 10]),
+        json!([0, 0, 181, 10]),
+        json!([0, -91, 10, 10]),
+        json!([0, 0, 10, 91]),
+        json!([0, 0, 1e300, 10]),
+        json!([0, 0, 10]),
+        json!([0, "south", 10, 10]),
+        json!("not bounds"),
+    ] {
+        let r = s.run("map.addTiles", &json!({"url": url, "name": "Coverage", "bounds": bounds, "replace": true}));
+        assert!(r.is_err(), "{bounds}: {r:?}");
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "{bounds}");
+    }
+    let r = s.run("map.zoomToTiles", &json!({"name": "Coverage"})).unwrap();
+    assert_eq!(r["bounds"], json!([5.0, 45.0, 15.0, 55.0]));
+}
+
 /// An MBTiles file of one red picture tile: added by path or as an upload, it is a tile layer that
 /// draws, survives a project round trip (by path), and a file that isn't an archive is refused.
 #[test]

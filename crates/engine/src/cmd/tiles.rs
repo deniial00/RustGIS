@@ -158,7 +158,11 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         if dated { rustgis_data::time::fill_template(url, at) } else { url.to_string() },
     );
     if let Some(bounds) = p.get("bounds").filter(|v| !v.is_null()) {
-        t.bounds = Some(serde::Deserialize::deserialize(bounds).map_err(|_| "bounds must be [west, south, east, north]")?);
+        let bounds = serde::Deserialize::deserialize(bounds).map_err(|_| "bounds must be [west, south, east, north]")?;
+        if !rustgis_map::tiles::valid_bounds(&bounds) {
+            return Err("bounds must be a finite, ordered geographic rectangle".into());
+        }
+        t.bounds = Some(bounds);
     }
     if dated {
         t.time_url = Some(url.to_string());
