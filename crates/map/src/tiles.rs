@@ -96,6 +96,10 @@ pub struct TileLayer {
     pub kind: TileKind,
     /// The URL template, TileJSON or style address.
     pub url: String,
+    /// Advertised longitude/latitude coverage (west, south, east, north), kept from service
+    /// capabilities so Zoom To Layer works without fetching the service again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<[f64; 4]>,
     /// Subdomains that `{s}` takes in turn (`a`, `b`, `c` when empty and the URL has `{s}`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subdomains: Vec<String>,
@@ -199,6 +203,7 @@ impl TileLayer {
             name: name.into(),
             kind,
             url: url.into(),
+            bounds: None,
             subdomains: Vec::new(),
             min_zoom: 0,
             max_zoom: max_zoom(),
@@ -252,6 +257,11 @@ impl TileLayer {
         if !self.style_layers.is_empty() && checked_style_layers(&self.style_layers).is_err() {
             self.style_layers.clear();
         }
+        // Bounds from a project must describe a finite geographic rectangle. Invalid metadata
+        // doesn't make the tiles unreadable; it only leaves their coverage unknown.
+        self.bounds = self.bounds.filter(|[w, s, e, n]| {
+            [*w, *s, *e, *n].iter().all(|v| v.is_finite()) && -180.5 <= *w && *w < *e && *e <= 180.5 && -90.5 <= *s && *s < *n && *n <= 90.5
+        });
         self.max_zoom = self.max_zoom.min(MAX_ZOOM);
         self.min_zoom = self.min_zoom.min(self.max_zoom);
         self.tile_size = if self.tile_size >= 384 { 512 } else { 256 };
@@ -356,6 +366,28 @@ mod tests {
         for bad in ["file:///etc/passwd", "ftp://x/{z}", "https://", "https:// x.com/{z}", "javascript:alert(1)"] {
             assert!(TileLayer::new("x", TileKind::Raster, bad).repair().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn invalid_coverage_does_not_hide_tiles() {
+        let mut t = TileLayer::new("WMS", TileKind::Raster, "https://maps.example.com/wms");
+        for bounds in [
+            [f64::NAN, 40.0, 10.0, 50.0],
+            [0.0, 40.0, f64::INFINITY, 50.0],
+            [10.0, 40.0, 0.0, 50.0],
+            [0.0, 50.0, 10.0, 40.0],
+            [0.0, 40.0, 0.0, 50.0],
+            [0.0, 91.0, 10.0, 92.0],
+            [-200.0, 40.0, 10.0, 50.0],
+        ] {
+            t.bounds = Some(bounds);
+            t.repair().unwrap();
+            assert_eq!(t.bounds, None, "{bounds:?}");
+            assert!(t.visible);
+        }
+        t.bounds = Some([-180.0, -90.0, 180.0, 90.0]);
+        t.repair().unwrap();
+        assert_eq!(t.bounds, Some([-180.0, -90.0, 180.0, 90.0]));
     }
 
     #[test]

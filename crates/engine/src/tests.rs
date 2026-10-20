@@ -5428,6 +5428,14 @@ fn services_list_and_add_layers() {
     s.run("service.add", &json!({"url": url, "layer": "Roads", "text": WMS})).unwrap();
     let t = s.map().tiles.first().unwrap();
     assert!(t.url.contains("LAYERS=roads") && t.url.contains("{bbox-epsg-3857}") && t.overlay, "{}", t.url);
+    // Returning to a service layer's extent still works after saving and reopening the project.
+    let project = serde_json::to_string(&s.project).unwrap();
+    let mut reopened = Session::new(serde_json::from_str(&project).unwrap());
+    reopened.run("map.goToXY", &json!({"lon": -100, "lat": 0, "scale": 1000000})).unwrap();
+    let r = reopened.run("map.zoomToTiles", &json!({"name": "Roads"})).unwrap();
+    assert_eq!(r["bounds"], json!([5.0, 45.0, 15.0, 55.0]));
+    let center = reopened.map().center_lonlat();
+    assert!((center.x - 10.0).abs() < 0.1 && (center.y - 50.0).abs() < 0.5, "{center:?}");
     assert!(s.run("service.add", &json!({"url": url, "layer": "nope", "text": WMS})).is_err());
     assert!(s.run("service.layers", &json!({"url": url, "text": "<html>no</html>"})).is_err());
     assert!(s.run("service.layers", &json!({"url": "file:///etc/x", "text": WMS})).is_err());

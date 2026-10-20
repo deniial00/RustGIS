@@ -1311,8 +1311,8 @@ fn visibility_box(ui: &Ui, cb: Rect, visible: bool, t: &Tokens) {
 }
 
 /// A web tile layer's row (index `i` of `count`, top first as the map lists them): its checkbox
-/// shows or hides it; right-click zooms to it (an archive or GeoTIFF), sets its opacity, moves it
-/// up or down (not with `reorder` off: the list is filtered), or removes it.
+/// shows or hides it; right-click zooms to it (known bounds, an archive or GeoTIFF), sets its
+/// opacity, moves it up or down (not with `reorder` off: the list is filtered), or removes it.
 fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: bool, tile: &TileLayer, t: &Tokens) {
     let shown = if tile.overlay { format!("{} · {}", tile.name, tl!("overlay")) } else { tile.name.clone() };
     let name = row_name(ui, shown.clone(), regular(12.5), ui.available_width() - NAME_X - 8.0);
@@ -1338,8 +1338,8 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
     }
     let resp = resp.on_hover_text(if elided { format!("{shown}\n{}", tile.url) } else { tile.url.clone() });
     resp.context_menu(|ui| {
-        // An archive or GeoTIFF says what it covers.
-        if matches!(tile.kind, TileKind::PmTiles | TileKind::Cog) {
+        // Stored bounds, an archive or GeoTIFF say what the layer covers.
+        if tile.bounds.is_some() || matches!(tile.kind, TileKind::PmTiles | TileKind::Cog) {
             if ui.button(tl!("Zoom To Layer")).clicked() {
                 action = Some(("map.zoomToTiles", json!({"index": i})));
                 ui.close();

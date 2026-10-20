@@ -15,6 +15,14 @@ projection; places that projection can't show are skipped. Type a scale in the s
 to it. More navigation tools are under [View
 effects](#view-effects) below.
 
+**Zoom To Layer** in a layer's right-click menu shows that layer's extent instead of the whole
+map. It works for feature and raster data, PMTiles archives, cloud-optimised GeoTIFFs, and service
+tile layers whose capabilities advertise geographic bounds, including WMS. WMS 1.3 geographic
+bounds and WMS 1.1 latitude/longitude bounds are inherited from parent layers when needed and
+saved with the project. Re-add a service layer saved by an older version to retain its bounds.
+Tile layers without known bounds (such as plain XYZ/TMS or MVT templates, styles and MBTiles
+archives) have no **Zoom To Layer** action unless bounds were supplied when adding them.
+
 **Rotating and tilting the map.** Drag with the right mouse button, or hold ++ctrl++ and drag
 with the Pan tool, to turn the map about the centre of the view (to the right turns it clockwise)
 and to tilt it (up tilts it further), as in MapLibre; or hold ++shift++ and press ++arrow-left++ or ++arrow-right++ to turn it, ++arrow-up++ or ++arrow-down++
@@ -181,7 +189,8 @@ which opens the Plugin Manager at the
 basemaps. Add any other with **Add Tile Layer…** at the bottom of the Basemap gallery.
 The gallery lists the map's tile layers: show or hide them, change their opacity and order, or
 remove them. The Layers pane lists them too, under the map's layers and above the basemap: tick
-one to show or hide it, and right-click it for its opacity, **Blend** mode, order and **Remove**.
+one to show or hide it, and right-click it for **Zoom To Layer** (when its bounds are known), opacity,
+**Blend** mode, order and **Remove**.
 A blend mode (Multiply, Screen, Overlay, Darken, Lighten, Difference) combines a tile layer with
 the tile layers and basemap beneath it: stack imagery over a hillshade and set it to Multiply to
 let the terrain show through. Overlays (labels, roads) stay on top of the basemaps; choosing a built-in basemap
@@ -191,7 +200,8 @@ their credits are shown in the corner of the map and drawn on exports.
 Tiles load in the background and the map fills in as they arrive, with coarser tiles standing in
 meanwhile; exports and `rustgis-cli` wait for them. On the globe and in other projections the
 tiles are reprojected. From scripts: `map.addTiles`, `map.removeTiles`, `map.setTiles`,
-`map.zoomToTiles` and `map.tiles`.
+`map.zoomToTiles` and `map.tiles`. `map.addTiles` accepts optional `"bounds": [west, south, east,
+north]` in longitude/latitude; `service.add` retains the bounds advertised by map and tile services.
 
 ### Other worlds
 
