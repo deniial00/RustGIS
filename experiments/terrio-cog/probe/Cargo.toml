@@ -1,0 +1,10 @@
+[package]
+name = "terrio-geotiff-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+terrio = { git = "https://github.com/opengeos/terrio", rev = "ce3c4463f19864284d743720123c4d022784c497", default-features = false, features = ["geotiff"] }

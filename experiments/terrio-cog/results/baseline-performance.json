@@ -1,0 +1,2875 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-21T11:41:17.305626+00:00",
+  "invocation": [
+    "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/compare.py",
+    "--binary",
+    "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+    "--out",
+    "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance",
+    "--writers",
+    "native",
+    "--phase",
+    "performance",
+    "--repeats",
+    "3",
+    "--size",
+    "4096"
+  ],
+  "binary": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "python": "3.15.0 (main, Oct  9 2026, 11:16:41) [Clang 21.0.0 (clang-2100.3.34.2)]",
+  "binary_sha256": "ec770f43dfb9c03ca89b684d4eac4d066a9011b45cd68471a3fbb8f1ead9a80c",
+  "thread_environment": {
+    "RAYON_NUM_THREADS": null,
+    "OMP_NUM_THREADS": null
+  },
+  "gdal": "GDAL 3.13.3 \"Iowa City\", released 2026/08/13",
+  "numpy": "2.5.4",
+  "validator_source": "/opt/homebrew/lib/python3.15/site-packages/osgeo_utils/samples/validate_cloud_optimized_geotiff.py",
+  "configuration": {
+    "repeats": 3,
+    "writers": [
+      "native"
+    ],
+    "performance_size": 4096,
+    "correctness_sizes": {
+      "rgb": [
+        1024,
+        768
+      ],
+      "float-nodata": [
+        1025,
+        769
+      ],
+      "uint16": [
+        1025,
+        769
+      ],
+      "palette": [
+        1025,
+        769
+      ],
+      "classes": [
+        1025,
+        769
+      ],
+      "gray-alpha": [
+        1025,
+        769
+      ],
+      "rgba": [
+        1025,
+        769
+      ],
+      "odd": [
+        1025,
+        769
+      ],
+      "bigtiff": [
+        1025,
+        769
+      ]
+    },
+    "phase": "performance"
+  },
+  "measurement_contract": {
+    "export_ms": "File-to-file export: native write_to(BufWriter<File>) or Terrio write_raster_dataset, including sync_all and output metadata; excludes fixture construction.",
+    "peak_rss": "Fresh export process: fixture, adapter conversion, and writer allocations; native is not forced to buffer a full encoded output Vec. /usr/bin/time reports process peak resident memory.",
+    "process_wall_ms": "Python subprocess elapsed time, including process startup, fixture construction, file export, and exit; includes time wrapper on performance runs.",
+    "bytes": "Actual output file length, checked against binary stdout JSON.",
+    "overview_oracle": "Direct full-source factor-2^n clipped blocks; ceil dimensions until max <=512; nodata excluded; alpha-weighted colors and mean alpha; categorical full-block center; f64 mean to f32 then integer round half-up.",
+    "correctness": "Exact sample equality (including float32), no numerical or performance acceptance thresholds. Validator warnings retained, errors fail. All cases and both writers attempted despite failures.",
+    "deflate_level": "Writer configuration is level 6; TIFF compression tags verify Deflate, but the zlib stream does not uniquely prove the configured compression level.",
+    "performance_order": "Sequential alternating native/Terrio writers each repetition; no concurrent exports or warmup omission."
+  },
+  "correctness": [],
+  "performance_runs": [
+    {
+      "writer": "native",
+      "case": "rgb",
+      "width": 4096,
+      "height": 4096,
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run1.tif",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "-o",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run1.time.txt",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+        "export",
+        "native",
+        "rgb",
+        "4096",
+        "4096",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run1.tif"
+      ],
+      "checks": [
+        {
+          "name": "process.exit",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "protocol.writer",
+          "status": "PASS",
+          "expected": "native",
+          "actual": "native"
+        },
+        {
+          "name": "protocol.case",
+          "status": "PASS",
+          "expected": "rgb",
+          "actual": "rgb"
+        },
+        {
+          "name": "protocol.width",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.height",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.bytes",
+          "status": "PASS",
+          "expected": 22939972,
+          "actual": 22939972
+        },
+        {
+          "name": "time.peak_rss",
+          "status": "PASS",
+          "actual": 211582976
+        }
+      ],
+      "returncode": 0,
+      "stdout": "{\"bytes\":22939972,\"case\":\"rgb\",\"export_ms\":1173.8223750000002,\"height\":4096,\"width\":4096,\"writer\":\"native\"}\n",
+      "stderr": "",
+      "export": {
+        "bytes": 22939972,
+        "case": "rgb",
+        "export_ms": 1173.8223750000002,
+        "height": 4096,
+        "width": 4096,
+        "writer": "native"
+      },
+      "export_ms": 1173.8223750000002,
+      "bytes": 22939972,
+      "process_wall_ms": 1634.2589169798885,
+      "time_raw": "        1.62 real         1.43 user         0.02 sys\n           211582976  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13110  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  24  voluntary context switches\n                 444  involuntary context switches\n         20270884812  instructions retired\n          4531597453  cycles elapsed\n           206864888  peak memory footprint\n",
+      "time_raw_path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run1.time.txt",
+      "peak_rss_source_unit": "bytes",
+      "peak_rss_bytes": 211582976,
+      "status": "PASS",
+      "repeat": 1,
+      "sequence": 1
+    },
+    {
+      "writer": "native",
+      "case": "rgb",
+      "width": 4096,
+      "height": 4096,
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run2.tif",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "-o",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run2.time.txt",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+        "export",
+        "native",
+        "rgb",
+        "4096",
+        "4096",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run2.tif"
+      ],
+      "checks": [
+        {
+          "name": "process.exit",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "protocol.writer",
+          "status": "PASS",
+          "expected": "native",
+          "actual": "native"
+        },
+        {
+          "name": "protocol.case",
+          "status": "PASS",
+          "expected": "rgb",
+          "actual": "rgb"
+        },
+        {
+          "name": "protocol.width",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.height",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.bytes",
+          "status": "PASS",
+          "expected": 22939972,
+          "actual": 22939972
+        },
+        {
+          "name": "time.peak_rss",
+          "status": "PASS",
+          "actual": 211599360
+        }
+      ],
+      "returncode": 0,
+      "stdout": "{\"bytes\":22939972,\"case\":\"rgb\",\"export_ms\":1165.6335,\"height\":4096,\"width\":4096,\"writer\":\"native\"}\n",
+      "stderr": "",
+      "export": {
+        "bytes": 22939972,
+        "case": "rgb",
+        "export_ms": 1165.6335,
+        "height": 4096,
+        "width": 4096,
+        "writer": "native"
+      },
+      "export_ms": 1165.6335,
+      "bytes": 22939972,
+      "process_wall_ms": 1471.5907079807948,
+      "time_raw": "        1.46 real         1.42 user         0.02 sys\n           211599360  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13111  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  23  voluntary context switches\n                 376  involuntary context switches\n         20269470965  instructions retired\n          4530399204  cycles elapsed\n           206881272  peak memory footprint\n",
+      "time_raw_path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run2.time.txt",
+      "peak_rss_source_unit": "bytes",
+      "peak_rss_bytes": 211599360,
+      "status": "PASS",
+      "repeat": 2,
+      "sequence": 2
+    },
+    {
+      "writer": "native",
+      "case": "rgb",
+      "width": 4096,
+      "height": 4096,
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run3.tif",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "-o",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run3.time.txt",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+        "export",
+        "native",
+        "rgb",
+        "4096",
+        "4096",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run3.tif"
+      ],
+      "checks": [
+        {
+          "name": "process.exit",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "protocol.writer",
+          "status": "PASS",
+          "expected": "native",
+          "actual": "native"
+        },
+        {
+          "name": "protocol.case",
+          "status": "PASS",
+          "expected": "rgb",
+          "actual": "rgb"
+        },
+        {
+          "name": "protocol.width",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.height",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.bytes",
+          "status": "PASS",
+          "expected": 22939972,
+          "actual": 22939972
+        },
+        {
+          "name": "time.peak_rss",
+          "status": "PASS",
+          "actual": 211615744
+        }
+      ],
+      "returncode": 0,
+      "stdout": "{\"bytes\":22939972,\"case\":\"rgb\",\"export_ms\":1184.5155419999999,\"height\":4096,\"width\":4096,\"writer\":\"native\"}\n",
+      "stderr": "",
+      "export": {
+        "bytes": 22939972,
+        "case": "rgb",
+        "export_ms": 1184.5155419999999,
+        "height": 4096,
+        "width": 4096,
+        "writer": "native"
+      },
+      "export_ms": 1184.5155419999999,
+      "bytes": 22939972,
+      "process_wall_ms": 1490.2102499909233,
+      "time_raw": "        1.48 real         1.43 user         0.02 sys\n           211615744  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13112  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  20  voluntary context switches\n                 761  involuntary context switches\n         20273418195  instructions retired\n          4542324596  cycles elapsed\n           206897656  peak memory footprint\n",
+      "time_raw_path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run3.time.txt",
+      "peak_rss_source_unit": "bytes",
+      "peak_rss_bytes": 211615744,
+      "status": "PASS",
+      "repeat": 3,
+      "sequence": 3
+    },
+    {
+      "writer": "native",
+      "case": "float-nodata",
+      "width": 4096,
+      "height": 4096,
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run1.tif",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "-o",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run1.time.txt",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+        "export",
+        "native",
+        "float-nodata",
+        "4096",
+        "4096",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run1.tif"
+      ],
+      "checks": [
+        {
+          "name": "process.exit",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "protocol.writer",
+          "status": "PASS",
+          "expected": "native",
+          "actual": "native"
+        },
+        {
+          "name": "protocol.case",
+          "status": "PASS",
+          "expected": "float-nodata",
+          "actual": "float-nodata"
+        },
+        {
+          "name": "protocol.width",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.height",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.bytes",
+          "status": "PASS",
+          "expected": 1621309,
+          "actual": 1621309
+        },
+        {
+          "name": "time.peak_rss",
+          "status": "PASS",
+          "actual": 77479936
+        }
+      ],
+      "returncode": 0,
+      "stdout": "{\"bytes\":1621309,\"case\":\"float-nodata\",\"export_ms\":407.072084,\"height\":4096,\"width\":4096,\"writer\":\"native\"}\n",
+      "stderr": "",
+      "export": {
+        "bytes": 1621309,
+        "case": "float-nodata",
+        "export_ms": 407.072084,
+        "height": 4096,
+        "width": 4096,
+        "writer": "native"
+      },
+      "export_ms": 407.072084,
+      "bytes": 1621309,
+      "process_wall_ms": 501.1784170055762,
+      "time_raw": "        0.49 real         0.47 user         0.00 sys\n            77479936  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                4925  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   6  voluntary context switches\n                 326  involuntary context switches\n          8160311749  instructions retired\n          1496720218  cycles elapsed\n            72696216  peak memory footprint\n",
+      "time_raw_path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run1.time.txt",
+      "peak_rss_source_unit": "bytes",
+      "peak_rss_bytes": 77479936,
+      "status": "PASS",
+      "repeat": 1,
+      "sequence": 4
+    },
+    {
+      "writer": "native",
+      "case": "float-nodata",
+      "width": 4096,
+      "height": 4096,
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run2.tif",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "-o",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run2.time.txt",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+        "export",
+        "native",
+        "float-nodata",
+        "4096",
+        "4096",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run2.tif"
+      ],
+      "checks": [
+        {
+          "name": "process.exit",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "protocol.writer",
+          "status": "PASS",
+          "expected": "native",
+          "actual": "native"
+        },
+        {
+          "name": "protocol.case",
+          "status": "PASS",
+          "expected": "float-nodata",
+          "actual": "float-nodata"
+        },
+        {
+          "name": "protocol.width",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.height",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.bytes",
+          "status": "PASS",
+          "expected": 1621309,
+          "actual": 1621309
+        },
+        {
+          "name": "time.peak_rss",
+          "status": "PASS",
+          "actual": 77545472
+        }
+      ],
+      "returncode": 0,
+      "stdout": "{\"bytes\":1621309,\"case\":\"float-nodata\",\"export_ms\":403.064833,\"height\":4096,\"width\":4096,\"writer\":\"native\"}\n",
+      "stderr": "",
+      "export": {
+        "bytes": 1621309,
+        "case": "float-nodata",
+        "export_ms": 403.064833,
+        "height": 4096,
+        "width": 4096,
+        "writer": "native"
+      },
+      "export_ms": 403.064833,
+      "bytes": 1621309,
+      "process_wall_ms": 495.8607089938596,
+      "time_raw": "        0.48 real         0.46 user         0.00 sys\n            77545472  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                4931  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   5  voluntary context switches\n                 193  involuntary context switches\n          8159320930  instructions retired\n          1495841068  cycles elapsed\n            72761752  peak memory footprint\n",
+      "time_raw_path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run2.time.txt",
+      "peak_rss_source_unit": "bytes",
+      "peak_rss_bytes": 77545472,
+      "status": "PASS",
+      "repeat": 2,
+      "sequence": 5
+    },
+    {
+      "writer": "native",
+      "case": "float-nodata",
+      "width": 4096,
+      "height": 4096,
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run3.tif",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "-o",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run3.time.txt",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/native-baseline",
+        "export",
+        "native",
+        "float-nodata",
+        "4096",
+        "4096",
+        "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run3.tif"
+      ],
+      "checks": [
+        {
+          "name": "process.exit",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "protocol.writer",
+          "status": "PASS",
+          "expected": "native",
+          "actual": "native"
+        },
+        {
+          "name": "protocol.case",
+          "status": "PASS",
+          "expected": "float-nodata",
+          "actual": "float-nodata"
+        },
+        {
+          "name": "protocol.width",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.height",
+          "status": "PASS",
+          "expected": 4096,
+          "actual": 4096
+        },
+        {
+          "name": "protocol.bytes",
+          "status": "PASS",
+          "expected": 1621309,
+          "actual": 1621309
+        },
+        {
+          "name": "time.peak_rss",
+          "status": "PASS",
+          "actual": 77332480
+        }
+      ],
+      "returncode": 0,
+      "stdout": "{\"bytes\":1621309,\"case\":\"float-nodata\",\"export_ms\":405.09591700000004,\"height\":4096,\"width\":4096,\"writer\":\"native\"}\n",
+      "stderr": "",
+      "export": {
+        "bytes": 1621309,
+        "case": "float-nodata",
+        "export_ms": 405.09591700000004,
+        "height": 4096,
+        "width": 4096,
+        "writer": "native"
+      },
+      "export_ms": 405.09591700000004,
+      "bytes": 1621309,
+      "process_wall_ms": 499.5549159939401,
+      "time_raw": "        0.49 real         0.47 user         0.00 sys\n            77332480  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                4916  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   5  voluntary context switches\n                 285  involuntary context switches\n          8161222977  instructions retired\n          1497309996  cycles elapsed\n            72548760  peak memory footprint\n",
+      "time_raw_path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run3.time.txt",
+      "peak_rss_source_unit": "bytes",
+      "peak_rss_bytes": 77332480,
+      "status": "PASS",
+      "repeat": 3,
+      "sequence": 6
+    }
+  ],
+  "performance_summary": [
+    {
+      "case": "rgb",
+      "writer": "native",
+      "expected_runs": 3,
+      "attempted_runs": 3,
+      "successful_runs": 3,
+      "failed_runs": 0,
+      "status": "PASS",
+      "export_ms_median": 1173.8223750000002,
+      "process_wall_ms_median": 1490.2102499909233,
+      "peak_rss_bytes_median": 211599360,
+      "bytes_median": 22939972
+    },
+    {
+      "case": "float-nodata",
+      "writer": "native",
+      "expected_runs": 3,
+      "attempted_runs": 3,
+      "successful_runs": 3,
+      "failed_runs": 0,
+      "status": "PASS",
+      "export_ms_median": 405.09591700000004,
+      "process_wall_ms_median": 499.5549159939401,
+      "peak_rss_bytes_median": 77479936,
+      "bytes_median": 1621309
+    }
+  ],
+  "performance_correctness": [
+    {
+      "writer": "native",
+      "case": "rgb",
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run1.tif",
+      "checks": [
+        {
+          "name": "tiff.bigtiff",
+          "status": "PASS",
+          "expected": false,
+          "actual": false,
+          "magic_hex": "49492a00"
+        },
+        {
+          "name": "tiff.directory_count",
+          "status": "PASS",
+          "expected": 4,
+          "actual": 4
+        },
+        {
+          "name": "tiff.ifd[0].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[0].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[0].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "tiff.ifd[1].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[1].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[1].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "tiff.ifd[2].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[2].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[2].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "tiff.ifd[3].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[3].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[3].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "gdal.cog_validator",
+          "status": "PASS",
+          "warnings": [],
+          "errors": []
+        },
+        {
+          "name": "gdal.dimensions",
+          "status": "PASS",
+          "expected": [
+            4096,
+            4096
+          ],
+          "actual": [
+            4096,
+            4096
+          ]
+        },
+        {
+          "name": "gdal.geotransform",
+          "status": "PASS",
+          "expected": [
+            500000.0,
+            30.0,
+            0.0,
+            4000000.0,
+            0.0,
+            -30.0
+          ],
+          "actual": [
+            500000.0,
+            30.0,
+            0.0,
+            4000000.0,
+            0.0,
+            -30.0
+          ]
+        },
+        {
+          "name": "gdal.epsg",
+          "status": "PASS",
+          "expected": 32617,
+          "actual": "32617"
+        },
+        {
+          "name": "gdal.band_count",
+          "status": "PASS",
+          "expected": 3,
+          "actual": 3
+        },
+        {
+          "name": "band[1].full.dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[1].full.color_interpretation",
+          "status": "PASS",
+          "expected": "Red",
+          "actual": "Red"
+        },
+        {
+          "name": "band[1].full.tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].full.nodata",
+          "status": "PASS",
+          "expected": null,
+          "actual": null
+        },
+        {
+          "name": "band[1].full.pixels",
+          "status": "PASS",
+          "expected_shape": [
+            4096,
+            4096
+          ],
+          "actual_shape": [
+            4096,
+            4096
+          ],
+          "compared_samples": 16777216,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview_count",
+          "status": "PASS",
+          "expected": 3,
+          "actual": 3
+        },
+        {
+          "name": "band[1].overview[0].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            2048,
+            2048
+          ],
+          "actual": [
+            2048,
+            2048
+          ],
+          "full_source_factor": 2
+        },
+        {
+          "name": "band[1].overview[0].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[1].overview[0].color_interpretation",
+          "status": "PASS",
+          "expected": "Red",
+          "actual": "Red"
+        },
+        {
+          "name": "band[1].overview[0].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].overview[0].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            2048,
+            2048
+          ],
+          "actual_shape": [
+            2048,
+            2048
+          ],
+          "compared_samples": 4194304,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[1].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            1024,
+            1024
+          ],
+          "actual": [
+            1024,
+            1024
+          ],
+          "full_source_factor": 4
+        },
+        {
+          "name": "band[1].overview[1].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[1].overview[1].color_interpretation",
+          "status": "PASS",
+          "expected": "Red",
+          "actual": "Red"
+        },
+        {
+          "name": "band[1].overview[1].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].overview[1].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            1024,
+            1024
+          ],
+          "actual_shape": [
+            1024,
+            1024
+          ],
+          "compared_samples": 1048576,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[2].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ],
+          "full_source_factor": 8
+        },
+        {
+          "name": "band[1].overview[2].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[1].overview[2].color_interpretation",
+          "status": "PASS",
+          "expected": "Red",
+          "actual": "Red"
+        },
+        {
+          "name": "band[1].overview[2].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].overview[2].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            512,
+            512
+          ],
+          "actual_shape": [
+            512,
+            512
+          ],
+          "compared_samples": 262144,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[2].full.dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[2].full.color_interpretation",
+          "status": "PASS",
+          "expected": "Green",
+          "actual": "Green"
+        },
+        {
+          "name": "band[2].full.tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[2].full.nodata",
+          "status": "PASS",
+          "expected": null,
+          "actual": null
+        },
+        {
+          "name": "band[2].full.pixels",
+          "status": "PASS",
+          "expected_shape": [
+            4096,
+            4096
+          ],
+          "actual_shape": [
+            4096,
+            4096
+          ],
+          "compared_samples": 16777216,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[2].overview_count",
+          "status": "PASS",
+          "expected": 3,
+          "actual": 3
+        },
+        {
+          "name": "band[2].overview[0].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            2048,
+            2048
+          ],
+          "actual": [
+            2048,
+            2048
+          ],
+          "full_source_factor": 2
+        },
+        {
+          "name": "band[2].overview[0].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[2].overview[0].color_interpretation",
+          "status": "PASS",
+          "expected": "Green",
+          "actual": "Green"
+        },
+        {
+          "name": "band[2].overview[0].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[2].overview[0].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            2048,
+            2048
+          ],
+          "actual_shape": [
+            2048,
+            2048
+          ],
+          "compared_samples": 4194304,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[2].overview[1].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            1024,
+            1024
+          ],
+          "actual": [
+            1024,
+            1024
+          ],
+          "full_source_factor": 4
+        },
+        {
+          "name": "band[2].overview[1].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[2].overview[1].color_interpretation",
+          "status": "PASS",
+          "expected": "Green",
+          "actual": "Green"
+        },
+        {
+          "name": "band[2].overview[1].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[2].overview[1].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            1024,
+            1024
+          ],
+          "actual_shape": [
+            1024,
+            1024
+          ],
+          "compared_samples": 1048576,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[2].overview[2].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ],
+          "full_source_factor": 8
+        },
+        {
+          "name": "band[2].overview[2].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[2].overview[2].color_interpretation",
+          "status": "PASS",
+          "expected": "Green",
+          "actual": "Green"
+        },
+        {
+          "name": "band[2].overview[2].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[2].overview[2].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            512,
+            512
+          ],
+          "actual_shape": [
+            512,
+            512
+          ],
+          "compared_samples": 262144,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[3].full.dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[3].full.color_interpretation",
+          "status": "PASS",
+          "expected": "Blue",
+          "actual": "Blue"
+        },
+        {
+          "name": "band[3].full.tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[3].full.nodata",
+          "status": "PASS",
+          "expected": null,
+          "actual": null
+        },
+        {
+          "name": "band[3].full.pixels",
+          "status": "PASS",
+          "expected_shape": [
+            4096,
+            4096
+          ],
+          "actual_shape": [
+            4096,
+            4096
+          ],
+          "compared_samples": 16777216,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[3].overview_count",
+          "status": "PASS",
+          "expected": 3,
+          "actual": 3
+        },
+        {
+          "name": "band[3].overview[0].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            2048,
+            2048
+          ],
+          "actual": [
+            2048,
+            2048
+          ],
+          "full_source_factor": 2
+        },
+        {
+          "name": "band[3].overview[0].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[3].overview[0].color_interpretation",
+          "status": "PASS",
+          "expected": "Blue",
+          "actual": "Blue"
+        },
+        {
+          "name": "band[3].overview[0].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[3].overview[0].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            2048,
+            2048
+          ],
+          "actual_shape": [
+            2048,
+            2048
+          ],
+          "compared_samples": 4194304,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[3].overview[1].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            1024,
+            1024
+          ],
+          "actual": [
+            1024,
+            1024
+          ],
+          "full_source_factor": 4
+        },
+        {
+          "name": "band[3].overview[1].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[3].overview[1].color_interpretation",
+          "status": "PASS",
+          "expected": "Blue",
+          "actual": "Blue"
+        },
+        {
+          "name": "band[3].overview[1].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[3].overview[1].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            1024,
+            1024
+          ],
+          "actual_shape": [
+            1024,
+            1024
+          ],
+          "compared_samples": 1048576,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[3].overview[2].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ],
+          "full_source_factor": 8
+        },
+        {
+          "name": "band[3].overview[2].dtype",
+          "status": "PASS",
+          "expected": "Byte",
+          "actual": "Byte"
+        },
+        {
+          "name": "band[3].overview[2].color_interpretation",
+          "status": "PASS",
+          "expected": "Blue",
+          "actual": "Blue"
+        },
+        {
+          "name": "band[3].overview[2].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[3].overview[2].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            512,
+            512
+          ],
+          "actual_shape": [
+            512,
+            512
+          ],
+          "compared_samples": 262144,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        }
+      ],
+      "expected": {
+        "dimensions": [
+          4096,
+          4096
+        ],
+        "overview_dimensions": [
+          [
+            2048,
+            2048
+          ],
+          [
+            1024,
+            1024
+          ],
+          [
+            512,
+            512
+          ]
+        ],
+        "overview_full_source_factors": [
+          2,
+          4,
+          8
+        ],
+        "nodata": null,
+        "dtype": "uint8",
+        "color_interpretations": [
+          "Red",
+          "Green",
+          "Blue"
+        ]
+      },
+      "bytes": 22939972,
+      "tiff": {
+        "magic_hex": "49492a00",
+        "byte_order": "little",
+        "bigtiff": false,
+        "directories": [
+          {
+            "offset": 8,
+            "tags": {
+              "256": 4096,
+              "257": 4096,
+              "258": [
+                8,
+                8,
+                8
+              ],
+              "259": 8,
+              "262": 2,
+              "277": 3,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": [
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          {
+            "offset": 194,
+            "tags": {
+              "256": 2048,
+              "257": 2048,
+              "258": [
+                8,
+                8,
+                8
+              ],
+              "259": 8,
+              "262": 2,
+              "277": 3,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": [
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          {
+            "offset": 356,
+            "tags": {
+              "256": 1024,
+              "257": 1024,
+              "258": [
+                8,
+                8,
+                8
+              ],
+              "259": 8,
+              "262": 2,
+              "277": 3,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": [
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          {
+            "offset": 518,
+            "tags": {
+              "256": 512,
+              "257": 512,
+              "258": [
+                8,
+                8,
+                8
+              ],
+              "259": 8,
+              "262": 2,
+              "277": 3,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": [
+                1,
+                1,
+                1
+              ]
+            }
+          }
+        ]
+      },
+      "cog_validator": {
+        "full_check": true,
+        "warnings": [],
+        "errors": [],
+        "details": {
+          "ifd_offsets": {
+            "main": 8,
+            "overview_0": 194,
+            "overview_1": 356,
+            "overview_2": 518
+          },
+          "data_offsets": {
+            "main": 2722628,
+            "overview_0": 297172,
+            "overview_1": 32660,
+            "overview_2": 1504
+          }
+        },
+        "stdout": "",
+        "stderr": ""
+      },
+      "dataset": {
+        "width": 4096,
+        "height": 4096,
+        "bands": 3,
+        "geotransform": [
+          500000.0,
+          30.0,
+          0.0,
+          4000000.0,
+          0.0,
+          -30.0
+        ],
+        "projection_wkt": "PROJCS[\"WGS 84 / UTM zone 17N\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",-81],PARAMETER[\"scale_factor\",0.9996],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH],AUTHORITY[\"EPSG\",\"32617\"]]",
+        "authority_name": "EPSG",
+        "authority_code": "32617",
+        "metadata": {
+          "AREA_OR_POINT": "Area"
+        },
+        "image_structure": {
+          "COMPRESSION": "DEFLATE",
+          "INTERLEAVE": "PIXEL",
+          "LAYOUT": "COG"
+        },
+        "files": [
+          "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-rgb-4096x4096-run1.tif"
+        ]
+      },
+      "bands": [
+        {
+          "index": 1,
+          "overviews": [
+            {
+              "level": 0,
+              "width": 2048,
+              "height": 2048,
+              "dtype": "Byte",
+              "color_interpretation": "Red",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  2048,
+                  2048
+                ],
+                "actual_shape": [
+                  2048,
+                  2048
+                ],
+                "compared_samples": 4194304,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 1,
+              "width": 1024,
+              "height": 1024,
+              "dtype": "Byte",
+              "color_interpretation": "Red",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  1024,
+                  1024
+                ],
+                "actual_shape": [
+                  1024,
+                  1024
+                ],
+                "compared_samples": 1048576,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 2,
+              "width": 512,
+              "height": 512,
+              "dtype": "Byte",
+              "color_interpretation": "Red",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  512,
+                  512
+                ],
+                "actual_shape": [
+                  512,
+                  512
+                ],
+                "compared_samples": 262144,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            }
+          ],
+          "full": {
+            "width": 4096,
+            "height": 4096,
+            "dtype": "Byte",
+            "color_interpretation": "Red",
+            "nodata": null,
+            "block_size": [
+              512,
+              512
+            ],
+            "overview_count": 3,
+            "metadata": {},
+            "image_structure": {},
+            "tiff": {},
+            "palette": null,
+            "comparison": {
+              "expected_shape": [
+                4096,
+                4096
+              ],
+              "actual_shape": [
+                4096,
+                4096
+              ],
+              "compared_samples": 16777216,
+              "overlap_mismatches": 0,
+              "missing_samples": 0,
+              "excess_samples": 0,
+              "mismatch_count": 0,
+              "max_abs_error_finite": 0.0,
+              "examples": []
+            }
+          }
+        },
+        {
+          "index": 2,
+          "overviews": [
+            {
+              "level": 0,
+              "width": 2048,
+              "height": 2048,
+              "dtype": "Byte",
+              "color_interpretation": "Green",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  2048,
+                  2048
+                ],
+                "actual_shape": [
+                  2048,
+                  2048
+                ],
+                "compared_samples": 4194304,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 1,
+              "width": 1024,
+              "height": 1024,
+              "dtype": "Byte",
+              "color_interpretation": "Green",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  1024,
+                  1024
+                ],
+                "actual_shape": [
+                  1024,
+                  1024
+                ],
+                "compared_samples": 1048576,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 2,
+              "width": 512,
+              "height": 512,
+              "dtype": "Byte",
+              "color_interpretation": "Green",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  512,
+                  512
+                ],
+                "actual_shape": [
+                  512,
+                  512
+                ],
+                "compared_samples": 262144,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            }
+          ],
+          "full": {
+            "width": 4096,
+            "height": 4096,
+            "dtype": "Byte",
+            "color_interpretation": "Green",
+            "nodata": null,
+            "block_size": [
+              512,
+              512
+            ],
+            "overview_count": 3,
+            "metadata": {},
+            "image_structure": {},
+            "tiff": {},
+            "palette": null,
+            "comparison": {
+              "expected_shape": [
+                4096,
+                4096
+              ],
+              "actual_shape": [
+                4096,
+                4096
+              ],
+              "compared_samples": 16777216,
+              "overlap_mismatches": 0,
+              "missing_samples": 0,
+              "excess_samples": 0,
+              "mismatch_count": 0,
+              "max_abs_error_finite": 0.0,
+              "examples": []
+            }
+          }
+        },
+        {
+          "index": 3,
+          "overviews": [
+            {
+              "level": 0,
+              "width": 2048,
+              "height": 2048,
+              "dtype": "Byte",
+              "color_interpretation": "Blue",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  2048,
+                  2048
+                ],
+                "actual_shape": [
+                  2048,
+                  2048
+                ],
+                "compared_samples": 4194304,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 1,
+              "width": 1024,
+              "height": 1024,
+              "dtype": "Byte",
+              "color_interpretation": "Blue",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  1024,
+                  1024
+                ],
+                "actual_shape": [
+                  1024,
+                  1024
+                ],
+                "compared_samples": 1048576,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 2,
+              "width": 512,
+              "height": 512,
+              "dtype": "Byte",
+              "color_interpretation": "Blue",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  512,
+                  512
+                ],
+                "actual_shape": [
+                  512,
+                  512
+                ],
+                "compared_samples": 262144,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            }
+          ],
+          "full": {
+            "width": 4096,
+            "height": 4096,
+            "dtype": "Byte",
+            "color_interpretation": "Blue",
+            "nodata": null,
+            "block_size": [
+              512,
+              512
+            ],
+            "overview_count": 3,
+            "metadata": {},
+            "image_structure": {},
+            "tiff": {},
+            "palette": null,
+            "comparison": {
+              "expected_shape": [
+                4096,
+                4096
+              ],
+              "actual_shape": [
+                4096,
+                4096
+              ],
+              "compared_samples": 16777216,
+              "overlap_mismatches": 0,
+              "missing_samples": 0,
+              "excess_samples": 0,
+              "mismatch_count": 0,
+              "max_abs_error_finite": 0.0,
+              "examples": []
+            }
+          }
+        }
+      ],
+      "status": "PASS",
+      "failed_checks": 0
+    },
+    {
+      "writer": "native",
+      "case": "float-nodata",
+      "path": "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run1.tif",
+      "checks": [
+        {
+          "name": "tiff.bigtiff",
+          "status": "PASS",
+          "expected": false,
+          "actual": false,
+          "magic_hex": "49492a00"
+        },
+        {
+          "name": "tiff.directory_count",
+          "status": "PASS",
+          "expected": 4,
+          "actual": 4
+        },
+        {
+          "name": "tiff.ifd[0].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[0].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[0].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "tiff.ifd[1].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[1].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[1].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "tiff.ifd[2].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[2].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[2].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "tiff.ifd[3].deflate",
+          "status": "PASS",
+          "expected": [
+            8,
+            32946
+          ],
+          "actual": 8
+        },
+        {
+          "name": "tiff.ifd[3].predictor",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "tiff.ifd[3].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "gdal.cog_validator",
+          "status": "PASS",
+          "warnings": [],
+          "errors": []
+        },
+        {
+          "name": "gdal.dimensions",
+          "status": "PASS",
+          "expected": [
+            4096,
+            4096
+          ],
+          "actual": [
+            4096,
+            4096
+          ]
+        },
+        {
+          "name": "gdal.geotransform",
+          "status": "PASS",
+          "expected": [
+            500000.0,
+            30.0,
+            0.0,
+            4000000.0,
+            0.0,
+            -30.0
+          ],
+          "actual": [
+            500000.0,
+            30.0,
+            0.0,
+            4000000.0,
+            0.0,
+            -30.0
+          ]
+        },
+        {
+          "name": "gdal.epsg",
+          "status": "PASS",
+          "expected": 32617,
+          "actual": "32617"
+        },
+        {
+          "name": "gdal.band_count",
+          "status": "PASS",
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "band[1].full.dtype",
+          "status": "PASS",
+          "expected": "Float32",
+          "actual": "Float32"
+        },
+        {
+          "name": "band[1].full.color_interpretation",
+          "status": "PASS",
+          "expected": "Gray",
+          "actual": "Gray"
+        },
+        {
+          "name": "band[1].full.tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].full.nodata",
+          "status": "PASS",
+          "expected": -9999.0,
+          "actual": -9999.0
+        },
+        {
+          "name": "band[1].full.pixels",
+          "status": "PASS",
+          "expected_shape": [
+            4096,
+            4096
+          ],
+          "actual_shape": [
+            4096,
+            4096
+          ],
+          "compared_samples": 16777216,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].full.nodata_pixel_count",
+          "status": "PASS",
+          "actual": 52056,
+          "expected": 52056
+        },
+        {
+          "name": "band[1].full.validity_mask",
+          "status": "PASS",
+          "expected_shape": [
+            4096,
+            4096
+          ],
+          "actual_shape": [
+            4096,
+            4096
+          ],
+          "compared_samples": 16777216,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview_count",
+          "status": "PASS",
+          "expected": 3,
+          "actual": 3
+        },
+        {
+          "name": "band[1].overview[0].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            2048,
+            2048
+          ],
+          "actual": [
+            2048,
+            2048
+          ],
+          "full_source_factor": 2
+        },
+        {
+          "name": "band[1].overview[0].dtype",
+          "status": "PASS",
+          "expected": "Float32",
+          "actual": "Float32"
+        },
+        {
+          "name": "band[1].overview[0].color_interpretation",
+          "status": "PASS",
+          "expected": "Gray",
+          "actual": "Gray"
+        },
+        {
+          "name": "band[1].overview[0].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].overview[0].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            2048,
+            2048
+          ],
+          "actual_shape": [
+            2048,
+            2048
+          ],
+          "compared_samples": 4194304,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[0].nodata_pixel_count",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "band[1].overview[0].validity_mask",
+          "status": "PASS",
+          "expected_shape": [
+            2048,
+            2048
+          ],
+          "actual_shape": [
+            2048,
+            2048
+          ],
+          "compared_samples": 4194304,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[1].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            1024,
+            1024
+          ],
+          "actual": [
+            1024,
+            1024
+          ],
+          "full_source_factor": 4
+        },
+        {
+          "name": "band[1].overview[1].dtype",
+          "status": "PASS",
+          "expected": "Float32",
+          "actual": "Float32"
+        },
+        {
+          "name": "band[1].overview[1].color_interpretation",
+          "status": "PASS",
+          "expected": "Gray",
+          "actual": "Gray"
+        },
+        {
+          "name": "band[1].overview[1].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].overview[1].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            1024,
+            1024
+          ],
+          "actual_shape": [
+            1024,
+            1024
+          ],
+          "compared_samples": 1048576,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[1].nodata_pixel_count",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "band[1].overview[1].validity_mask",
+          "status": "PASS",
+          "expected_shape": [
+            1024,
+            1024
+          ],
+          "actual_shape": [
+            1024,
+            1024
+          ],
+          "compared_samples": 1048576,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[2].odd_edge_dimensions",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ],
+          "full_source_factor": 8
+        },
+        {
+          "name": "band[1].overview[2].dtype",
+          "status": "PASS",
+          "expected": "Float32",
+          "actual": "Float32"
+        },
+        {
+          "name": "band[1].overview[2].color_interpretation",
+          "status": "PASS",
+          "expected": "Gray",
+          "actual": "Gray"
+        },
+        {
+          "name": "band[1].overview[2].tile",
+          "status": "PASS",
+          "expected": [
+            512,
+            512
+          ],
+          "actual": [
+            512,
+            512
+          ]
+        },
+        {
+          "name": "band[1].overview[2].pixels",
+          "status": "PASS",
+          "expected_shape": [
+            512,
+            512
+          ],
+          "actual_shape": [
+            512,
+            512
+          ],
+          "compared_samples": 262144,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        },
+        {
+          "name": "band[1].overview[2].nodata_pixel_count",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "name": "band[1].overview[2].validity_mask",
+          "status": "PASS",
+          "expected_shape": [
+            512,
+            512
+          ],
+          "actual_shape": [
+            512,
+            512
+          ],
+          "compared_samples": 262144,
+          "overlap_mismatches": 0,
+          "missing_samples": 0,
+          "excess_samples": 0,
+          "mismatch_count": 0,
+          "max_abs_error_finite": 0.0,
+          "examples": []
+        }
+      ],
+      "expected": {
+        "dimensions": [
+          4096,
+          4096
+        ],
+        "overview_dimensions": [
+          [
+            2048,
+            2048
+          ],
+          [
+            1024,
+            1024
+          ],
+          [
+            512,
+            512
+          ]
+        ],
+        "overview_full_source_factors": [
+          2,
+          4,
+          8
+        ],
+        "nodata": -9999.0,
+        "dtype": "float32",
+        "color_interpretations": [
+          "Gray"
+        ]
+      },
+      "bytes": 1621309,
+      "tiff": {
+        "magic_hex": "49492a00",
+        "byte_order": "little",
+        "bigtiff": false,
+        "directories": [
+          {
+            "offset": 8,
+            "tags": {
+              "256": 4096,
+              "257": 4096,
+              "258": 32,
+              "259": 8,
+              "262": 1,
+              "277": 1,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": 3,
+              "42113": "-9999"
+            }
+          },
+          {
+            "offset": 206,
+            "tags": {
+              "256": 2048,
+              "257": 2048,
+              "258": 32,
+              "259": 8,
+              "262": 1,
+              "277": 1,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": 3
+            }
+          },
+          {
+            "offset": 368,
+            "tags": {
+              "256": 1024,
+              "257": 1024,
+              "258": 32,
+              "259": 8,
+              "262": 1,
+              "277": 1,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": 3
+            }
+          },
+          {
+            "offset": 530,
+            "tags": {
+              "256": 512,
+              "257": 512,
+              "258": 32,
+              "259": 8,
+              "262": 1,
+              "277": 1,
+              "284": 1,
+              "322": 512,
+              "323": 512,
+              "339": 3
+            }
+          }
+        ]
+      },
+      "cog_validator": {
+        "full_check": true,
+        "warnings": [],
+        "errors": [],
+        "details": {
+          "ifd_offsets": {
+            "main": 8,
+            "overview_0": 206,
+            "overview_1": 368,
+            "overview_2": 530
+          },
+          "data_offsets": {
+            "main": 770558,
+            "overview_0": 429289,
+            "overview_1": 187104,
+            "overview_2": 1480
+          }
+        },
+        "stdout": "",
+        "stderr": ""
+      },
+      "dataset": {
+        "width": 4096,
+        "height": 4096,
+        "bands": 1,
+        "geotransform": [
+          500000.0,
+          30.0,
+          0.0,
+          4000000.0,
+          0.0,
+          -30.0
+        ],
+        "projection_wkt": "PROJCS[\"WGS 84 / UTM zone 17N\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",-81],PARAMETER[\"scale_factor\",0.9996],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH],AUTHORITY[\"EPSG\",\"32617\"]]",
+        "authority_name": "EPSG",
+        "authority_code": "32617",
+        "metadata": {
+          "AREA_OR_POINT": "Area"
+        },
+        "image_structure": {
+          "COMPRESSION": "DEFLATE",
+          "INTERLEAVE": "BAND",
+          "LAYOUT": "COG"
+        },
+        "files": [
+          "/Users/danny/orca/workspaces/RustGIS/terrio-cog-evaluation/experiments/terrio-cog/.local/final/baseline-performance/performance/native-float-nodata-4096x4096-run1.tif"
+        ]
+      },
+      "bands": [
+        {
+          "index": 1,
+          "overviews": [
+            {
+              "level": 0,
+              "width": 2048,
+              "height": 2048,
+              "dtype": "Float32",
+              "color_interpretation": "Gray",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  2048,
+                  2048
+                ],
+                "actual_shape": [
+                  2048,
+                  2048
+                ],
+                "compared_samples": 4194304,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 1,
+              "width": 1024,
+              "height": 1024,
+              "dtype": "Float32",
+              "color_interpretation": "Gray",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  1024,
+                  1024
+                ],
+                "actual_shape": [
+                  1024,
+                  1024
+                ],
+                "compared_samples": 1048576,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            },
+            {
+              "level": 2,
+              "width": 512,
+              "height": 512,
+              "dtype": "Float32",
+              "color_interpretation": "Gray",
+              "nodata": null,
+              "block_size": [
+                512,
+                512
+              ],
+              "overview_count": 0,
+              "metadata": {},
+              "image_structure": {},
+              "tiff": {},
+              "palette": null,
+              "comparison": {
+                "expected_shape": [
+                  512,
+                  512
+                ],
+                "actual_shape": [
+                  512,
+                  512
+                ],
+                "compared_samples": 262144,
+                "overlap_mismatches": 0,
+                "missing_samples": 0,
+                "excess_samples": 0,
+                "mismatch_count": 0,
+                "max_abs_error_finite": 0.0,
+                "examples": []
+              }
+            }
+          ],
+          "full": {
+            "width": 4096,
+            "height": 4096,
+            "dtype": "Float32",
+            "color_interpretation": "Gray",
+            "nodata": -9999.0,
+            "block_size": [
+              512,
+              512
+            ],
+            "overview_count": 3,
+            "metadata": {},
+            "image_structure": {},
+            "tiff": {},
+            "palette": null,
+            "comparison": {
+              "expected_shape": [
+                4096,
+                4096
+              ],
+              "actual_shape": [
+                4096,
+                4096
+              ],
+              "compared_samples": 16777216,
+              "overlap_mismatches": 0,
+              "missing_samples": 0,
+              "excess_samples": 0,
+              "mismatch_count": 0,
+              "max_abs_error_finite": 0.0,
+              "examples": []
+            }
+          }
+        }
+      ],
+      "status": "PASS",
+      "failed_checks": 0
+    }
+  ],
+  "finished_utc": "2026-10-21T11:41:47.636363+00:00",
+  "status": "PASS",
+  "summary": {
+    "correctness_pass": 0,
+    "correctness_fail": 0,
+    "performance_pass": 6,
+    "performance_fail": 0,
+    "benchmark_semantic_fail": 0
+  }
+}

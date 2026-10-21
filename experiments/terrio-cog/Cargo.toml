@@ -1,0 +1,37 @@
+[package]
+name = "rustgis-terrio-cog-eval"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Independent workspace/lockfile: never resolved by production Cargo invocations.
+[workspace]
+
+[features]
+default = []
+terrio = ["dep:terrio"]
+
+[dependencies]
+rustgis-data = { path = "../../crates/data" }
+serde_json = "1"
+web-time = "1"
+terrio = { git = "https://github.com/opengeos/terrio", rev = "ce3c4463f19864284d743720123c4d022784c497", default-features = false, features = ["geotiff"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+
+[profile.web]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "forbid"
