@@ -3446,20 +3446,11 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     p
                 };
                 ui.horizontal(|ui| {
-                    // A polygon class keeps its own transparency when recoloured (`with_fill`), so
-                    // its picker is colour only: no alpha, no blending, and a solid button. Points
-                    // and lines take the colour's alpha, so theirs has it.
-                    let picked = if l.geometry_type() == GeometryType::Polygon {
-                        let f = e.symbol.fill;
-                        let mut rgb = [f.r(), f.g(), f.b()];
-                        let r = ui.color_edit_button_srgb(&mut rgb).on_hover_text(tl!("Class color"));
-                        r.changed().then(|| rustgis_engine::map::Rgba::rgb(rgb[0], rgb[1], rgb[2]))
-                    } else {
-                        let mut c = c32(e.symbol.fill);
-                        crate::widgets::color_button(ui, &mut c).on_hover_text(tl!("Class color")).changed().then(|| rgba(c))
-                    };
+                    let mut c = c32(e.symbol.fill);
+                    let picked = crate::widgets::color_button(ui, &mut c).on_hover_text(tl!("Class color")).changed().then(|| rgba(c));
                     if let Some(color) = picked {
-                        let params = with("color", json!(color.hex()));
+                        // Keep FF too: six-digit polygon colours deliberately preserve translucency.
+                        let params = with("color", json!(color.hex8()));
                         let key = egui::Id::new(CLASS_COLOR_DRAG);
                         let mut dragging = ui.data(|d| d.get_temp::<ClassColorDrag>(key));
                         // One left pending on another layer (the pane switched layers mid-drag) is
