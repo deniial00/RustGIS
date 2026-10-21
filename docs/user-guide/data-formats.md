@@ -75,6 +75,11 @@ every 50 ms against a budget of the input file's byte length plus three times th
 checks: this is not a strict operating-system disk quota. Ordinary conversions of files opened
 from disk do not use this workspace budget.
 
+Conversion runs synchronously while the layer is added and can temporarily make the app
+unresponsive. The original JPEG 2000 byte buffer is released once it has been staged on disk,
+before GDAL runs or the GeoTIFF is read back. The converted GeoTIFF and decoded raster still
+occupy memory together; the 512 MiB file limit is not a limit on total process memory.
+
 A cloud-optimised GeoTIFF (a tiled `.tif` with overviews, as most published imagery is) is read
 in place rather than downloaded: its header first, then, by HTTP range requests, only the tiles of
 the overview each part of the view needs, so a Sentinel-2 scene of 300 MB draws in a couple of

@@ -5396,6 +5396,8 @@ fn jpeg2000_from_a_web_address() {
         .output()
         .expect("generate JPEG 2000 fixture");
     assert!(made.status.success(), "JPEG 2000 fixture conversion failed ({}): {}", made.status, String::from_utf8_lossy(&made.stderr));
+    // `serve` requires a 'static slice; intentionally leak this small test-only fixture so it
+    // stays valid for the server thread's lifetime.
     let bytes = Vec::leak(std::fs::read(&jp2).unwrap());
     let uploaded = base64::engine::general_purpose::STANDARD.encode(&*bytes);
     let base = serve(bytes, 1);

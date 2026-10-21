@@ -56,8 +56,9 @@ pub struct ConvertedBytes {
 /// signature: other contents could be a format that opens files on this computer (a VRT).
 /// Source, output and scratch files stay in a private temporary folder. Its monitored budget
 /// allows the source plus three `max`-sized working copies; writes may overshoot between checks.
-pub fn convert_jpeg2000(bytes: &[u8], crs: Option<&str>, max: u64) -> Result<ConvertedBytes> {
-    if !is_jpeg2000(bytes) {
+/// Takes ownership so the input buffer is released after staging, before conversion/readback.
+pub fn convert_jpeg2000(bytes: Vec<u8>, crs: Option<&str>, max: u64) -> Result<ConvertedBytes> {
+    if !is_jpeg2000(&bytes) {
         return Err(DataError::Format("not a JPEG 2000 file (its contents don't start as one)".into()));
     }
     let mut workspace = tempfile::Builder::new();
@@ -74,11 +75,12 @@ pub fn convert_jpeg2000(bytes: &[u8], crs: Option<&str>, max: u64) -> Result<Con
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
         let mut f = o.open(&src)?;
-        f.write_all(bytes)?;
+        f.write_all(&bytes)?;
     }
     // COG generation can hold an intermediate image and overviews alongside the final output.
     // Keep that working-space budget separate from the final GeoTIFF's size limit.
     let budget = (bytes.len() as u64).saturating_add(max.saturating_mul(3));
+    drop(bytes);
     let c = convert_in(dir.path(), &src, None, crs, Some(budget))?;
     // A GeoTIFF is larger than the JPEG 2000 it came from (Sentinel-2's about twice).
     if std::fs::metadata(&c.path)?.len() > max {

@@ -34,6 +34,9 @@ pub(crate) fn output(c: Command, timeout: std::time::Duration, what: &str) -> st
 /// Like [`output`], optionally monitoring the total file size in a private workspace. Scratch
 /// files stay there too. This is checked every 50 ms, not an OS quota: writes can overshoot
 /// between checks. On a limit, timeout or monitoring error the child is killed and reaped.
+/// Error paths deliberately do not join the reader threads: a surviving grandchild can inherit
+/// their pipe handles, and waiting for EOF would defeat the timeout. Such readers remain detached
+/// until the inherited handles close. Normal completion still joins both readers.
 pub(crate) fn output_with_budget(
     mut c: Command,
     timeout: std::time::Duration,
@@ -88,10 +91,8 @@ pub(crate) fn output_with_budget(
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
-            if workspace.is_some() {
-                let _ = out.join();
-                let _ = err.join();
-            }
+            // Do not wait for EOF on error: killing the direct child need not close inherited
+            // pipe handles in its descendants. Preserve a prompt return from the timeout/limit.
             return Err(e);
         }
     };
@@ -223,15 +224,18 @@ mod tests {
         if let Some(root) = std::env::var_os(WORKER) {
             let root = PathBuf::from(root);
             let work = root.join("work");
+            let alive = std::fs::File::create(root.join("alive.lock")).unwrap();
+            alive.lock().unwrap();
             for key in ["CPL_TMPDIR", "TMPDIR", "TMP", "TEMP"] {
                 assert_eq!(std::env::var_os(key).as_deref(), Some(work.as_os_str()));
             }
             let scratch = work.join("scratch");
             std::fs::create_dir(&scratch).unwrap();
             std::fs::write(scratch.join("overview.tmp"), [0; 129]).unwrap();
-            // If the runner fails to kill the child, draining its pipes waits for this marker.
+            // Hold the lock until normal completion; killing/reaping must release it.
             std::thread::sleep(std::time::Duration::from_secs(3));
             std::fs::write(root.join("finished"), b"conversion was allowed to finish").unwrap();
+            drop(alive);
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -244,9 +248,53 @@ mod tests {
         let e = output_with_budget(c, std::time::Duration::from_secs(10), "GDAL", Some((&work, 256))).unwrap_err();
         assert!(e.to_string().contains("temporary workspace exceeds its 256-byte limit"), "{e}");
         assert!(!dir.path().join("finished").exists(), "oversized conversion was stopped before finishing");
+        let alive = std::fs::File::open(dir.path().join("alive.lock")).unwrap();
+        assert!(alive.try_lock().is_ok(), "the oversized writer must no longer hold its file lock");
+        drop(alive);
         let path = dir.path().to_path_buf();
         drop(dir);
         assert!(!path.exists(), "the source, output and scratch are removed after stopping the child");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_returns_while_a_grandchild_holds_the_pipes() {
+        use std::time::{Duration, Instant};
+        for budgeted in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ready = dir.path().join("ready");
+            let release = dir.path().join("release");
+            let finished = dir.path().join("finished");
+            let mut c = Command::new("/bin/sh");
+            // The grandchild retains both pipes until released. Its fallback bounds its
+            // lifetime even if the test fails before releasing it.
+            c.args(["-c", "(echo ready > \"$1\"; i=0; while [ ! -e \"$2\" ] && [ \"$i\" -lt 500 ]; do sleep 0.01; i=$((i+1)); done; echo done > \"$3\") & wait", "pipe-holder"])
+                .arg(&ready).arg(&release).arg(&finished);
+            let work = dir.path().to_path_buf();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let runner = std::thread::spawn(move || {
+                let workspace = budgeted.then_some((work.as_path(), 1024));
+                let result = output_with_budget(c, Duration::from_millis(250), "pipe-holder", workspace);
+                let _ = tx.send(result);
+            });
+            let start = Instant::now();
+            while !ready.exists() && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let result = rx.recv_timeout(Duration::from_secs(5));
+            let held_pipes = ready.exists() && !finished.exists();
+            // Release before asserting, so the failing-before case also cleans up.
+            std::fs::write(&release, b"release inherited pipes").unwrap();
+            runner.join().unwrap();
+            let start = Instant::now();
+            while !finished.exists() && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(finished.exists(), "the pipe-holder must finish after release");
+            assert!(held_pipes, "the grandchild must retain its pipes until explicitly released");
+            let e = result.expect("timeout must return without waiting for the grandchild").unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+        }
     }
 
     #[cfg(unix)]
