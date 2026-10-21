@@ -3451,15 +3451,27 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     let mut hsva = egui::ecolor::Hsva::from_srgb([fill.r(), fill.g(), fill.b()]);
                     hsva.a = f32::from(fill.a()) / 255.0;
                     let alpha = hsva.a;
-                    let picked = egui::color_picker::color_edit_button_hsva(ui, &mut hsva, egui::color_picker::Alpha::OnlyBlend)
-                        .on_hover_text(tl!("Class color"))
-                        .changed()
-                        .then(|| {
-                            let edited = rustgis_engine::map::Rgba(hsva.to_srgba_unmultiplied());
-                            // The numeric alpha editor also rounds RGB through Color32; an
-                            // opacity-only edit must keep the class's original channels exactly.
-                            if hsva.a != alpha { fill.with_alpha(edited.a()) } else { edited }
-                        });
+                    // egui creates the popup from the context, not this Ui's scoped style.
+                    // Borrow linear numeric editing only while a transparent picker is open.
+                    let styles = (fill.a() == 0 && egui::Popup::is_any_open(ui.ctx()))
+                        .then(|| [egui::Theme::Light, egui::Theme::Dark].map(|theme| (theme, ui.ctx().style_of(theme))));
+                    if styles.is_some() {
+                        ui.ctx().global_style_mut(|style| style.visuals.numeric_color_space = egui::style::NumericColorSpace::Linear);
+                    }
+                    let response = egui::color_picker::color_edit_button_hsva(ui, &mut hsva, egui::color_picker::Alpha::OnlyBlend);
+                    if let Some(styles) = styles {
+                        // The popup's numeric-mode button can change both themes; restore both
+                        // immediately so no other picker or later frame inherits the override.
+                        for (theme, style) in styles {
+                            ui.ctx().set_style_of(theme, style);
+                        }
+                    }
+                    let picked = response.on_hover_text(tl!("Class color")).changed().then(|| {
+                        let edited = rustgis_engine::map::Rgba(hsva.to_srgba_unmultiplied());
+                        // The numeric alpha editor also rounds RGB through Color32; an
+                        // opacity-only edit must keep the class's original channels exactly.
+                        if hsva.a != alpha { fill.with_alpha(edited.a()) } else { edited }
+                    });
                     if let Some(color) = picked {
                         // Keep FF too: six-digit polygon colours deliberately preserve translucency.
                         let params = with("color", json!(color.hex8()));
@@ -4652,7 +4664,7 @@ mod tests {
                     action: Action::SetValue,
                     target_tree: tree,
                     target_node: node,
-                    data: Some(ActionData::NumericValue(f64::from(alpha))),
+                    data: Some(ActionData::NumericValue(if previous.a() == 0 { f64::from(alpha) / 255.0 } else { f64::from(alpha) })),
                 }));
                 h.run_steps(3);
                 assert_eq!(fill(&h), original.with_alpha(alpha), "opacity edits must retain the original RGB");
@@ -4668,6 +4680,69 @@ mod tests {
                 h.run_steps(3);
             }
         }
+    }
+
+    /// Numeric RGB edits at alpha zero keep the newly selected colour, not transparent black
+    /// or the previous RGB. Reopening and raising opacity must reveal that selection.
+    #[test]
+    fn transparent_class_numeric_rgb_edits_survive_reopening() {
+        use egui::accesskit::{Action, ActionData, ActionRequest, Role};
+        use egui_kittest::kittest::{NodeT, Queryable};
+        use rustgis_engine::map::Rgba;
+
+        let mut app = RustGisApp::with_sample();
+        app.run("layer.symbology", json!({"layer": "Countries", "type": "graduated", "field": "pop_est", "classes": 1})).unwrap();
+        app.run("layer.classStyle", json!({"layer": "Countries", "index": 0, "color": "#FF000000"})).unwrap();
+        let id = layer(&app, "Countries");
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(600.0, 600.0)).with_max_steps(64).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                finish_class_color_drag(app, ui);
+                let layer = app.session.map().layer(id).unwrap().clone();
+                legend_list(app, ui, &layer, &Tokens::light());
+            },
+            app,
+        );
+        h.run_steps(3);
+        let fill = |h: &egui_kittest::Harness<'_, RustGisApp>| h.state().session.map().layer(id).unwrap().renderer.legend()[0].symbol.fill;
+        let inactive_theme = match h.ctx.theme() {
+            egui::Theme::Light => egui::Theme::Dark,
+            egui::Theme::Dark => egui::Theme::Light,
+        };
+        h.ctx.style_mut_of(inactive_theme, |style| style.visuals.numeric_color_space = egui::style::NumericColorSpace::Linear);
+        let styles = [egui::Theme::Light, egui::Theme::Dark].map(|theme| h.ctx.style_of(theme).visuals.numeric_color_space);
+        h.get_by_role(Role::ColorWell).click();
+        h.run_steps(3);
+        // Fully transparent fills use linear 0..1 numeric controls: green 1 makes yellow.
+        let edit = |h: &mut egui_kittest::Harness<'_, RustGisApp>, channel, value| {
+            let (node, tree) = h.query_all_by_role(Role::SpinButton).nth(channel).unwrap().accesskit_node().locate();
+            h.event(egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::SetValue,
+                target_tree: tree,
+                target_node: node,
+                data: Some(ActionData::NumericValue(value)),
+            }));
+            h.run_steps(3);
+        };
+        edit(&mut h, 1, 1.0);
+        assert_eq!(fill(&h), Rgba::new(255, 255, 0, 0));
+        // Even the popup's mode toggle must not leak changes into either theme.
+        h.get_by_role_and_label(Role::Button, "F").click();
+        h.run_steps(3);
+        assert_eq!([egui::Theme::Light, egui::Theme::Dark].map(|theme| h.ctx.style_of(theme).visuals.numeric_color_space), styles);
+        h.state_mut().run("edit.undo", Value::Null).unwrap();
+        assert_eq!(fill(&h), Rgba::new(255, 0, 0, 0));
+        h.state_mut().run("edit.redo", Value::Null).unwrap();
+        assert_eq!(fill(&h), Rgba::new(255, 255, 0, 0));
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        h.get_by_role(Role::ColorWell).click();
+        h.run_steps(3);
+        edit(&mut h, 3, 1.0);
+        assert_eq!(fill(&h), Rgba::new(255, 255, 0, 255));
+        // Opaque colours retain the ordinary byte-based editor.
+        edit(&mut h, 1, 64.0);
+        assert_eq!(fill(&h), Rgba::new(255, 64, 0, 255));
+        assert_eq!([egui::Theme::Light, egui::Theme::Dark].map(|theme| h.ctx.style_of(theme).visuals.numeric_color_space), styles);
     }
 
     /// The layer menu selects its layer as it opens, not on every frame it stays open: each

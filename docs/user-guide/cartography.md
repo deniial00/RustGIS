@@ -58,6 +58,8 @@ layer.classStyle={"layer":"Countries","other":true,"label":"No data"}
 print choropleths, `00` fully transparent, and intermediate values partly transparent. The class
 colour picker includes opacity and sends all eight digits, including `FF`. Changing opacity
 keeps the class's RGB colour, even when making a fully transparent class visible again.
+For fully transparent fills, the numeric controls temporarily use linear 0–1 values so you can
+edit the hidden RGB colour without losing it. Other colour pickers keep their numeric settings.
 
 For polygons, six-digit `#RRGGBB` retains the existing translucency, with the legacy minimum
 alpha of 150; new polygon layers still default to 170. Colour schemes preserve a polygon's
