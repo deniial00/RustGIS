@@ -56,7 +56,8 @@ layer.classStyle={"layer":"Countries","other":true,"label":"No data"}
 `other` the `<all other values>` class; `outline` sets a class's outline colour.
 `#RRGGBBAA` sets the fill opacity exactly for every geometry type: `FF` is fully opaque for
 print choropleths, `00` fully transparent, and intermediate values partly transparent. The class
-colour picker includes opacity and sends all eight digits, including `FF`.
+colour picker includes opacity and sends all eight digits, including `FF`. Changing opacity
+keeps the class's RGB colour, even when making a fully transparent class visible again.
 
 For polygons, six-digit `#RRGGBB` retains the existing translucency, with the legacy minimum
 alpha of 150; new polygon layers still default to 170. Colour schemes preserve a polygon's
