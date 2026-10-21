@@ -5356,6 +5356,61 @@ fn data_from_a_web_address() {
     assert_eq!(crate::cmd::layer::url_file_name("https://x.org/q.json", b"[]").unwrap(), "q.geojson");
 }
 
+/// A JPEG 2000 file by its address (Sentinel-2's imagery on S3, issue #648) is read through GDAL
+/// on the desktop, as one on disk is, not refused as a format RustGIS doesn't read; contents that
+/// aren't JPEG 2000 never reach GDAL.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn jpeg2000_from_a_web_address() {
+    let mut s = Session::new(Project::default());
+    // A VRT (which would have GDAL read other files on this computer) named like JPEG 2000.
+    let vrt = serve(br#"<VRTDataset rasterXSize="1" rasterYSize="1"></VRTDataset>"#, 1);
+    let e = s.run("layer.addUrl", &json!({"url": format!("{vrt}/TCI.jp2")})).unwrap_err();
+    assert!(e.contains("not a JPEG 2000 file"), "{e}");
+    if !rustgis_data::raster::gdal::available() {
+        let jp2 = serve(b"\0\0\0\x0cjP  \r\n\x87\n", 1);
+        let e = s.run("layer.addUrl", &json!({"url": format!("{jp2}/TCI.jp2")})).unwrap_err();
+        assert!(e.contains("needs GDAL"), "{e}");
+        return;
+    }
+    let executable = if cfg!(windows) { "gdal_translate.exe" } else { "gdal_translate" };
+    let translate = std::env::var_os("RUSTGIS_GDAL_BIN")
+        .map(|d| std::path::PathBuf::from(d).join(executable))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| executable.into());
+    let formats = std::process::Command::new(&translate).arg("--formats").output().expect("list GDAL drivers");
+    assert!(formats.status.success(), "GDAL driver discovery failed: {}", String::from_utf8_lossy(&formats.stderr));
+    if !String::from_utf8_lossy(&formats.stdout).lines().any(|line| line.split_whitespace().next() == Some("JP2OpenJPEG")) {
+        eprintln!("skipping JPEG 2000 conversion: GDAL has no optional JP2OpenJPEG driver");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-jp2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let asc = dir.join("g.asc");
+    std::fs::write(&asc, "ncols 4\nnrows 3\nxllcorner 10\nyllcorner 40\ncellsize 0.5\n1 2 3 4\n5 6 7 8\n9 10 11 12\n").unwrap();
+    let jp2 = dir.join("g.jp2");
+    let made = std::process::Command::new(&translate)
+        .args(["-q", "-of", "JP2OpenJPEG", "-ot", "Byte", "-a_srs", "EPSG:4326"])
+        .arg(&asc)
+        .arg(&jp2)
+        .output()
+        .expect("generate JPEG 2000 fixture");
+    assert!(made.status.success(), "JPEG 2000 fixture conversion failed ({}): {}", made.status, String::from_utf8_lossy(&made.stderr));
+    let base = serve(Vec::leak(std::fs::read(&jp2).unwrap()), 1);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/tiles/33/T/XN/TCI.jp2")})).unwrap();
+    let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
+    assert_eq!(l.name, "TCI");
+    let rl = l.raster.as_ref().unwrap();
+    let data = rl.data.as_ref().unwrap();
+    assert_eq!((data.width, data.height, data.georeferenced), (4, 3, true));
+    let e = data.extent();
+    assert!((e.min_x - 10.0).abs() < 1e-6 && (e.max_y - 41.5).abs() < 1e-6, "{e:?}");
+    // The project keeps the converted GeoTIFF, so it opens again without GDAL.
+    assert_eq!(rl.file_name.as_deref(), Some("TCI.tif"));
+    assert!(rl.embedded.is_some() && rl.path.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Where a command may not download itself (the browser), `layer.addUrl` leaves its request for
 /// the front end: once per address, a few at a time (the next is refused, never one silently
 /// dropped after it was promised), and taken once.

@@ -58,7 +58,10 @@ GDAL](data.md#formats-through-gdal).
 **Home › Add Data › From URL…** (`layer.addUrl` with `"url"`) downloads a file by its `https://`
 (or `s3://`, see [S3 buckets](data.md#s3-buckets)) address and adds it like a file from this computer: GeoJSON, CSV, GeoParquet, FlatGeobuf,
 GeoPackage, zipped Shapefiles, KML/KMZ, GPX or GeoTIFF/COG, up to 512 MB on the desktop and 256 MB
-in the web app (where the server must allow requests from web pages, CORS). The format comes from
+in the web app (where the server must allow requests from web pages, CORS). On the desktop, with
+[GDAL](https://gdal.org) installed, a JPEG 2000 file (`.jp2`, `.j2k`: Sentinel-2's imagery on S3)
+is downloaded too, converted to a GeoTIFF that the project keeps, and added; the web app can't run
+GDAL, so it says so. The format comes from
 the address, or from the contents when the address has no extension (an API endpoint, say). The
 app downloads in the background and adds the layer when the file arrives (to the project it was
 started in: opening another meanwhile drops it). A `.pmtiles` address is added as a tile layer
@@ -223,7 +226,7 @@ databases](data.md#sql-queries-and-duckdb-databases).
 | Scans with no coordinates | a `.tif` with no GeoTIFF tags, `.png`; any `.tif`, `.png` or `.jpg`/`.jpeg` with `"as": "scan"` | Add Data, or upload (`layer.addData`, `layer.addDataBytes`) | Keeps its pixel size and bands (grey, RGB(A); 8 or 16 bits). An untagged TIFF or a PNG opens as a scan by default; a JPEG only with `"as": "scan"` (otherwise it is a photo), which also drops the coordinates of a GeoTIFF. It has no coordinates, so it is drawn over the current view, the command's result says so (`georeferenced: false`), and the layer is marked not georeferenced until **Georeference** places it. Until then it can't be exported, and tools that would give a result a place on the ground (raster functions, pixel edits, clip, resample, mosaic) refuse it. A PNG or JPEG is decoded whole: up to four times the sample limit in decoded bytes is read at every second pixel, and anything larger is refused, so save it as a TIFF (read at a reduced size). A TIFF is reduced as a GeoTIFF is. |
 | ASCII grid | `.asc` (with an optional `.prj`) | Add Data, or upload | |
 | Zarr | a store's folder (`.zarr`) or web address, format 2 (consolidated) or 3 | Add Data › Zarr… (`layer.addZarr`), Add Data on the folder, or a `?zarr=` link | A variable's latitude/longitude (or y/x) map at the steps picked of its other dimensions (time, level), read chunk by chunk in pure Rust (blosc, zlib, gzip, zstd, LZ4; sharded arrays too), on the desktop and the web. See [Zarr stores](data.md#zarr-stores). |
-| Rasters GDAL reads | `.jp2`, `.img`, `.hgt`, `.dem`, `.dt0`–`.dt2`, `.nc`, `.hdf`, `.h5`, `.bil`, `.grd`, `.sdat`, `.kea`, `.ers`, `.rst`, `.ntf`, `.ecw`, `.sid`… | Add Data (desktop, with [GDAL](https://gdal.org) installed: `gdal_translate`, `gdalinfo` and `gdalwarp`) | Converted once to a cloud-optimised GeoTIFF in the cache, then read as one. A NetCDF or HDF file's variables are its subdatasets: the first is added, the others are named in a notice, and `"layer"` picks one. A file that doesn't say its coordinate system is read as WGS 84 when its coordinates look like longitude/latitude (0–360° longitudes are moved to -180–180°); otherwise give `"crs"`. |
+| Rasters GDAL reads | `.jp2`, `.img`, `.hgt`, `.dem`, `.dt0`–`.dt2`, `.nc`, `.hdf`, `.h5`, `.bil`, `.grd`, `.sdat`, `.kea`, `.ers`, `.rst`, `.ntf`, `.ecw`, `.sid`… | Add Data (desktop, with [GDAL](https://gdal.org) installed: `gdal_translate`, `gdalinfo` and `gdalwarp`); JPEG 2000 also From URL… | Converted once to a cloud-optimised GeoTIFF in the cache, then read as one. A NetCDF or HDF file's variables are its subdatasets: the first is added, the others are named in a notice, and `"layer"` picks one. A file that doesn't say its coordinate system is read as WGS 84 when its coordinates look like longitude/latitude (0–360° longitudes are moved to -180–180°); otherwise give `"crs"`. |
 
 ## Tiles and web services
 

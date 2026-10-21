@@ -33,6 +33,60 @@ fn program(name: &str) -> Option<PathBuf> {
     external::program("RUSTGIS_GDAL_BIN", name)
 }
 
+/// Whether GDAL's raster programs are installed.
+pub fn available() -> bool {
+    program("gdal_translate").is_some() && program("gdalinfo").is_some()
+}
+
+/// Whether a file's contents are JPEG 2000: a JP2 file's signature box, or a bare codestream's
+/// first markers (SOC, SIZ).
+pub fn is_jpeg2000(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\0\0\0\x0cjP  \r\n\x87\n") || bytes.starts_with(&[0xff, 0x4f, 0xff, 0x51])
+}
+
+/// What converting a file's contents made: the GeoTIFF's bytes, and whether the raster was taken
+/// as WGS 84 (see [`Converted::assumed_lonlat`]).
+pub struct ConvertedBytes {
+    pub tif: Vec<u8>,
+    pub assumed_lonlat: bool,
+}
+
+/// Converts a JPEG 2000 file's contents (a download) to a cloud-optimised GeoTIFF's bytes, of at
+/// most `max` bytes; `crs` as for [`convert`]. Only JPEG 2000 is taken, by its signature: GDAL
+/// picks the driver from the contents, and other contents could be a format that opens files on
+/// this computer (a VRT). The file and its conversion are kept in a private temporary folder,
+/// removed afterwards.
+pub fn convert_jpeg2000(bytes: &[u8], crs: Option<&str>, max: u64) -> Result<ConvertedBytes> {
+    if !is_jpeg2000(bytes) {
+        return Err(DataError::Format("not a JPEG 2000 file (its contents don't start as one)".into()));
+    }
+    let mut workspace = tempfile::Builder::new();
+    workspace.prefix("rustgis-gdal-");
+    #[cfg(unix)]
+    workspace.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let dir = workspace.tempdir()?;
+    let ext = if bytes.starts_with(b"\0\0\0\x0c") { "jp2" } else { "j2k" };
+    let src = dir.path().join(format!("download.{ext}"));
+    {
+        use std::io::Write;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let mut f = o.open(&src)?;
+        f.write_all(bytes)?;
+    }
+    let c = convert_in(dir.path(), &src, None, crs)?;
+    // A GeoTIFF is larger than the JPEG 2000 it came from (Sentinel-2's about twice).
+    if std::fs::metadata(&c.path)?.len() > max {
+        return Err(DataError::Format(format!(
+            "converted to a GeoTIFF larger than {} MB, too large to open: save the file and add it with Add Data",
+            max >> 20
+        )));
+    }
+    Ok(ConvertedBytes { tif: std::fs::read(&c.path)?, assumed_lonlat: c.assumed_lonlat })
+}
+
 fn missing() -> DataError {
     DataError::Unsupported(
         "this raster format needs GDAL: install it (gdal_translate and gdalinfo on the PATH, or RUSTGIS_GDAL_BIN naming their folder) and add the file again"

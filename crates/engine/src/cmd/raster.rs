@@ -364,6 +364,22 @@ pub(crate) fn add_gdal_path(s: &mut Session, p: &Value, path: &str) -> CmdResult
     add_raster(s, &name, rl)
 }
 
+/// Adds a downloaded JPEG 2000 raster, converted by GDAL to a GeoTIFF that the project keeps (it
+/// opens again without GDAL or the address, as a downloaded GeoTIFF does).
+#[cfg(not(target_arch = "wasm32"))]
+fn add_jpeg2000_bytes(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -> CmdResult {
+    let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty());
+    let c = raster::gdal::convert_jpeg2000(bytes, crs, MAX_UPLOAD_BYTES as u64).map_err(|e| format!("{name}: {e}"))?;
+    let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("raster");
+    let file_name = format!("{stem}.tif");
+    let r = raster::read_bytes(&file_name, &c.tif).map_err(|e| format!("{name}: {e}"))?;
+    if c.assumed_lonlat {
+        s.notify(format!("{name} doesn't say its coordinate system; its coordinates look like longitude/latitude, so it's read as WGS 84 (give \"crs\" if not)"), false);
+    }
+    let title = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| r.name.clone());
+    add_raster(s, &title, RasterLayer::from_bytes(r, file_name, c.tif))
+}
+
 fn add_bytes(s: &mut Session, p: &Value) -> CmdResult {
     use base64::Engine;
     let name = ps(p, "fileName").ok_or("fileName is required")?.to_string();
@@ -384,6 +400,11 @@ pub(crate) fn add_named_bytes(s: &mut Session, p: &Value, name: String, bytes: V
     if !scan && rustgis_data::photo::is_photo_name(&name) {
         let layer = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(super::layer::PHOTOS).to_string();
         return super::layer::add_photos_to(s, &layer, |reader| reader.add(&name, &bytes));
+    }
+    // JPEG 2000 (a download): through GDAL, on the desktop.
+    #[cfg(not(target_arch = "wasm32"))]
+    if raster::is_jpeg2000_name(&name) {
+        return add_jpeg2000_bytes(s, p, &name, &bytes);
     }
     if raster::is_raster_name(&name) {
         let mut r = raster::read_bytes(&name, &bytes).map_err(|e| format!("{name}: {e}"))?;
