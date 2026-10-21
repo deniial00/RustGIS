@@ -1891,11 +1891,7 @@ pub fn url_file_name(url: &str, bytes: &[u8]) -> Result<String, String> {
     let ext = Path::new(&last).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     // JPEG 2000 (Sentinel-2's imagery) is read through GDAL, which the browser can't run.
     if rustgis_data::raster::is_jpeg2000_name(&last) {
-        return if cfg!(target_arch = "wasm32") {
-            Err("JPEG 2000 opens in the desktop app, through GDAL; the web app reads GeoTIFFs".into())
-        } else {
-            Ok(last)
-        };
+        return if cfg!(target_arch = "wasm32") { Err(super::raster::JPEG2000_WEB_LIMITATION.into()) } else { Ok(last) };
     }
     let known = rustgis_data::io::READ_EXTENSIONS.contains(&ext.as_str()) || rustgis_data::raster::is_raster_name(&last) || ext == "tsv";
     if known && ext != "json" {

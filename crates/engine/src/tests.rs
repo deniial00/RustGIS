@@ -5356,12 +5356,12 @@ fn data_from_a_web_address() {
     assert_eq!(crate::cmd::layer::url_file_name("https://x.org/q.json", b"[]").unwrap(), "q.geojson");
 }
 
-/// A JPEG 2000 file by its address (Sentinel-2's imagery on S3, issue #648) is read through GDAL
-/// on the desktop, as one on disk is, not refused as a format RustGIS doesn't read; contents that
-/// aren't JPEG 2000 never reach GDAL.
+/// JPEG 2000 from a web address or uploaded bytes is read through GDAL on the desktop, as a file
+/// on disk is; contents that aren't JPEG 2000 never reach GDAL.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn jpeg2000_from_a_web_address() {
+    use base64::Engine;
     let mut s = Session::new(Project::default());
     // A VRT (which would have GDAL read other files on this computer) named like JPEG 2000.
     let vrt = serve(br#"<VRTDataset rasterXSize="1" rasterYSize="1"></VRTDataset>"#, 1);
@@ -5396,7 +5396,9 @@ fn jpeg2000_from_a_web_address() {
         .output()
         .expect("generate JPEG 2000 fixture");
     assert!(made.status.success(), "JPEG 2000 fixture conversion failed ({}): {}", made.status, String::from_utf8_lossy(&made.stderr));
-    let base = serve(Vec::leak(std::fs::read(&jp2).unwrap()), 1);
+    let bytes = Vec::leak(std::fs::read(&jp2).unwrap());
+    let uploaded = base64::engine::general_purpose::STANDARD.encode(&*bytes);
+    let base = serve(bytes, 1);
     let r = s.run("layer.addUrl", &json!({"url": format!("{base}/tiles/33/T/XN/TCI.jp2")})).unwrap();
     let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
     assert_eq!(l.name, "TCI");
@@ -5408,6 +5410,17 @@ fn jpeg2000_from_a_web_address() {
     // The project keeps the converted GeoTIFF, so it opens again without GDAL.
     assert_eq!(rl.file_name.as_deref(), Some("TCI.tif"));
     assert!(rl.embedded.is_some() && rl.path.is_none());
+    for file_name in ["uploaded.jp2", "uploaded.J2K"] {
+        let mut upload = Session::new(Project::default());
+        let r = upload.run("layer.addDataBytes", &json!({"fileName": file_name, "data": uploaded})).unwrap();
+        let rl = upload.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap();
+        let raster = rl.data.as_ref().unwrap();
+        assert_eq!((raster.width, raster.height, raster.georeferenced), (4, 3, true));
+        let e = raster.extent();
+        assert!((e.min_x - 10.0).abs() < 1e-6 && (e.max_y - 41.5).abs() < 1e-6, "{e:?}");
+        assert_eq!(rl.file_name.as_deref(), Some("uploaded.tif"));
+        assert!(rl.embedded.is_some() && rl.path.is_none());
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

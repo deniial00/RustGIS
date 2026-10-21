@@ -27,7 +27,25 @@ pub(crate) fn cache_dir(env: &str, sub: &str) -> Option<PathBuf> {
 
 /// Runs a program, reading its output as it comes (so a chatty one can't block on a full pipe) and
 /// killing it if it runs past `timeout`. `what` names it in the timeout error.
-pub(crate) fn output(mut c: Command, timeout: std::time::Duration, what: &str) -> std::io::Result<std::process::Output> {
+pub(crate) fn output(c: Command, timeout: std::time::Duration, what: &str) -> std::io::Result<std::process::Output> {
+    output_with_budget(c, timeout, what, None)
+}
+
+/// Like [`output`], optionally monitoring the total file size in a private workspace. Scratch
+/// files stay there too. This is checked every 50 ms, not an OS quota: writes can overshoot
+/// between checks. On a limit, timeout or monitoring error the child is killed and reaped.
+pub(crate) fn output_with_budget(
+    mut c: Command,
+    timeout: std::time::Duration,
+    what: &str,
+    workspace: Option<(&Path, u64)>,
+) -> std::io::Result<std::process::Output> {
+    if let Some((dir, max)) = workspace {
+        check_workspace(dir, max, what)?;
+        for key in ["CPL_TMPDIR", "TMPDIR", "TMP", "TEMP"] {
+            c.env(key, dir);
+        }
+    }
     use std::io::Read;
     use std::process::Stdio;
     let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -44,20 +62,82 @@ pub(crate) fn output(mut c: Command, timeout: std::time::Duration, what: &str) -
     let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
     let start = std::time::Instant::now();
     let status = loop {
-        if let Some(st) = child.try_wait()? {
-            break st;
+        if let Some((dir, max)) = workspace
+            && let Err(e) = check_workspace(dir, max, what)
+        {
+            break Err(e);
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                // The child can finish writing between the scan and try_wait.
+                break workspace.map_or(Ok(st), |(dir, max)| check_workspace(dir, max, what).map(|()| st));
+            }
+            Ok(None) => {}
+            Err(e) => break Err(e),
         }
         if start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
+            break Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("{what} ran for more than {} minutes", timeout.as_secs() / 60),
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
-    Ok(std::process::Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+    let status = match status {
+        Ok(status) => status,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            if workspace.is_some() {
+                let _ = out.join();
+                let _ = err.join();
+            }
+            return Err(e);
+        }
+    };
+    let stdout = out.join().unwrap_or_default();
+    let stderr = err.join().unwrap_or_default();
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
+/// Counts files without following symlinks, including nested GDAL scratch directories. Bound
+/// traversal too, so a malformed workspace can't keep the process monitor busy indefinitely.
+fn check_workspace(dir: &Path, max: u64, what: &str) -> std::io::Result<()> {
+    fn scan(dir: &Path, depth: usize, left: &mut usize, size: &mut u64, max: u64) -> std::io::Result<bool> {
+        if depth > 16 {
+            return Err(std::io::Error::other("temporary workspace is nested too deeply"));
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && depth > 0 => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            if *left == 0 {
+                return Err(std::io::Error::other("too many files in temporary workspace"));
+            }
+            *left -= 1;
+            let entry = entry?;
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            if meta.is_file() {
+                *size = size.saturating_add(meta.len());
+                if *size > max {
+                    return Ok(true);
+                }
+            } else if meta.is_dir() && scan(&entry.path(), depth + 1, left, size, max)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    if scan(dir, 0, &mut 4096, &mut 0, max)? {
+        return Err(std::io::Error::other(format!("{what}: temporary workspace exceeds its {max}-byte limit; conversion stopped")));
+    }
+    Ok(())
 }
 
 /// A file's size and modification time; for a folder (a File Geodatabase), those of its files,
@@ -116,5 +196,66 @@ pub(crate) fn prune(dir: &Path, ours: fn(&str) -> bool, keep: std::time::Duratio
         if old {
             let _ = std::fs::remove_file(e.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_budget_counts_source_output_and_nested_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("source.jp2"), [0; 64]).unwrap();
+        std::fs::write(dir.path().join("output.tif"), [0; 32]).unwrap();
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let overview = scratch.join("overview.tmp");
+        std::fs::write(&overview, [0; 32]).unwrap();
+        assert!(check_workspace(dir.path(), 128, "GDAL").is_ok(), "the exact limit is allowed");
+        std::fs::write(&overview, [0; 33]).unwrap();
+        assert!(check_workspace(dir.path(), 128, "GDAL").is_err(), "scratch counts towards the aggregate limit");
+    }
+
+    #[test]
+    fn workspace_budget_stops_child_and_cleans_up() {
+        const WORKER: &str = "RUSTGIS_WORKSPACE_BUDGET_WORKER";
+        if let Some(root) = std::env::var_os(WORKER) {
+            let root = PathBuf::from(root);
+            let work = root.join("work");
+            for key in ["CPL_TMPDIR", "TMPDIR", "TMP", "TEMP"] {
+                assert_eq!(std::env::var_os(key).as_deref(), Some(work.as_os_str()));
+            }
+            let scratch = work.join("scratch");
+            std::fs::create_dir(&scratch).unwrap();
+            std::fs::write(scratch.join("overview.tmp"), [0; 129]).unwrap();
+            // If the runner fails to kill the child, draining its pipes waits for this marker.
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::fs::write(root.join("finished"), b"conversion was allowed to finish").unwrap();
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join("source.jp2"), [0; 64]).unwrap();
+        std::fs::write(work.join("output.tmp.tif"), [0; 64]).unwrap();
+        let mut c = Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", "source::external::tests::workspace_budget_stops_child_and_cleans_up", "--nocapture"]).env(WORKER, dir.path());
+        let e = output_with_budget(c, std::time::Duration::from_secs(10), "GDAL", Some((&work, 256))).unwrap_err();
+        assert!(e.to_string().contains("temporary workspace exceeds its 256-byte limit"), "{e}");
+        assert!(!dir.path().join("finished").exists(), "oversized conversion was stopped before finishing");
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(!path.exists(), "the source, output and scratch are removed after stopping the child");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_budget_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("unrelated"), [0; 129]).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        assert!(check_workspace(dir.path(), 0, "GDAL").is_ok());
     }
 }

@@ -19,6 +19,8 @@ pub const MAX_UPLOAD_BYTES: usize = 512 << 20;
 #[cfg(target_arch = "wasm32")]
 pub const MAX_UPLOAD_BYTES: usize = 256 << 20;
 
+pub(crate) const JPEG2000_WEB_LIMITATION: &str = "JPEG 2000 opens in the desktop app, through GDAL; the web app reads GeoTIFFs";
+
 pub(crate) fn need_raster(s: &Session) -> Option<&'static str> {
     match s.active_layer.and_then(|id| s.map().layer(id)) {
         Some(l) if l.raster.as_ref().is_some_and(|r| r.data.is_some()) => None,
@@ -30,7 +32,7 @@ pub(crate) fn need_raster(s: &Session) -> Option<&'static str> {
 pub fn commands() -> Vec<C> {
     vec![
         C::new("layer.addDataBytes", "Add Data (from file contents)", "Home › Add", add_bytes)
-            .params(r#"{"fileName": "name.tif|.tiff|.asc|.geojson|.csv|.zip|.kml|.kmz|.gpx|.parquet|.fgb|.gpkg|.mbtiles", "data": base64, "layer"?: "one layer of a zip, KML or GPX by name", "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData)}"#),
+            .params(r#"{"fileName": "name.tif|.tiff|.asc|.geojson|.csv|.zip|.kml|.kmz|.gpx|.parquet|.fgb|.gpkg|.mbtiles|.jp2|.j2k (JPEG 2000: desktop, through GDAL)", "data": base64, "layer"?: "one layer of a zip, KML or GPX by name", "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "stream"?, "as"? (as layer.addData)}"#),
         C::new("raster.symbology", "Symbology", "Style › Rendering", symbology).when(need_raster).params(
             r#"{"layer"?, "type": "stretch"|"rgb"|"classify"|"unique"|"colormap"|"shadedRelief", "band"?: 1.., "ramp"?, "invert"?: bool, "classes"?: 1..32, "method"?, "azimuth"?, "altitude"?, "zFactor"?, "grey"?: bool (shadedRelief without its colour ramp)}"#,
         ),
@@ -364,8 +366,8 @@ pub(crate) fn add_gdal_path(s: &mut Session, p: &Value, path: &str) -> CmdResult
     add_raster(s, &name, rl)
 }
 
-/// Adds a downloaded JPEG 2000 raster, converted by GDAL to a GeoTIFF that the project keeps (it
-/// opens again without GDAL or the address, as a downloaded GeoTIFF does).
+/// Adds an uploaded or downloaded JPEG 2000 raster, converted by GDAL to a GeoTIFF that the project
+/// keeps (it opens again without GDAL or the source file, as an uploaded GeoTIFF does).
 #[cfg(not(target_arch = "wasm32"))]
 fn add_jpeg2000_bytes(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -> CmdResult {
     let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty());
@@ -401,10 +403,12 @@ pub(crate) fn add_named_bytes(s: &mut Session, p: &Value, name: String, bytes: V
         let layer = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(super::layer::PHOTOS).to_string();
         return super::layer::add_photos_to(s, &layer, |reader| reader.add(&name, &bytes));
     }
-    // JPEG 2000 (a download): through GDAL, on the desktop.
-    #[cfg(not(target_arch = "wasm32"))]
+    // JPEG 2000 (an upload or a download): through GDAL, on the desktop.
     if raster::is_jpeg2000_name(&name) {
+        #[cfg(not(target_arch = "wasm32"))]
         return add_jpeg2000_bytes(s, p, &name, &bytes);
+        #[cfg(target_arch = "wasm32")]
+        return Err(JPEG2000_WEB_LIMITATION.into());
     }
     if raster::is_raster_name(&name) {
         let mut r = raster::read_bytes(&name, &bytes).map_err(|e| format!("{name}: {e}"))?;
