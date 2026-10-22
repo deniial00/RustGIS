@@ -623,6 +623,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.addUrl", "Add Data From URL…", "Home › Add"),
     ("ui.addZarr", "Add Zarr Variable…", "Home › Add"),
     ("ui.addService", "Add From Service…", "Home › Add"),
+    ("ui.openSources", "Connections…", "Home › Add Data"),
     ("ui.searchOpenData", "Search Open Data…", "Home › Web Data"),
     ("ui.stac.planet", "Planet Open Data…", "Home › Web Data"),
     ("ui.stac.portolan", "Portolan…", "Home › Web Data"),
@@ -1261,6 +1262,33 @@ mod tests {
             let l = header_layout(Some(TitlebarMetrics { left_inset: inset, height, ..TitlebarMetrics::FALLBACK }));
             assert!(l.left_pad.is_finite() && (10.0..=120.0).contains(&l.left_pad), "{l:?}");
             assert!(l.height.is_finite() && (34.0..=80.0).contains(&l.height), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn connections_entry_opens_sources_without_ever_closing_it() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.pane.sources", serde_json::Value::Null).unwrap();
+        app.run("ui.pane.sources", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.left, None, "the View entry still toggles");
+        app.run("ui.openSources", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.left, Some(crate::LeftPane::Sources), "opens from closed");
+        app.run("ui.openSources", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.left, Some(crate::LeftPane::Sources), "idempotent when already open");
+        app.ui.left = Some(crate::LeftPane::Catalog);
+        app.run("ui.openSources", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.left, Some(crate::LeftPane::Sources), "replaces another left pane");
+        app.run("ui.pane.sources", serde_json::Value::Null).unwrap();
+        assert_eq!(app.ui.left, None, "toggle closes it again");
+    }
+
+    #[test]
+    fn every_new_connection_entry_opens_its_form() {
+        for (kind, _) in crate::connectionui::KINDS {
+            let mut app = RustGisApp::with_sample();
+            app.run("ui.connection", serde_json::json!({"kind": kind})).unwrap();
+            assert_eq!(app.dialogs.open, Some("newConnection"), "{kind}");
+            assert_eq!(app.ui.connection.kind, kind);
         }
     }
 }

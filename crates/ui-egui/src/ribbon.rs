@@ -443,6 +443,18 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
             #[cfg(not(target_arch = "wasm32"))]
             menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
             menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
+            // Saved connections live in the Data Sources pane, not here: one entry opens the pane
+            // (never closes it), and New Connection starts the form for a kind.
+            menu_item(ui, app, "", "Connections…", "ui.openSources", Value::Null);
+            submenu_row(ui, "", tl!("New Connection"), |ui| {
+                for (kind, label) in crate::connectionui::KINDS {
+                    // Database drivers aren't built for the browser.
+                    if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
+                        continue;
+                    }
+                    menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
+                }
+            });
             menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
             ui.separator();
             sample_data_gallery(ui, app);
