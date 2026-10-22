@@ -380,6 +380,8 @@ S3 profiles and environment credentials remain subject to the existing endpoint 
 editing an S3 name, endpoint or options disconnects its session login. S3 shares the name-based
 session registry used by the S3 dialog and `s3.connect`, so editing or removing a saved
 connection also affects a session entry of the same name created there.
+Renaming clears the runtime entries under both the old and new names, so the renamed
+connection cannot inherit an unrelated login at its destination name.
 Web-service logins are not supported. Plugins may list connections but cannot manage, log in
 to or test them. The in-app assistant asks for approval each time for those operations;
 external assistants using MCP cannot run them.

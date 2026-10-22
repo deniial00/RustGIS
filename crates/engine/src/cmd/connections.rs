@@ -140,6 +140,9 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
     let (c, stripped) = s.connections.update(&old.id, c)?;
     if c.kind == "s3" && (old.name != c.name || old.address != c.address || old.options != c.options) {
         s3::disconnect(&old.name);
+        if old.name != c.name {
+            s3::disconnect(&c.name);
+        }
     }
     Ok(shown_stripped(&c, stripped))
 }

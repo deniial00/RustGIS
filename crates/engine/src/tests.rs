@@ -8544,6 +8544,45 @@ fn connections_loaded_names_route_login_and_remove_to_the_right_endpoint() {
     assert_eq!(s.connections.find("connections-alias-target").unwrap().name, "Database");
 }
 
+#[test]
+fn connections_s3_rename_cannot_inherit_a_destination_session() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    let (old, destination, occupied) = ("rename-test-old", "rename-test-destination", "rename-test-occupied");
+    let saved = s
+        .run(
+            "connection.new",
+            &json!({
+                "kind":"s3","name":old,"address":"https://saved.example","options":{"credentials":"keys"}
+            }),
+        )
+        .unwrap();
+    s.run("connection.login", &json!({"id":old,"accessKeyId":"SAVEDKEY","secretAccessKey":"saved-test-secret"})).unwrap();
+    s.run(
+        "s3.connect",
+        &json!({
+            "name":destination,"endpoint":"https://runtime.example","accessKeyId":"RUNTIMEKEY","secretAccessKey":"runtime-test-secret"
+        }),
+    )
+    .unwrap();
+    s.run("connection.new", &json!({"kind":"s3","name":occupied})).unwrap();
+    assert!(s.run("connection.edit", &json!({"id":old,"name":occupied})).is_err());
+    assert!(s3::connection(old).is_some(), "a rejected edit must preserve the original login");
+    assert!(s3::connection(destination).is_some(), "a rejected edit must not disconnect another session");
+    let grouped = s.run("connection.edit", &json!({"id":old,"group":"Work"})).unwrap();
+    assert_eq!(grouped["loggedIn"], true, "a group-only edit must preserve the login");
+    let renamed = s.run("connection.edit", &json!({"id":old,"name":destination})).unwrap();
+    assert_eq!(renamed["id"], saved["id"]);
+    assert_eq!(renamed["address"], "https://saved.example");
+    assert_eq!(renamed["loggedIn"], false);
+    assert!(s3::connection(old).is_none());
+    assert!(s3::connection(destination).is_none());
+    assert!(s.run("connection.test", &json!({"id":destination})).unwrap_err().contains("log in first"));
+    s.run("connection.login", &json!({"id":destination,"accessKeyId":"NEWKEY","secretAccessKey":"new-test-secret"})).unwrap();
+    assert_eq!(s3::connection(destination).unwrap().endpoint.as_deref(), Some("https://saved.example"));
+    s.run("connection.remove", &json!({"id":destination})).unwrap();
+}
+
 fn rustgis_engine_sources_roundtrip(text: &str) -> crate::sources::Sources {
     crate::sources::Sources::from_json(text)
 }
