@@ -466,7 +466,11 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
             r
         })
         .inner;
-    let mut hover = tl!("Click to select, double-click to add, right-click for more").to_string();
+    // A dataset without an add (an OGC API feature collection, imported together) is added
+    // with options only.
+    let addable = child.get("add").is_some_and(Value::is_object);
+    let hint = if addable { tl!("Click to select, double-click to add, right-click for more") } else { tl!("Right-click for more") };
+    let mut hover = hint.to_string();
     if let Some(detail) = child["detail"].as_str().filter(|d| !d.is_empty()) {
         hover = format!("{hover}\n{detail}");
     }
@@ -474,7 +478,7 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
     let (mut add_now, mut with_options, mut add_selected, mut clear) = (false, false, false, false);
     let selected = app.ui.connection_tree.picks.len();
     r.context_menu(|ui| {
-        if ui.button(tl!("Add")).clicked() {
+        if addable && ui.button(tl!("Add")).clicked() {
             add_now = true;
             ui.close();
         }
@@ -494,12 +498,12 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
             }
         }
     });
-    if r.double_clicked() {
+    if addable && r.double_clicked() {
         // The first click selected it: a double-click adds it alone.
         let key = child["key"].as_str().unwrap_or("");
         app.ui.connection_tree.picks.retain(|p| !(p.conn == c.id && p.key == key));
         add_now = true;
-    } else if r.clicked() {
+    } else if addable && r.clicked() {
         toggle(app, c, child, listing.source.as_ref());
     }
     if clear {

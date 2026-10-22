@@ -166,6 +166,10 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> CmdResult {
     if !node_ok(node) {
         return Err("node is a child's node, as connection.browse lists it".into());
     }
+    // The app's answers come from a fetch the cache already limits; a caller's may be any size.
+    if ps(p, "answer").is_some_and(|a| a.len() > super::super::service::MAX_GROUP_BYTES) {
+        return Err("answer is too large to read".into());
+    }
     let level = level(&c, node)?;
     let conn = s3_login(s, &c, &level)?;
     let url = fetch_url(s, &c, &level, conn.as_ref())?;
@@ -346,12 +350,19 @@ fn catalogue(s: &mut Session, c: &Connection, text: &str, out: &mut Value) -> Re
                             Some(json!({"key": node, "node": node, "name": if name.is_empty() { url.as_str() } else { name.as_str() }, "what": "service", "detail": kind}))
                         }
                         "download" => {
+                            // Like a service's node, a link that is too long to follow is left out.
+                            if !node_ok(&url) {
+                                dropped = true;
+                                return None;
+                            }
                             let last = url.split(['?', '#']).next().unwrap_or("").trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                            let shown: String = if name.is_empty() { last } else { name.as_str() }.chars().take(200).collect();
+                            let named: String = title.chars().take(200).collect();
                             Some(json!({
                                 "key": url,
-                                "name": if name.is_empty() { last } else { name.as_str() },
+                                "name": shown,
                                 "what": "download",
-                                "add": {"command": "layer.addUrl", "params": {"url": url, "name": title}},
+                                "add": {"command": "layer.addUrl", "params": {"url": url, "name": named}},
                             }))
                         }
                         _ => None,

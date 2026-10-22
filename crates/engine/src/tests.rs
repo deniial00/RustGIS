@@ -6801,6 +6801,18 @@ fn wcs_coverages_and_catalogue_records() {
     );
     let full = s.run("service.coverage", &json!({"url": url, "layer": "soc", "text": caps, "describe": describe, "bbox": "full"})).unwrap();
     assert_eq!(full["bbox"], json!([5.0, 49.2, 5.8, 50.0]));
+    // The same coverage browsed from a saved connection: the add it lists runs as it is.
+    s.run("connection.new", &json!({"kind": "wcs", "address": url, "name": "Soils"})).unwrap();
+    let browsed = s.run("connection.browse", &json!({"id": "Soils", "answer": caps})).unwrap();
+    let child = &browsed["children"][0];
+    assert_eq!((child["what"].as_str(), child["add"]["command"].as_str()), (Some("coverage"), Some("service.add")), "{browsed}");
+    let mut listed = child["add"]["params"].clone();
+    listed["text"] = json!(caps);
+    listed["describe"] = json!(describe);
+    listed["bbox"] = json!("full");
+    let layers = s.map().layers.len();
+    s.run("service.add", &listed).unwrap();
+    assert_eq!(s.map().layers.len(), layers + 1);
     let (err, _) = serve_file(b"<ows:ExceptionReport>no</ows:ExceptionReport>".to_vec(), false);
     let p = json!({"url": format!("{err}/wcs"), "layer": "soc", "text": caps, "describe": describe, "bbox": "full"});
     assert!(s.run("service.add", &p).unwrap_err().contains("error"));
