@@ -296,6 +296,9 @@ fn service(s: &mut Session, p: &Value, out: &mut Value, url: &str, kind: Option<
             let offer_type = offer.get("type").and_then(Value::as_str).unwrap_or("");
             if offer_type == "service" {
                 let node = format!("service:arcgis:{}", text(&offer, "url"));
+                if !node_ok(&node) {
+                    return Value::Null;
+                }
                 let what = if name.ends_with('/') { "folder" } else { "service" };
                 return json!({"key": node, "node": node, "name": title.trim_end_matches('/'), "what": what});
             }
@@ -324,8 +327,14 @@ fn service(s: &mut Session, p: &Value, out: &mut Value, url: &str, kind: Option<
             }
             child
         })
-        .collect();
-    Ok(Found::new(children))
+        .collect::<Vec<Value>>();
+    // A folder or service whose address is too long to follow as a node is left out, and said so.
+    let listed = children.len();
+    let children: Vec<Value> = children.into_iter().filter(|c| !c.is_null()).collect();
+    let left_out = children.len() < listed;
+    let mut found = Found::new(children);
+    found.truncated |= left_out;
+    Ok(found)
 }
 
 /// A catalogue's records, each with the services and files it links to.
@@ -462,7 +471,7 @@ fn items(bytes: &[u8], from: &str) -> Result<Found, String> {
     let children = list
         .iter()
         .take(MAX_CHILDREN)
-        .map(|item| json!({"key": format!("item:{}", item.id), "name": item.id, "what": "item", "detail": item.datetime, "children": assets_of(item)}))
+        .map(|item| json!({"key": format!("item:{}", item.url.as_deref().unwrap_or(&item.id)), "name": item.id, "what": "item", "detail": item.datetime, "children": assets_of(item)}))
         .collect();
     Ok(Found { children, truncated, matched })
 }

@@ -1556,7 +1556,10 @@ fn connections_section_and_dialog() {
     h.step();
     h.step();
     h.get_by_label("Local").click_secondary();
-    h.step();
+    // The menu settles over a few frames; clicking its first layout can miss "Remove".
+    for _ in 0..4 {
+        h.step();
+    }
     h.get_by_label("Remove").click();
     h.step();
     assert!(h.state().session.connections.find("Local").is_none());
@@ -1920,6 +1923,8 @@ fn connections_tree_browses_and_adds() {
     assert_eq!(h.state().session.map().tiles.len(), before + 2);
     assert!(h.state().ui.connection_tree.picks.is_empty());
     h.state_mut().run("edit.undo", json!(null)).unwrap();
+    // Each layer was its own step: one undo takes one layer.
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
     h.state_mut().run("edit.undo", json!(null)).unwrap();
     assert_eq!(h.state().session.map().tiles.len(), before);
     // A double-click adds the one dataset, leaving nothing selected.
