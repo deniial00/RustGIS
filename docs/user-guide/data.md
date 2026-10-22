@@ -338,8 +338,9 @@ places data comes from:
   datasets are listed under it, a level at a time as you open its folders, with **Refresh**
   (a connection's or a folder's right-click menu; **⟳** refreshes every connection) and an error
   with **Retry** (and **Log In…** for databases and keyed S3) when it can't be read. Click a
-  dataset to select it and **Add Selected (N)** adds them all; double-click, or right-click ›
-  **Add**, adds one. Each added layer is its own undo step. **Add With Options…** opens the
+  dataset to select it (click again to clear it); double-click, or right-click › **Add**, adds
+  one, and right-click › **Add Selected (N)** adds them all (**Clear Selection** empties the
+  selection). Each added layer is its own undo step. **Add With Options…** opens the
   existing service, database, STAC or S3 add dialog, connected or prefilled. Right-click a row
   to edit, test, duplicate, copy its address or remove it.
 - **Library**: well-known public sources: OpenStreetMap tiles, EOX Sentinel-2 cloudless and

@@ -1711,7 +1711,15 @@ fn connections_tree_browses_and_adds() {
             let _ = s.write_all(body.as_bytes());
         }
     });
-    let mut h = harness();
+    // Frames 0.05 s apart, so two clicks fall within egui's double-click delay.
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_max_steps(64).with_step_dt(0.05).build_ui_state(
+        |ui, app: &mut RustGisApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        RustGisApp::with_sample(),
+    );
     h.state_mut().run("connection.new", json!({"kind":"wms","address":format!("http://{addr}/wms"),"name":"Local"})).unwrap();
     h.state_mut().run("ui.pane.sources", json!({})).unwrap();
     h.step();
@@ -1726,21 +1734,35 @@ fn connections_tree_browses_and_adds() {
     }
     assert!(h.query_by_label("A").is_some(), "the layers are listed under the connection");
     let before = h.state().session.map().tiles.len();
-    // The selection bar appears above the list once something is picked, shifting it by a row:
-    // a second frame lets the harness see the new layout.
     h.get_by_label("A").click();
-    h.step();
     h.step();
     h.get_by_label("B").click();
     h.step();
-    h.step();
     assert_eq!(h.state().ui.connection_tree.picks.len(), 2);
+    // The selection is added from a dataset's menu: each layer is its own undo step.
+    h.get_by_label("B").click_secondary();
+    h.step();
+    h.step();
     h.get_by_label("Add Selected (2)").click();
     h.step();
     h.step();
     assert_eq!(h.state().session.map().tiles.len(), before + 2);
     assert!(h.state().ui.connection_tree.picks.is_empty());
     h.state_mut().run("edit.undo", json!(null)).unwrap();
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    assert_eq!(h.state().session.map().tiles.len(), before);
+    // A double-click adds the one dataset, leaving nothing selected.
+    // (egui counts clicks in a row: let the earlier ones age out of its triple-click window first.)
+    for _ in 0..14 {
+        h.step();
+    }
+    h.get_by_label("A").click();
+    h.step();
+    h.get_by_label("A").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
+    assert!(h.state().ui.connection_tree.picks.is_empty());
     h.state_mut().run("edit.undo", json!(null)).unwrap();
     assert_eq!(h.state().session.map().tiles.len(), before);
     h.get_by_label("Local").click_secondary();

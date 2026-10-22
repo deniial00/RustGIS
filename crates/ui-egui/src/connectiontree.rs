@@ -1,7 +1,7 @@
 //! The datasets a saved connection offers, listed under it in Data Sources › Connections: one
 //! level at a time as it is expanded (`connection.browse` names what each level reads, the app
 //! fetches it off the frame and asks again with the answer), with the selection that
-//! Add Selected adds. Each dataset added is its own undo step.
+//! Add Selected (in a dataset's menu) adds. Each dataset added is its own undo step.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -313,33 +313,22 @@ pub fn refresh(app: &mut RustGisApp, id: Option<&str>) {
     }
 }
 
-/// Add Selected and Clear Selection, shown while datasets are selected.
-pub fn picks_bar(app: &mut RustGisApp, ui: &mut Ui) {
-    // A pick made for a connection that was edited or removed since (even while its row is
-    // folded, when its list isn't refreshed) would add from the old definition: dropped.
+/// Drops the picks of a connection that was edited or removed since (even while its row is
+/// folded, when its list isn't refreshed): they would add from the old definition.
+pub fn prune(app: &mut RustGisApp) {
     let (connections, tree) = (&app.session.connections, &mut app.ui.connection_tree);
     let seen = &tree.seen;
     tree.picks.retain(|p| connections.find(&p.conn).is_some_and(|c| seen.get(&p.conn) == Some(c)));
-    if tree.picks.is_empty() {
-        return;
+}
+
+/// Adds every selected dataset, each as its own undo step, and clears the selection.
+fn add_picks(app: &mut RustGisApp) {
+    prune(app);
+    for pick in std::mem::take(&mut app.ui.connection_tree.picks) {
+        if let Err(e) = add(app, &pick.child, pick.source.as_deref()) {
+            app.session.notify(e, true);
+        }
     }
-    ui.horizontal(|ui| {
-        let n = app.ui.connection_tree.picks.len().to_string();
-        if ui.button(i18n::fmt("Add Selected ({n})", &[("n", &n)])).clicked() {
-            for pick in std::mem::take(&mut app.ui.connection_tree.picks) {
-                // A connection removed since it was selected is skipped.
-                if app.session.connections.find(&pick.conn).is_none() {
-                    continue;
-                }
-                if let Err(e) = add(app, &pick.child, pick.source.as_deref()) {
-                    app.session.notify(e, true);
-                }
-            }
-        }
-        if ui.button(tl!("Clear Selection")).clicked() {
-            app.ui.connection_tree.picks.clear();
-        }
-    });
 }
 
 /// A connection's expanded body: its top level, listed (or its error).
@@ -477,12 +466,13 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
             r
         })
         .inner;
-    let mut hover = tl!("Click to select, double-click to add").to_string();
+    let mut hover = tl!("Click to select, double-click to add, right-click for more").to_string();
     if let Some(detail) = child["detail"].as_str().filter(|d| !d.is_empty()) {
         hover = format!("{hover}\n{detail}");
     }
     let r = r.on_hover_text(hover);
-    let (mut add_now, mut with_options) = (false, false);
+    let (mut add_now, mut with_options, mut add_selected, mut clear) = (false, false, false, false);
+    let selected = app.ui.connection_tree.picks.len();
     r.context_menu(|ui| {
         if ui.button(tl!("Add")).clicked() {
             add_now = true;
@@ -492,6 +482,17 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
             with_options = true;
             ui.close();
         }
+        if selected > 0 {
+            ui.separator();
+            if ui.button(i18n::fmt("Add Selected ({n})", &[("n", &selected.to_string())])).clicked() {
+                add_selected = true;
+                ui.close();
+            }
+            if ui.button(tl!("Clear Selection")).clicked() {
+                clear = true;
+                ui.close();
+            }
+        }
     });
     if r.double_clicked() {
         // The first click selected it: a double-click adds it alone.
@@ -500,6 +501,12 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
         add_now = true;
     } else if r.clicked() {
         toggle(app, c, child, listing.source.as_ref());
+    }
+    if clear {
+        app.ui.connection_tree.picks.clear();
+    }
+    if add_selected {
+        add_picks(app);
     }
     let result = if with_options {
         add_with_options(app, c, child, listing.source.as_deref())

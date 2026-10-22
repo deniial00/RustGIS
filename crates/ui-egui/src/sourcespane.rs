@@ -236,7 +236,7 @@ fn empty(ui: &mut Ui, what: &str) {
 }
 
 fn connections(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, list: &[Connection]) {
-    crate::connectiontree::picks_bar(app, ui);
+    crate::connectiontree::prune(app);
     ui.horizontal(|ui| {
         ui.menu_button(tl!("New Connection ▾"), |ui| {
             for (kind, label) in crate::connectionui::KINDS {
