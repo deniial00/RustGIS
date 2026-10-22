@@ -414,6 +414,7 @@ fn every_tab_pane_and_dialog_renders() {
         ("ui.dialog", json!({"name": "selectByAttributes"})),
         ("ui.dialog", json!({"name": "goToXY"})),
         ("ui.dialog", json!({"name": "calculateField"})),
+        ("ui.connection", json!({"kind": "s3"})),
         ("ui.commandSearch", json!(null)),
         ("ui.about", json!(null)),
         ("ui.shortcuts", json!(null)),
@@ -1487,6 +1488,78 @@ fn a_service_is_listed_when_its_capabilities_land() {
     assert_eq!(conn.error, None);
     assert_eq!(conn.listing.as_ref().unwrap()["layers"][0]["name"], "a");
     h.step();
+}
+
+#[test]
+fn connections_section_and_dialog() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let body = br#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="http://127.0.0.1/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+        for stream in listener.incoming().take(1) {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = s.write_all(body);
+        }
+    });
+    let mut h = harness();
+    h.state_mut().run("connection.new", json!({"kind":"wms","address":"https://w.example/wms","name":"State WMS","group":"Work"})).unwrap();
+    h.state_mut().run("ui.pane.sources", json!({})).unwrap();
+    h.step();
+    h.get_by_label("Work");
+    h.get_by_label("State WMS");
+    assert!(h.query_by_label("STAC APIs").is_none());
+    assert!(h.state_mut().run("ui.dialog", json!({"name":"newConnection"})).is_err());
+    h.state_mut().run("ui.connection", json!({"kind":"wms"})).unwrap();
+    assert_eq!(h.state().dialogs.open, Some("newConnection"));
+    let address = format!("http://{addr}/wms");
+    h.state_mut().ui.connection.name = "Local".into();
+    h.state_mut().ui.connection.address = address.clone();
+    h.step();
+    h.step();
+    h.get_by_label("Test").click();
+    for _ in 0..100 {
+        h.step();
+        if h.state().dialogs.info.as_ref().is_some_and(|s| s.contains("1 layers")) || h.state().dialogs.error.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(h.state().dialogs.error, None);
+    assert!(
+        h.state().dialogs.info.as_ref().is_some_and(|s| s.contains("Local: 1 layers")),
+        "info: {:?}, pending: {}",
+        h.state().dialogs.info,
+        h.state().ui.connection.test.is_some()
+    );
+    assert_eq!(h.state().session.connections.connections.len(), 1);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None);
+    let c = h.state().session.connections.find("Local").unwrap();
+    assert_eq!(c.address, address);
+    let id = c.id.clone();
+    h.state_mut().run("ui.connection", json!({"id":"Local"})).unwrap();
+    assert_eq!(h.state().dialogs.open, Some("editConnection"));
+    assert_eq!(h.state().ui.connection.name, "Local");
+    h.state_mut().ui.connection.group = "Lab".into();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.step();
+    let c = h.state().session.connections.find("Local").unwrap();
+    assert_eq!(c.group, "Lab");
+    assert_eq!(c.id, id);
+    h.step();
+    h.step();
+    h.get_by_label("Local").click_secondary();
+    h.step();
+    h.get_by_label("Remove").click();
+    h.step();
+    assert!(h.state().session.connections.find("Local").is_none());
 }
 
 /// Save in the web app (issue #197): the browser has no save dialog, so the first Save and every

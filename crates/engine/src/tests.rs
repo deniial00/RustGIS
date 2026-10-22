@@ -1146,6 +1146,8 @@ fn hostile_params_never_panic() {
         // Connections: junk kinds, options and secrets; no connection exists in a fresh session.
         json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "accessKeyId": "A", "secretAccessKey": 9}),
         json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
+        json!({"kind": "wms", "address": "http://127.0.0.1:9/wms", "probe": "x", "answer": 7}),
+        json!({"kind": "stac", "address": "http://127.0.0.1:9/stac", "answer": "\u{0}{"}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
     let streamed = grid_fgb("hostile", 20);
@@ -8917,6 +8919,52 @@ fn connections_s3_rename_cannot_inherit_a_destination_session() {
     s.run("connection.login", &json!({"id":destination,"accessKeyId":"NEWKEY","secretAccessKey":"new-test-secret"})).unwrap();
     assert_eq!(s3::connection(destination).unwrap().endpoint.as_deref(), Some("https://saved.example"));
     s.run("connection.remove", &json!({"id":destination})).unwrap();
+}
+
+#[test]
+fn connection_test_probes_and_answers() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    let mut wms = json!({"kind":"wms","address":"https://a.example/wms","probe":true});
+    let v = s.run("connection.test", &wms).unwrap();
+    let fetch = v["fetch"].as_str().unwrap();
+    assert!(fetch.starts_with("https://a.example/wms") && fetch.contains("REQUEST=GetCapabilities"));
+    assert!(v.get("connection").is_none());
+    assert!(s.connections.connections.is_empty());
+    wms.as_object_mut().unwrap().remove("probe");
+    wms["answer"] = json!(
+        r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://a.example/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer></Layer></Capability></WMS_Capabilities>"#
+    );
+    assert_eq!(s.run("connection.test", &wms).unwrap()["result"]["layers"][0]["name"], "a");
+    assert_eq!(
+        s.run("connection.test", &json!({"kind":"stac","address":"https://s.example/v1","probe":true})).unwrap()["fetch"],
+        "https://s.example/v1/collections"
+    );
+    assert_eq!(
+        s.run(
+            "connection.test",
+            &json!({"kind":"stac","address":"https://s.example/v1","answer":r#"{"collections":[{"id":"c1","title":"C"}]}"#})
+        )
+        .unwrap()["result"]["count"],
+        1
+    );
+    let mut p = json!({"kind":"s3","name":"probe-s3","options":{"credentials":"none","buckets":"bkt1"},"probe":true});
+    assert!(s.run("connection.test", &p).unwrap()["fetch"].as_str().unwrap().contains("bkt1"));
+    p.as_object_mut().unwrap().remove("probe");
+    p["answer"] = json!("<ListBucketResult><Contents><Key>a.tif</Key><Size>1</Size></Contents></ListBucketResult>");
+    assert_eq!(s.run("connection.test", &p).unwrap()["result"]["count"], 1);
+    p["options"].as_object_mut().unwrap().remove("buckets");
+    p["probe"] = json!(true);
+    assert!(s.run("connection.test", &p).unwrap_err().contains("name a bucket"));
+    s3::disconnect("probe-s3");
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        s.run("connection.test", &json!({"kind":"postgres","address":"postgres:host=127.0.0.1 port=9 dbname=x user=u","probe":true}))
+            .unwrap()["fetch"]
+            .is_null()
+    );
+    assert!(s.run("connection.test", &json!({"probe":true})).unwrap_err().contains("id, or kind and address"));
+    assert!(s.connections.connections.is_empty());
 }
 
 fn rustgis_engine_sources_roundtrip(text: &str) -> crate::sources::Sources {

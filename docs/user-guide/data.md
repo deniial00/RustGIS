@@ -333,10 +333,10 @@ places data comes from:
 - **Recent**: the last 20 sources added (files, web addresses, tile layers, services, database
   tables, Zarr variables, STAC assets, sample data), newest first.
 - **Folders**: the folders connected to the Browser (**Add Folder…**; desktop).
-- **Services**, **Databases** (desktop) and **STAC APIs**: addresses saved with the box under each.
-  A click opens Add From Service, Add From Database or STAC Search connected to it, which lists
-  its layers, tables or collections.
-- **S3**: this session's connections; a click opens the S3 browser on it.
+- **Connections**: named services, databases, STAC APIs and S3 endpoints, organised by optional
+  groups. **New Connection ▾** opens a kind-specific form; right-click a row to edit, test,
+  duplicate, copy its address or remove it. A click opens the existing service, database,
+  STAC or S3 add dialog, connected or prefilled.
 - **Library**: well-known public sources: OpenStreetMap tiles, EOX Sentinel-2 cloudless and
   NASA GIBS (WMTS), USGS imagery, topographic and hydrography maps (ArcGIS), GEBCO bathymetry
   (WMS), swisstopo's maps and imagery (geo.admin.ch, WMTS), Earth Search and Planetary Computer (STAC), and the Natural Earth sample layers.
@@ -349,6 +349,13 @@ database is kept without its password. The commands `sources.list`, `sources.sav
 [AI Assistant](assistant.md). On the command line they last for the run.
 
 ### Named connections
+
+In the pane, **New Connection** and **Edit…** let you set the name, group and address.
+Leave a new connection's name blank to derive it from the address. **Test** checks the form
+without saving it: web-service, catalogue, STAC and S3 requests run in the background on both
+desktop and web; database tests run synchronously on desktop. Database rows remain visible
+but cannot be opened or tested in the web app. Earth Search and Planetary Computer remain
+available under **Library**.
 
 The `connection.*` commands keep named, reusable endpoints independently of the project.
 Each has a stable id (`c1`, `c2`, …), a case-insensitively unique name and an optional group.
@@ -371,8 +378,11 @@ Kinds are `postgres`, `mysql` (including MariaDB), `sqlserver`, `service` (detec
 connect), `wms`, `wmts`, `wfs`, `wcs`, `ogcapi`, `arcgis`, `csw`, `stac` and `s3`.
 Database connections are used on the desktop only. S3 options are `region`, `buckets`
 (comma-separated), `credentials` (`keys`, `profile`, `environment` or `none`) and `profile`.
-`connection.test` lists the endpoint's tables, layers, records, collections or buckets;
-the web app's network listings still require the existing add dialogs.
+`connection.test` lists the endpoint's tables, layers, records, collections or buckets.
+It also accepts an unsaved definition (`kind`, `address`, `name`, `group`, `options`) instead
+of `id`. With `probe: true`, it returns the secret-free address to fetch (`fetch: null` for
+databases); pass that response text as `answer` with the same definition to parse it without
+a network request. An anonymous S3 test needs at least one named bucket.
 
 Addresses are saved without passwords or tokens. `connection.login` remembers a database
 `password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
@@ -394,8 +404,9 @@ that shared login; changing its address does not transfer the old password to th
 Desktop and web apps save connections with their preferences (`connections` in desktop
 `prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,
 databases other than DuckDB files, STAC APIs and remembered S3 connections once, without
-changing the old lists. The Data Sources pane and add dialogs are unchanged. CLI and Python
-connections last only for the run.
+changing the old lists. Legacy saved endpoint lists are no longer shown in the pane; remembered
+S3 connections remain available in the S3 dialog. Testing S3 can register a session login even
+if you cancel the connection form. CLI and Python connections last only for the run.
 
 ## Large files
 

@@ -27,7 +27,7 @@ struct Saved {
 
 /// Where a connection's keys come from: typed, an AWS profile or the environment (desktop), or
 /// none (public buckets). The profile and the environment are used only when chosen here.
-const SOURCES: [(&str, &str); 4] = [
+pub(crate) const SOURCES: [(&str, &str); 4] = [
     ("keys", "Typed below"),
     ("profile", "An AWS profile"),
     ("environment", "The environment (AWS_ACCESS_KEY_ID…)"),

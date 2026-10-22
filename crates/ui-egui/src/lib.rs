@@ -17,6 +17,7 @@ mod bookmarkpane;
 mod catalogsui;
 mod chrome;
 mod comets;
+mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
 mod connectui;
 mod cswui;
@@ -525,6 +526,8 @@ pub struct UiState {
     pub stac: stacui::State,
     /// S3…: the connection form, the bucket browsed and the listing under way.
     pub s3: s3ui::State,
+    /// New/Edit Connection: the form and the Test under way.
+    pub connection: connectionui::State,
     /// OpenStreetMap and Boundaries: their choices and the request under way.
     pub portals: portalsui::State,
     /// Overture Maps and Source Cooperative: choices, results and the request under way.
@@ -652,6 +655,7 @@ impl Default for UiState {
             csw: Default::default(),
             stac: Default::default(),
             s3: Default::default(),
+            connection: Default::default(),
             portals: Default::default(),
             catalogs: Default::default(),
             opendata: Default::default(),
@@ -2046,6 +2050,16 @@ impl RustGisApp {
                 let id = self.session.download_started();
                 self.ui.downloads.push((id, url, q, slot));
             }
+            "ui.connection" => {
+                if let Some(id) = p.get("id").and_then(Value::as_str) {
+                    connectionui::open_edit(self, id)?;
+                } else {
+                    connectionui::open_new(self, p.get("kind").and_then(Value::as_str).unwrap_or("service"))?;
+                }
+                if p.get("test").and_then(Value::as_bool) == Some(true) {
+                    connectionui::start_test(self);
+                }
+            }
             // A map or feature service: the dialog, then (with an address) its capabilities,
             // fetched off the frame; the dialog lists its layers when they land.
             "ui.importService" => serviceui::start(self, p, false)?,
@@ -3155,6 +3169,7 @@ impl RustGisApp {
         cswui::poll(self);
         stacui::poll(self, ctx);
         s3ui::poll(self, ctx);
+        connectionui::poll(self, ctx);
         portalsui::poll(self, ctx);
         catalogsui::poll(self, ctx);
         opendataui::poll(self, ctx);

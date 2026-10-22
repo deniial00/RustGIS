@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::ps;
+use super::{b, ps};
 use crate::connections::{Connection, DATABASE_KINDS, DESKTOP_ONLY, KINDS};
-use crate::render::rustgis_tiles::s3;
+use crate::render::rustgis_tiles::{s3, stac};
 use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
@@ -27,7 +27,7 @@ pub fn commands() -> Vec<C> {
             r#"{"id": "a connection's id or name", "password"?: "a database connection's, kept for this session only", "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "an S3 connection's keys (credentials: keys), kept for this session only"}"#,
         ),
         C::new("connection.test", "Test Connection", "Home › Add › Data Sources", test).view().params(
-            r#"{"id": "a connection's id or name", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)"}"#,
+            r#"{"id"?: "a connection's id or name", "kind"?: "postgres"|"mysql"|"sqlserver"|"service"|"wms"|"wmts"|"wfs"|"wcs"|"ogcapi"|"arcgis"|"csw"|"stac"|"s3", "name"?: text, "group"?: text, "address"?: text, "options"?: "an unsaved connection, as connection.new (when no id)", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)", "probe"?: "true: only the address the test reads, {fetch} (null for databases, which their driver tests)", "answer"?: "what that address returned, when the app fetched it (nothing is read then)"}"#,
         ),
     ]
 }
@@ -217,10 +217,93 @@ fn login_command(s: &mut Session, p: &Value) -> CmdResult {
     Ok(shown(&c))
 }
 
+fn tested(s: &Session, p: &Value) -> Result<Connection, String> {
+    if ps(p, "id").is_some() {
+        return Ok(found(s, p)?.clone());
+    }
+    let c = Connection {
+        kind: ps(p, "kind").ok_or_else(|| format!("id, or kind and address, is required ({})", KINDS.join(", ")))?.trim().into(),
+        address: ps(p, "address").unwrap_or("").into(),
+        name: ps(p, "name").unwrap_or("").into(),
+        group: ps(p, "group").unwrap_or("").into(),
+        options: p.get("options").map(options).transpose()?.unwrap_or_default(),
+        ..Connection::default()
+    };
+    Ok(crate::connections::clean(c)?.0)
+}
+
+fn first_bucket(c: &Connection) -> Option<String> {
+    c.options.get("buckets")?.split(',').map(str::trim).find(|b| !b.is_empty()).map(str::to_owned)
+}
+
+fn probe_url(s: &Session, c: &Connection) -> Result<Option<String>, String> {
+    let url = match c.kind.as_str() {
+        "postgres" | "mysql" | "sqlserver" => return Ok(None),
+        "service" => rustgis_data::ogc::capabilities_url(&c.address, None),
+        "wms" | "wmts" | "wfs" | "wcs" | "ogcapi" | "arcgis" => rustgis_data::ogc::capabilities_url(&c.address, Some(&c.kind)),
+        "csw" => super::service::records_request(s, &json!({"url": c.address}))?,
+        "stac" => {
+            let api = stac::api(Some(&c.address))?;
+            if stac::catalog::is_static(&api) { api } else { stac::collections_url(&api) }
+        }
+        "s3" => {
+            let conn = s3::connection(&c.name).ok_or("log in first: connection.login {id, accessKeyId, secretAccessKey}")?;
+            if let Some(bucket) = first_bucket(c) {
+                s3::grant(&conn.name, &bucket);
+                s3::list_url(&bucket, "", None, Some(&conn))
+            } else if conn.credentials.is_some() {
+                s3::buckets_url(&conn)
+            } else {
+                return Err("name a bucket under Buckets to test an anonymous S3 connection".into());
+            }
+        }
+        _ => return Err(format!("unknown kind '{}'", c.kind)),
+    };
+    Ok(Some(url))
+}
+
+fn answered(s: &mut Session, c: &Connection, text: &str) -> CmdResult {
+    match c.kind.as_str() {
+        "service" => super::service::layers(s, &json!({"url": c.address, "text": text})),
+        "wms" | "wmts" | "wfs" | "wcs" | "ogcapi" | "arcgis" => {
+            super::service::layers(s, &json!({"url": c.address, "type": c.kind, "text": text}))
+        }
+        "csw" => super::service::catalog_search(s, &json!({"url": c.address, "text": text})),
+        "stac" => super::stac::collections_json(&stac::api(Some(&c.address))?, text.as_bytes()),
+        "s3" => {
+            if let Some(bucket) = first_bucket(c) {
+                let l = s3::parse_list(text.as_bytes())?;
+                Ok(json!({"bucket": bucket, "count": l.prefixes.len() + l.objects.len(), "truncated": l.next.is_some()}))
+            } else {
+                Ok(json!({"buckets": s3::parse_buckets(text.as_bytes())?}))
+            }
+        }
+        _ => Err(format!("unknown kind '{}'", c.kind)),
+    }
+}
+
 fn test(s: &mut Session, p: &Value) -> CmdResult {
-    let c = found(s, p)?.clone();
-    if ["password", "accessKeyId", "secretAccessKey", "sessionToken"].iter().any(|k| ps(p, k).is_some_and(|v| !v.is_empty())) {
+    let c = tested(s, p)?;
+    let secrets = ["password", "accessKeyId", "secretAccessKey", "sessionToken"].iter().any(|k| ps(p, k).is_some_and(|v| !v.is_empty()));
+    if secrets {
         login(s, &c, p)?;
+    }
+    if c.kind == "s3" && !secrets && c.options.get("credentials").is_none_or(|v| v != "keys") {
+        login(s, &c, &Value::Null)?;
+    }
+    let mut out = json!({});
+    if !c.id.is_empty() {
+        out["connection"] = json!(c.id);
+    }
+    if b(p, "probe").unwrap_or(false) {
+        out["fetch"] = json!(probe_url(s, &c)?);
+        return Ok(out);
+    }
+    if let Some(text) = ps(p, "answer")
+        && !DATABASE_KINDS.contains(&c.kind.as_str())
+    {
+        out["result"] = answered(s, &c, text)?;
+        return Ok(out);
     }
     let result = match c.kind.as_str() {
         "postgres" | "mysql" | "sqlserver" => {
@@ -234,15 +317,15 @@ fn test(s: &mut Session, p: &Value) -> CmdResult {
         "csw" => super::service::catalog_search(s, &json!({"url": c.address}))?,
         "stac" => super::stac::collections(s, &json!({"url": c.address}))?,
         "s3" => {
-            if s3::connection(&c.name).is_none() {
-                if c.options.get("credentials").is_some_and(|v| v == "keys") {
-                    return Err("log in first: connection.login {id, accessKeyId, secretAccessKey}".into());
-                }
-                login(s, &c, &Value::Null)?;
+            s3::connection(&c.name).ok_or("log in first: connection.login {id, accessKeyId, secretAccessKey}")?;
+            let mut q = json!({"connection": c.name, "limit": 100});
+            if let Some(bucket) = first_bucket(&c) {
+                q["bucket"] = json!(bucket);
             }
-            super::s3::list(s, &json!({"connection": c.name, "limit": 100}))?
+            super::s3::list(s, &q)?
         }
         _ => return Err(format!("unknown kind '{}'", c.kind)),
     };
-    Ok(json!({"connection": c.id, "result": result}))
+    out["result"] = result;
+    Ok(out)
 }
