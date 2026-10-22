@@ -1752,6 +1752,8 @@ fn connections_tree_browses_and_adds() {
     assert_eq!(h.state().session.map().tiles.len(), before + 2);
     assert!(h.state().ui.connection_tree.picks.is_empty());
     h.state_mut().run("edit.undo", json!(null)).unwrap();
+    // Each layer was its own step: one undo takes one layer.
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
     h.state_mut().run("edit.undo", json!(null)).unwrap();
     assert_eq!(h.state().session.map().tiles.len(), before);
     // A double-click adds the one dataset, leaving nothing selected.
