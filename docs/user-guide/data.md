@@ -354,6 +354,9 @@ Different names may use the same address. `connection.new`, `connection.edit`,
 `connection.duplicate` and `connection.remove` manage them; commands that take `id` accept
 either the id or the name. `connection.list` can filter by `kind` or `group`, and reports
 availability, session login state and the commands to use to add data.
+Names cannot match a stored id or the reserved `c` + digits id pattern (case-insensitive).
+Loaded names that conflict get a numeric suffix; ids and endpoints stay unchanged. Clearing
+a name with `connection.edit` chooses a unique default from the address.
 
 ```sh
 rustgis-cli run \
@@ -376,6 +379,9 @@ can take these login parameters too. S3 profiles and environment credentials rem
 to the existing endpoint restrictions; editing an S3 name, endpoint or options disconnects
 its session login. Web-service logins are not supported. Plugins may list connections but
 cannot manage, log in to or test them; the assistant asks for approval for those operations.
+Database passwords are shared by public DSN for the session, including existing layers and
+other named connections using that DSN. Editing or removing a named connection does not revoke
+that shared login; changing its address does not transfer the old password to the new address.
 
 Desktop and web apps save connections with their preferences (`connections` in desktop
 `prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,

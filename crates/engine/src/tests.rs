@@ -8491,6 +8491,16 @@ fn connections_commands() {
         let list = s.run("connection.list", &json!({"kind":"postgres"})).unwrap();
         assert_eq!(list["connections"][0]["loggedIn"], true);
         assert!(!s.connections.to_json().contains("pw"));
+        let copy = s.run("connection.duplicate", &json!({"id":db["id"]})).unwrap();
+        assert_eq!(copy["loggedIn"], true, "the existing password store is shared by public DSN");
+        let edited = s
+            .run("connection.edit", &json!({"id":db["id"],"address":"postgres:host=127.0.0.1 port=9 dbname=connections_other user=u"}))
+            .unwrap();
+        assert_eq!(edited["loggedIn"], false, "a different endpoint must not inherit the old password");
+        s.run("connection.remove", &json!({"id":db["id"]})).unwrap();
+        let list = s.run("connection.list", &json!({"kind":"postgres"})).unwrap();
+        assert_eq!(list["connections"][0]["id"], copy["id"]);
+        assert_eq!(list["connections"][0]["loggedIn"], true, "removing a shortcut must not log out another connection using that DSN");
     }
     s.run("connection.new", &json!({"kind":"s3","name":"conn-test-s3","options":{"credentials":"keys","buckets":"b11"}})).unwrap();
     assert!(s.run("connection.test", &json!({"id":"conn-test-s3"})).unwrap_err().contains("log in first"));
@@ -8502,12 +8512,36 @@ fn connections_commands() {
     s.run("connection.new", &json!({"kind":"wms","name":"Closed","address":"http://127.0.0.1:9/wms"})).unwrap();
     assert!(s.run("connection.test", &json!({"id":"Closed"})).unwrap_err().contains("127.0.0.1:9"));
     assert!(s.run("connection.login", &json!({"id":"Closed"})).unwrap_err().contains("don't log in"));
+    s.run("connection.edit", &json!({"id":"Closed","kind":" wms "})).unwrap();
+    let default = s.run("connection.new", &json!({"kind":"wms","address":"https://a.example/wms"})).unwrap();
+    let renamed = s.run("connection.edit", &json!({"id":"B","name":""})).unwrap();
+    assert_eq!(renamed["name"], "wms (2)");
+    assert_ne!(default["id"], renamed["id"]);
     assert!(crate::sources::holds_secret(&json!({"id":"x","password":"p"})));
     for id in ["connection.new", "connection.edit", "connection.duplicate", "connection.remove", "connection.login", "connection.test"] {
         assert!(crate::cmd::plugins::user_only(id), "{id}");
     }
     assert!(!crate::cmd::plugins::user_only("connection.list"));
     assert!(!s.dirty && !s.can_undo());
+}
+
+#[test]
+fn connections_loaded_names_route_login_and_remove_to_the_right_endpoint() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    s.connections = crate::connections::Connections::from_json(&json!({"connections":[
+        {"id":"c1","kind":"s3","name":"connections-alias-target","options":{"credentials":"keys"}},
+        {"id":"connections-alias-target","kind":"postgres","name":"Database","address":"postgres:host=127.0.0.1 port=9 dbname=connections_alias user=u"}
+    ]}).to_string());
+    let name = s.connections.find("c1").unwrap().name.clone();
+    assert_eq!(name, "connections-alias-target (2)");
+    let logged_in = s.run("connection.login", &json!({"id":name,"accessKeyId":"AKIDTEST","secretAccessKey":"alias-test-secret"})).unwrap();
+    assert_eq!(logged_in["id"], "c1");
+    assert!(s3::connection(&name).is_some());
+    let removed = s.run("connection.remove", &json!({"id":name})).unwrap();
+    assert_eq!(removed["removed"], "c1");
+    assert!(s3::connection(&name).is_none());
+    assert_eq!(s.connections.find("connections-alias-target").unwrap().name, "Database");
 }
 
 fn rustgis_engine_sources_roundtrip(text: &str) -> crate::sources::Sources {

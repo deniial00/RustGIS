@@ -125,7 +125,7 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
     let old = found(s, p)?.clone();
     let mut c = old.clone();
     if let Some(kind) = ps(p, "kind")
-        && kind != c.kind
+        && kind.trim() != c.kind
     {
         return Err("a connection's kind doesn't change: make a new one".into());
     }

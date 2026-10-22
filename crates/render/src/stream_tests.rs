@@ -319,6 +319,12 @@ fn perspective_uses_complete_isolated_fallback() {
     for size in [1, 3, 20] {
         let mut actual = base.clone();
         actual.layers[0] = streamed(&base.layers[0], size);
+        // Settle the interaction read before measuring snapshot isolation. Rendering may
+        // legitimately install a finished window, but must not install the full depth snapshot.
+        sync_tilted_view(&mut actual, &view);
+        let extent = view_lonlat(&actual, &view);
+        assert!(!actual.layers[0].sync_source(&extent, true));
+        assert_eq!(actual.layers[0].dataset.features.len(), 1);
         let before = actual.layers[0].dataset.features.clone();
         let got = render(&mut actual, &view).unwrap();
         assert_eq!(got.labels, expected.labels);
@@ -400,10 +406,16 @@ fn partial_source_failure_and_incomplete_summary_reach_unchanged_owner() {
     for (size, message) in [(0, "cancelled"), (usize::MAX, "incomplete")] {
         let mut map = base.clone();
         map.layers[0] = streamed(&base.layers[0], size);
-        map.sync_sources(&Extent::WORLD_LONLAT, 1.0, true);
+        // Prime the same interactive mode and extent the worker will draw. A blocking map
+        // sync selects export mode, which rendering resets and may replace asynchronously.
         let view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: map.camera, sky: false };
+        let extent = view_lonlat(&map, &view);
+        let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+        map.sync_sources(&extent, scale, false);
+        assert!(!map.layers[0].sync_source(&extent, true));
         let mut worker = map.clone();
         assert!(render(&mut worker, &view).is_none());
+        assert!(worker.layers[0].dataset.features.shares(&map.layers[0].dataset.features));
         map.adopt_caches(&worker);
         assert!(map.layers[0].source.as_ref().unwrap().error.as_ref().unwrap().contains(message));
         map.layers[0].source.as_mut().unwrap().error = None;

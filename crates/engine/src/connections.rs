@@ -133,7 +133,7 @@ impl Connections {
         if let Some(rows) = v.get("connections").and_then(Value::as_array) {
             for row in rows {
                 let Ok(c) = serde_json::from_value::<Connection>(row.clone()) else { continue };
-                let Ok((mut c, _)) = clean(c) else { continue };
+                let Ok((c, _)) = clean(c) else { continue };
                 if c.id.is_empty()
                     || c.id.len() > 32
                     || !c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -144,11 +144,19 @@ impl Connections {
                 if let Some(n) = c.id.strip_prefix('c').and_then(|n| n.parse::<u64>().ok()) {
                     s.next = s.next.max(n.saturating_add(1));
                 }
-                c.name = s.unique_name(&c.name, None);
                 s.connections.push(c);
                 if s.connections.len() == MAX_CONNECTIONS {
                     break;
                 }
+            }
+        }
+        // All IDs must be known before a name is accepted: a later row can reserve it.
+        // Normalize in order so the first duplicate name keeps precedence.
+        for i in 0..s.connections.len() {
+            let Some(c) = s.connections.get(i) else { continue };
+            let name = s.unique_name(&c.name, None, s.connections.get(..i).unwrap_or_default());
+            if let Some(c) = s.connections.get_mut(i) {
+                c.name = name;
             }
         }
         s
@@ -212,8 +220,16 @@ impl Connections {
         self.connections.iter().find(|c| c.id == key).or_else(|| self.connections.iter().find(|c| same_name(&c.name, key.trim())))
     }
 
-    fn unique_name(&self, base: &str, except: Option<&str>) -> String {
-        let taken = |name: &str| self.connections.iter().any(|c| Some(c.id.as_str()) != except && same_name(&c.name, name));
+    /// IDs win lookup, so names must not occupy either a stored ID or a future generated ID.
+    fn name_is_id(&self, name: &str) -> bool {
+        let generated = name.get(..1).is_some_and(|c| c.eq_ignore_ascii_case("c"))
+            && name.get(1..).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        generated || self.connections.iter().any(|c| same_name(&c.id, name))
+    }
+
+    // Loading checks names only against earlier rows, but IDs against the whole collection.
+    fn unique_name(&self, base: &str, except: Option<&str>, named: &[Connection]) -> String {
+        let taken = |name: &str| self.name_is_id(name) || named.iter().any(|c| Some(c.id.as_str()) != except && same_name(&c.name, name));
         if !taken(base) {
             return base.into();
         }
@@ -232,7 +248,10 @@ impl Connections {
         if self.connections.len() >= MAX_CONNECTIONS {
             return Err(format!("up to {MAX_CONNECTIONS} connections"));
         }
-        let name = self.unique_name(&c.name, None);
+        if explicit_name && self.name_is_id(&c.name) {
+            return Err("a connection name cannot be a connection id".into());
+        }
+        let name = self.unique_name(&c.name, None, &self.connections);
         if explicit_name && name != c.name {
             return Err(format!("a connection named '{}' exists", c.name));
         }
@@ -254,10 +273,16 @@ impl Connections {
     }
 
     pub fn update(&mut self, id: &str, c: Connection) -> Result<(Connection, bool), String> {
+        let explicit_name = !c.name.trim().is_empty();
         let (mut c, stripped) = clean(c)?;
-        if self.unique_name(&c.name, Some(id)) != c.name {
+        if explicit_name && self.name_is_id(&c.name) {
+            return Err("a connection name cannot be a connection id".into());
+        }
+        let name = self.unique_name(&c.name, Some(id), &self.connections);
+        if explicit_name && name != c.name {
             return Err(format!("a connection named '{}' exists", c.name));
         }
+        c.name = name;
         let slot = self.connections.iter_mut().find(|c| c.id == id).ok_or_else(|| format!("no connection '{id}'"))?;
         c.id = id.into();
         *slot = c.clone();
@@ -338,6 +363,49 @@ mod tests {
         assert_ne!(c.id, other.id);
         assert_eq!(c.address, other.address);
         assert_eq!(Connections::from_json(&s.to_json()).connections, s.connections);
+    }
+
+    #[test]
+    fn connections_names_cannot_shadow_stored_or_future_ids() {
+        let mut s = Connections::from_json(
+            &json!({"connections": [
+                {"id":"first","name":"REMOTE","kind":"s3"},
+                {"id":"remote","name":"Remote (2)","kind":"s3"},
+                {"id":"third","name":"c4","kind":"s3"},
+                {"id":"fourth","name":"remote","kind":"s3"}
+            ]})
+            .to_string(),
+        );
+        assert_eq!(s.connections[0].name, "REMOTE (2)");
+        assert_eq!(s.connections[1].name, "Remote (2) (2)");
+        assert_eq!(s.connections[2].name, "c4 (2)");
+        assert_eq!(s.connections[3].name, "remote (3)");
+        for c in &s.connections {
+            assert_eq!(s.find(&c.name), Some(c));
+        }
+        let template = s.connections[0].clone();
+        for name in ["remote", "FIRST", "c1", "c5", "C999"] {
+            let c = Connection { name: name.into(), ..template.clone() };
+            assert!(s.add(c.clone(), true).is_err(), "{name}");
+            assert!(s.update("first", c).is_err(), "{name}");
+        }
+        let (generated, _) = s.add(Connection { name: "c1".into(), ..template.clone() }, false).unwrap();
+        assert_eq!(generated.id, "c1");
+        assert_eq!(generated.name, "c1 (2)");
+        assert_eq!(s.find(&generated.name), Some(&generated));
+        assert_eq!(Connections::from_json(&s.to_json()).connections, s.connections);
+    }
+
+    #[test]
+    fn connections_blank_edit_name_uses_a_unique_default() {
+        let mut s = Connections::default();
+        let c = Connection { kind: "wms".into(), address: "https://a.example/wms".into(), ..Connection::default() };
+        let (first, _) = s.add(c.clone(), false).unwrap();
+        let (second, _) = s.add(Connection { name: "Other".into(), ..c }, true).unwrap();
+        let (edited, _) = s.update(&second.id, Connection { name: "  ".into(), ..second.clone() }).unwrap();
+        assert_eq!(edited.name, "wms (2)");
+        assert_eq!(s.find(&first.name), Some(&first));
+        assert!(s.update(&second.id, Connection { name: first.name, ..edited }).is_err());
     }
 
     #[test]
