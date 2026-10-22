@@ -8811,6 +8811,170 @@ fn data_sources_recent_favourites_and_saved() {
 }
 
 #[test]
+fn layer_address_redaction_preserves_templates_and_local_paths() {
+    let cases = [
+        ("https://{switch:a,b}.host/{z}/{x}/{y}@2x.png?key=secret&map=m#token", "https://{switch:a,b}.host/{z}/{x}/{y}@2x.png?map=m"),
+        ("HTTPS://u:p@host/data?token=secret&f=json", "HTTPS://host/data?f=json"),
+        ("s3://u:p@bucket/data?X-Amz-Signature=secret", "s3://bucket/data"),
+        ("/tmp/data?key=not-a-web-secret", "/tmp/data?key=not-a-web-secret"),
+        ("upload:map?token=local", "upload:map?token=local"),
+        ("postgres:host=localhost dbname=gis", "postgres:host=localhost dbname=gis"),
+    ];
+    let mut addresses: Vec<String> = cases.iter().map(|(a, _)| a.to_string()).collect();
+    crate::project::strip_addresses(addresses.iter_mut().collect());
+    for (address, (_, expected)) in addresses.iter().zip(cases) {
+        assert_eq!(address, expected);
+    }
+    let prefix = crate::render::rustgis_tiles::s3::ANONYMOUS;
+    let mut anonymous = format!("{prefix}https://bucket.example/a?token=secret");
+    crate::project::strip_addresses(vec![&mut anonymous]);
+    assert_eq!(anonymous, format!("{prefix}https://bucket.example/a"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn database_layers_wait_for_their_connection_login() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().take(16).flatten() {
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut length = [0; 4];
+            if stream.read_exact(&mut length).is_err() {
+                continue;
+            }
+            let n = u32::from_be_bytes(length);
+            if !(4..=65536).contains(&n) {
+                continue;
+            }
+            let mut startup = vec![0; (n - 4) as usize];
+            if stream.read_exact(&mut startup).is_err() || stream.write_all(b"R\0\0\0\x08\0\0\0\x03").is_err() {
+                continue;
+            }
+            let mut kind = [0];
+            if stream.read_exact(&mut kind).is_err() || kind[0] != b'p' || stream.read_exact(&mut length).is_err() {
+                continue;
+            }
+            let n = u32::from_be_bytes(length);
+            if !(4..=65536).contains(&n) {
+                continue;
+            }
+            let mut password = vec![0; (n - 4) as usize];
+            if stream.read_exact(&mut password).is_err() {
+                continue;
+            }
+            let body = b"SFATAL\0VFATAL\0C28P01\0Mpassword authentication failed for user \"me\"\0\0";
+            let _ = stream.write_all(b"E");
+            let _ = stream.write_all(&((body.len() + 4) as u32).to_be_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    let dsn = format!("postgres:host=127.0.0.1 port={port} dbname=waiting_login user=me sslmode=disable");
+    let down = "postgres:host=127.0.0.1 port=1 dbname=waiting_down user=me sslmode=disable";
+    let mut s = world();
+    for (layer, database) in s.map_mut().layers.iter_mut().zip([dsn.as_str(), dsn.as_str(), down]) {
+        layer.source = Some(serde_json::from_value(json!({"postgis":{"database":database,"table":"roads","family":"Lines"}})).unwrap());
+    }
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("connection.new", &json!({"kind":"postgres","name":"Production GIS","address":dsn})).unwrap();
+    t.run("connection.new", &json!({"kind":"postgres","name":"Down","address":down})).unwrap();
+    t.run("project.openText", &json!({"text":text})).unwrap();
+    for layer in t.map().layers.iter().take(2) {
+        assert!(layer.source.as_ref().unwrap().login);
+        assert_eq!(t.connections.for_layer(layer).unwrap().name, "Production GIS");
+    }
+    assert!(t.map().layers.iter().skip(3).all(|l| t.connections.for_layer(l).is_none()));
+    let third = t.map().layers[2].source.as_ref().unwrap();
+    assert!(third.error.is_some() && !third.login);
+    assert!(t.notices.iter().any(|n| n.text.contains("2 layer(s)") && n.text.contains("Production GIS")));
+    assert!(!t.notices.iter().any(|n| n.text.contains("Down")));
+    let listed = t.run("connection.list", &Value::Null).unwrap();
+    assert_eq!(listed["connections"][0]["waiting"], 2);
+    assert!(listed["connections"][1].get("waiting").is_none());
+    let result = t.run("connection.login", &json!({"id":"Production GIS","password":"wrong"})).unwrap();
+    assert_eq!(result["reopened"], 0);
+    assert_eq!(result["failed"], 2);
+    assert!(t.map().layers.iter().take(2).all(|l| l.source.as_ref().unwrap().login));
+    assert_eq!(t.run("connection.list", &Value::Null).unwrap()["connections"][0]["waiting"], 2);
+    // Duplicate saved connections use list order for reporting, but either can log in.
+    t.run("connection.new", &json!({"kind":"postgres","name":"Same database","address":dsn})).unwrap();
+    assert_eq!(t.connections.for_layer(&t.map().layers[0]).unwrap().name, "Production GIS");
+    let result = t.run("connection.login", &json!({"id":"Same database","password":"wrong"})).unwrap();
+    assert_eq!(result["failed"], 2);
+}
+
+#[test]
+fn saved_projects_keep_no_layer_tokens() {
+    let mut s = world();
+    let url = "https://gis.example/arcgis/rest/services/a/MapServer/tile/{z}/{y}/{x}?token=s3cret";
+    s.run("map.addTiles", &json!({"url":url,"name":"Secured"})).unwrap();
+    let layer = s.map().layers[0].id;
+    s.map_mut().layers[0].dataset.source = Some("https://u:pw@gis.example/f?f=json&access_token=tok2".into());
+    s.map_mut().service_groups.push(rustgis_map::ServiceGroup {
+        id: 123,
+        name: "Protected service".into(),
+        url: "https://gis.example/wfs?key=k3y&map=m".into(),
+        kind: "wfs".into(),
+        expanded: true,
+        children: vec![rustgis_map::ServiceChild {
+            layer,
+            collection: "roads".into(),
+            source_url: "https://gis.example/roads?sig=x&sv=1".into(),
+        }],
+    });
+    let path = std::env::temp_dir().join(format!("rustgis-token-audit-{}.rgis", std::process::id()));
+    let result = s.run("project.saveAs", &json!({"path":path})).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    for secret in ["s3cret", "pw@", "tok2", "k3y", "sig=x"] {
+        assert!(!text.contains(secret), "{secret} leaked into the file");
+    }
+    assert!(text.contains("MapServer/tile/{z}/{y}/{x}") && text.contains("map=m"));
+    assert!(result["stripped"].as_u64().unwrap() >= 4);
+    assert!(s.notices.iter().any(|n| n.text.contains("saved without their keys")));
+    assert!(s.map().tiles.iter().any(|t| t.url == url));
+    for kind in ["map", "projectPackage", "mapPackage", "mobilePackage"] {
+        let (_, bytes) = crate::cmd::items::item_bytes(&mut s, kind, &Value::Null).unwrap();
+        let packaged =
+            if kind == "map" { String::from_utf8(bytes.clone()).unwrap() } else { crate::cmd::items::package_text(&bytes).unwrap() };
+        for secret in ["s3cret", "pw@", "tok2", "k3y", "sig=x"] {
+            assert!(!packaged.contains(secret), "{kind} leaked {secret}");
+        }
+        if kind == "projectPackage" {
+            // Even a hostile archive carrying the exact registered JSON must not restore it.
+            let hostile = rustgis_data::zip::write(&[("exact.rgis".into(), text.as_bytes().to_vec())]).unwrap();
+            let package_path = path.with_extension("rgispkg");
+            std::fs::write(&package_path, hostile).unwrap();
+            let mut opened = Session::new(Project::default());
+            opened.run("project.open", &json!({"path":package_path})).unwrap();
+            assert!(!serde_json::to_string(&opened.project).unwrap().contains("s3cret"));
+            opened.run("project.openText", &json!({"text":text,"package":true})).unwrap();
+            assert!(!serde_json::to_string(&opened.project).unwrap().contains("s3cret"));
+            std::fs::remove_file(package_path).unwrap();
+        }
+    }
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path":path})).unwrap();
+    assert!(t.map().tiles.iter().any(|t| t.url == url));
+    assert!(t.map().layers[0].dataset.source.as_deref().unwrap().contains("tok2"));
+    let modified = text.replace("\"name\":\"Secured\"", "\"name\":\"Secures\"");
+    assert_ne!(text, modified);
+    t.run("project.openText", &json!({"text":modified})).unwrap();
+    let live = serde_json::to_string(&t.project).unwrap();
+    for secret in ["s3cret", "pw@", "tok2", "k3y", "sig=x"] {
+        assert!(!live.contains(secret), "{secret} restored into a modified hostile file");
+    }
+    let public = url.split('?').next().unwrap();
+    let mut hand = world();
+    hand.run("map.addTiles", &json!({"url":public,"name":"Hand made"})).unwrap();
+    t.run("project.openText", &json!({"text":serde_json::to_string(&hand.project).unwrap()})).unwrap();
+    assert!(t.map().tiles.iter().any(|t| t.url == public));
+    assert!(!serde_json::to_string(&t.project).unwrap().contains("s3cret"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn connections_commands() {
     use crate::render::rustgis_tiles::s3;
     let mut s = Session::new(Project::default());

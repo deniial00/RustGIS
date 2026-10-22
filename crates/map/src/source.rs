@@ -79,6 +79,9 @@ pub struct SourceLayer {
     /// Why the source couldn't be opened or read.
     #[serde(skip)]
     pub error: Option<String>,
+    /// The last open failed because the server refused the login (no password given this session, or a wrong one).
+    #[serde(skip)]
+    pub login: bool,
     /// The most features a view reads (0 = [`VIEW_LIMIT`]).
     #[serde(skip)]
     pub limit: usize,
@@ -189,6 +192,7 @@ impl std::fmt::Debug for SourceLayer {
             .field("table", &self.table)
             .field("window", &self.window)
             .field("error", &self.error)
+            .field("login", &self.login)
             .finish_non_exhaustive()
     }
 }
@@ -236,8 +240,11 @@ fn open_postgis(pg: &PostgisOrigin) -> rustgis_data::Result<Box<dyn FeatureSourc
         let Database::Postgres(dsn) = Database::parse(&pg.database) else {
             return Err(rustgis_data::DataError::Format(format!("{}: not a PostgreSQL connection", pg.database)));
         };
-        let again = |e: rustgis_data::DataError| {
-            rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)"))
+        let again = |e: rustgis_data::DataError| match e {
+            rustgis_data::DataError::Login(m) => {
+                rustgis_data::DataError::Login(format!("{m} (connect again with Add Data › Database…, giving its password)"))
+            }
+            e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
         };
         let conn = postgis::connect(&dsn, false).map_err(again)?;
         let table = postgis::find_table(&conn, &pg.table)?;
@@ -259,8 +266,11 @@ fn open_mysql(my: &MysqlOrigin) -> rustgis_data::Result<Box<dyn FeatureSource>> 
         let Database::Mysql(address) = Database::parse(&my.database) else {
             return Err(rustgis_data::DataError::Format(format!("{}: not a MySQL or MariaDB connection", my.database)));
         };
-        let again = |e: rustgis_data::DataError| {
-            rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)"))
+        let again = |e: rustgis_data::DataError| match e {
+            rustgis_data::DataError::Login(m) => {
+                rustgis_data::DataError::Login(format!("{m} (connect again with Add Data › Database…, giving its password)"))
+            }
+            e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
         };
         let conn = mysql::connect(&address, false).map_err(again)?;
         let table = mysql::find_table(&conn, &my.table)?;
@@ -282,8 +292,11 @@ fn open_sqlserver(ms: &SqlServerOrigin) -> rustgis_data::Result<Box<dyn FeatureS
         let Database::Sqlserver(address) = Database::parse(&ms.database) else {
             return Err(rustgis_data::DataError::Format(format!("{}: not a SQL Server connection", ms.database)));
         };
-        let again = |e: rustgis_data::DataError| {
-            rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)"))
+        let again = |e: rustgis_data::DataError| match e {
+            rustgis_data::DataError::Login(m) => {
+                rustgis_data::DataError::Login(format!("{m} (connect again with Add Data › Database…, giving its password)"))
+            }
+            e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
         };
         let conn = sqlserver::connect(&address, false).map_err(again)?;
         let table = sqlserver::find_table(&conn, &ms.table)?;
@@ -432,9 +445,11 @@ impl SourceLayer {
                 self.handle = Some(Arc::from(s));
                 self.window = None;
                 self.error = None;
+                self.login = false;
                 Ok(())
             }
             Err(e) => {
+                self.login = matches!(e, rustgis_data::DataError::Login(_));
                 let e = e.to_string();
                 self.error = Some(e.clone());
                 Err(e)

@@ -116,12 +116,15 @@ fn ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+fn refused_login(e: &postgres::Error) -> bool {
+    matches!(e.code(), Some(&postgres::error::SqlState::INVALID_PASSWORD | &postgres::error::SqlState::INVALID_AUTHORIZATION_SPECIFICATION))
+        || std::error::Error::source(e).is_some_and(|s| s.to_string() == "password missing")
+}
+
 fn err(e: postgres::Error) -> DataError {
     // The server's own message (a missing table, a failed password) rather than "db error".
-    match e.as_db_error() {
-        Some(db) => DataError::Format(db.message().to_string()),
-        None => DataError::Format(e.to_string()),
-    }
+    let message = e.as_db_error().map(|db| db.message().to_string()).unwrap_or_else(|| e.to_string());
+    if refused_login(&e) { DataError::Login(message) } else { DataError::Format(message) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -196,11 +199,14 @@ fn open_client(config: &postgres::Config, tls: &Tls) -> Result<postgres::Client>
         Tls::Disable => config.connect(postgres::NoTls),
         Tls::Unverified | Tls::Verified(_) => config.connect(tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config(tls)?)),
     }
-    .map_err(|e| match e.as_db_error() {
-        Some(db) => DataError::Format(db.message().to_string()),
-        // The cause ("password authentication failed", "connection refused"), not just "error
-        // connecting to server".
-        None => DataError::Format(std::error::Error::source(&e).map(|s| format!("{e}: {s}")).unwrap_or_else(|| e.to_string())),
+    .map_err(|e| {
+        let message = match e.as_db_error() {
+            Some(db) => db.message().to_string(),
+            // The cause ("password authentication failed", "connection refused"), not just
+            // "error connecting to server".
+            None => std::error::Error::source(&e).map(|s| format!("{e}: {s}")).unwrap_or_else(|| e.to_string()),
+        };
+        if refused_login(&e) { DataError::Login(message) } else { DataError::Format(message) }
     })?;
     client
         .batch_execute(&format!(

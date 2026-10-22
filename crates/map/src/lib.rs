@@ -876,6 +876,48 @@ impl Map {
         }
     }
 
+    /// Every address the map keeps to read its data again (service groups and their layers'
+    /// sources, tile layers and their dated addresses, terrain tiles, layers' dataset, streamed and
+    /// raster sources, time-following Zarr stores). Local paths come too: callers judge each one.
+    pub fn addresses_mut(&mut self) -> Vec<&mut String> {
+        let mut addresses = Vec::new();
+        for group in &mut self.service_groups {
+            addresses.push(&mut group.url);
+            for child in &mut group.children {
+                addresses.push(&mut child.source_url);
+            }
+        }
+        for tile in &mut self.tiles {
+            addresses.push(&mut tile.url);
+            if let Some(url) = &mut tile.time_url {
+                addresses.push(url);
+            }
+            for (_, url) in &mut tile.time_urls {
+                addresses.push(url);
+            }
+        }
+        if let Some(view::Terrain { source: view::TerrainSource::Tiles { url, .. }, .. }) = &mut self.view.terrain {
+            addresses.push(url);
+        }
+        for layer in &mut self.layers {
+            if let Some(source) = &mut layer.dataset.source {
+                addresses.push(source);
+            }
+            if let Some(path) = layer.source.as_mut().and_then(|source| source.path.as_mut()) {
+                addresses.push(path);
+            }
+            if let Some(raster) = &mut layer.raster {
+                if let Some(path) = &mut raster.path {
+                    addresses.push(path);
+                }
+                if let Some(zarr) = &mut raster.time_zarr {
+                    addresses.push(&mut zarr.store);
+                }
+            }
+        }
+        addresses
+    }
+
     /// A nonzero id no layer, service group or layer group has: past the highest in use, or (when ids reach
     /// `u32::MAX`, as a project file may have them) the lowest free one.
     fn next_id(&mut self) -> u32 {

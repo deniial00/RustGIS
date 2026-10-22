@@ -1115,7 +1115,7 @@ impl RustGisApp {
         }
         if lower.ends_with(".rgispkg") {
             let text = rustgis_engine::cmd::items::package_text(bytes)?;
-            let r = self.run("project.openText", json!({"text": text}));
+            let r = self.run("project.openText", json!({"text": text, "package": true}));
             self.map.invalidate();
             return r;
         }
@@ -1191,8 +1191,8 @@ impl RustGisApp {
         // Not an undoable edit: saving names the project, as `project.saveAs` does, once the
         // file is written.
         let old = std::mem::replace(&mut self.session.project.name, stem.clone());
-        let text = match serde_json::to_string(&self.session.project) {
-            Ok(text) => text,
+        let (text, stripped) = match self.session.project.saved_text() {
+            Ok(saved) => saved,
             Err(e) => {
                 self.session.project.name = old;
                 return Err(e.to_string());
@@ -1200,6 +1200,15 @@ impl RustGisApp {
         };
         let file = format!("{stem}.rgis");
         self.download(&file, text.into_bytes());
+        if stripped > 0 {
+            self.session.notify(
+                crate::i18n::fmt(
+                    "{n} layer address(es) were saved without their keys, tokens or passwords: after RustGIS closes, add those layers again to give them",
+                    &[("n", &stripped.to_string())],
+                ),
+                false,
+            );
+        }
         self.session.dirty = false;
         self.ui.web_file = Some(file);
         Ok(())
@@ -2924,7 +2933,7 @@ impl RustGisApp {
         } else {
             std::str::from_utf8(bytes).map_err(|_| "not a RustGIS project".to_string())?.to_string()
         };
-        let mut p = json!({"text": text});
+        let mut p = json!({"text": text, "package": package});
         if let Some(f) = file.filter(|_| !package) {
             p["fileName"] = json!(f);
         }

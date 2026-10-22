@@ -173,7 +173,7 @@ pub fn commands() -> Vec<C> {
         .params(r#"{"path": "*.rgistemplate", "name"?: template name}"#),
         C::new("project.fromTemplate", "Open Custom Template", "Home › Project", |s, p| {
             let text = read_text(p)?;
-            let mut proj = Project::from_json(&text).map_err(|e| e.replace("RustGIS project", "RustGIS template"))?;
+            let mut proj = Project::from_import_json(&text).map_err(|e| e.replace("RustGIS project", "RustGIS template"))?;
             proj.name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Untitled").chars().take(200).collect();
             super::project::reset_to(s, proj);
             s.path = None;
@@ -411,7 +411,7 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     let text = read_text(p)?;
     let maps: Vec<Map> = match serde_json::from_str::<Map>(&text) {
         Ok(m) => vec![m],
-        Err(_) => Project::from_json(&text).map_err(|_| "not a RustGIS map file, project or package".to_string())?.maps,
+        Err(_) => Project::from_import_json(&text).map_err(|_| "not a RustGIS map file, project or package".to_string())?.maps,
     };
     let mut names = Vec::new();
     for mut m in maps.into_iter().take(100) {
@@ -452,7 +452,7 @@ fn import_styles(s: &mut Session, p: &Value) -> CmdResult {
     } else if let Ok(m) = serde_json::from_str::<Map>(&text) {
         m.layers
     } else {
-        Project::from_json(&text)
+        Project::from_import_json(&text)
             .map_err(|_| "not a RustGIS layer file, map file or project".to_string())?
             .maps
             .into_iter()
@@ -506,6 +506,7 @@ fn package_project(s: &Session) -> Result<Vec<u8>, String> {
     for m in &mut p.maps {
         *m = embedded_map(m, &mut budget);
     }
+    crate::project::strip_addresses(p.addresses_mut());
     let text = serde_json::to_string(&p).map_err(|e| e.to_string())?;
     let readme =
         format!("{} — a RustGIS project package.\nOpen it with RustGIS (Project › Open), or unzip it for {}.rgis.\n", p.name, p.name);
@@ -539,6 +540,7 @@ fn package_map(s: &Session, mobile: bool, tol: f64) -> Result<Vec<u8>, String> {
             l.touch_geometry();
         }
     }
+    crate::project::strip_addresses(m.addresses_mut());
     let text = serde_json::to_string(&m).map_err(|e| e.to_string())?;
     let kind = if mobile { "mobile map package" } else { "map package" };
     let readme = format!("{} — a RustGIS {kind}.\nAdd it to a project with Data › Import.\n", m.name);
@@ -932,7 +934,9 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
                 Some(n) => s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("no map '{n}'"))?,
                 None => s.map(),
             };
-            (map.name.clone(), to_json(&embedded_map(map, &mut MAX_EMBED.clone()))?)
+            let mut map = embedded_map(map, &mut MAX_EMBED.clone());
+            crate::project::strip_addresses(map.addresses_mut());
+            (map.name.clone(), to_json(&map)?)
         }
         "layer" => {
             let id = s.layer_id(p)?;
