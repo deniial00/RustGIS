@@ -10,6 +10,9 @@ use crate::connections::{Connection, DATABASE_KINDS, DESKTOP_ONLY, KINDS};
 use crate::render::rustgis_tiles::{s3, stac};
 use crate::{CmdResult, CommandSpec as C, Session};
 
+#[path = "connection_browse.rs"]
+mod browse;
+
 pub fn commands() -> Vec<C> {
     vec![
         C::new("connection.list", "List Connections", "Home › Add › Data Sources", list).view().params(
@@ -28,6 +31,9 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("connection.test", "Test Connection", "Home › Add › Data Sources", test).view().params(
             r#"{"id"?: "a connection's id or name", "kind"?: "postgres"|"mysql"|"sqlserver"|"service"|"wms"|"wmts"|"wfs"|"wcs"|"ogcapi"|"arcgis"|"csw"|"stac"|"s3", "name"?: text, "group"?: text, "address"?: text, "options"?: "an unsaved connection, as connection.new (when no id)", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)", "probe"?: "true: only the address the test reads, {fetch} (null for databases, which their driver tests)", "answer"?: "non-database kinds only: what that address returned, when the app fetched it (no network request then); databases ignore answer and test through their driver"}"#,
+        ),
+        C::new("connection.browse", "Browse Connection", "Home › Add › Data Sources", browse::browse).view().params(
+            r#"{"id": "a connection's id or name", "node"?: "a child's node, as a listing gives it (the connection's top level when absent)", "probe"?: "true: only the address this level reads, {fetch} (null: read without a fetch, or by the database driver)", "answer"?: "what that address returned, when the app fetched it", "documents"?: [{"url": "a further document a listing asked for (next)", "text": "its answer"}]} → {connection, node, children: [{key, name, what, detail?, node? (browse it), children? (listed already), add? {command, params}: the command that adds it}], truncated?, matched?, notes?, service? {url, type}, next? (fetch it, then ask again with answer and documents)}"#,
         ),
     ]
 }
@@ -53,16 +59,7 @@ fn shown(c: &Connection) -> Value {
     } else {
         false
     };
-    let add_with = match c.kind.as_str() {
-        "postgres" | "mysql" | "sqlserver" => "info.databaseTables {database: address}, then layer.addDatabase {database: address, layer}",
-        "service" => "service.layers {url: address}, then service.add {url, layer}",
-        "wms" | "wmts" | "wfs" | "ogcapi" | "arcgis" => "service.layers {url: address, type: kind}, then service.add {url, type, layer}",
-        "wcs" => "service.layers {url: address, type: wcs}, then service.coverage {url, layer}",
-        "csw" => "catalog.search {url: address, query}",
-        "stac" => "stac.collections {url: address}, then stac.search {url, collections}",
-        "s3" => "connection.login {id} once, then s3.list {connection: name}, then layer.addUrl {url: s3://…}",
-        _ => "",
-    };
+    let add_with = "connection.browse {id}, then {id, node} for a child's node; run a dataset's add {command, params}";
     let mut out = serde_json::to_value(c).unwrap_or(Value::Null);
     out["available"] = json!(available);
     if !available {

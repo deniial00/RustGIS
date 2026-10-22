@@ -236,17 +236,23 @@ fn empty(ui: &mut Ui, what: &str) {
 }
 
 fn connections(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, list: &[Connection]) {
-    ui.menu_button(tl!("New Connection ▾"), |ui| {
-        for (kind, label) in crate::connectionui::KINDS {
-            if cfg!(target_arch = "wasm32") && DATABASE_KINDS.contains(&kind) {
-                continue;
-            }
-            if ui.button(tl!(label)).clicked() {
-                if let Err(e) = app.run("ui.connection", json!({"kind": kind})) {
-                    app.session.notify(e, true);
+    crate::connectiontree::picks_bar(app, ui);
+    ui.horizontal(|ui| {
+        ui.menu_button(tl!("New Connection ▾"), |ui| {
+            for (kind, label) in crate::connectionui::KINDS {
+                if cfg!(target_arch = "wasm32") && DATABASE_KINDS.contains(&kind) {
+                    continue;
                 }
-                ui.close();
+                if ui.button(tl!(label)).clicked() {
+                    if let Err(e) = app.run("ui.connection", json!({"kind": kind})) {
+                        app.session.notify(e, true);
+                    }
+                    ui.close();
+                }
             }
+        });
+        if ui.small_button("⟳").on_hover_text(tl!("Refresh every connection's lists")).clicked() {
+            crate::connectiontree::refresh(app, None);
         }
     });
     if list.is_empty() {
@@ -269,60 +275,86 @@ fn connections(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, list: &[Connection
 }
 
 fn connection_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connection) {
-    let database = DATABASE_KINDS.contains(&c.kind.as_str());
-    let unavailable = database && cfg!(target_arch = "wasm32");
-    ui.horizontal(|ui| {
-        let icon = if database {
-            "table"
-        } else {
-            match c.kind.as_str() {
-                "stac" => "search",
-                "s3" => "package",
-                _ => "globe_view",
-            }
-        };
-        let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-        icons::paint(ui.painter(), r, icon, t.icon, t.accent);
-        let response = if unavailable {
-            ui.link(RichText::new(&c.name).weak()).on_hover_text(tl!("Database connections are used by the desktop app"))
-        } else {
-            ui.link(&c.name).on_hover_text(if c.kind == "s3" && c.address.is_empty() { tl!("Amazon S3") } else { &c.address })
-        };
-        if response.clicked()
-            && !unavailable
-            && let Err(e) = crate::connectionui::open_connection(app, c)
-        {
-            app.session.notify(e, true);
+    let unavailable = DATABASE_KINDS.contains(&c.kind.as_str()) && cfg!(target_arch = "wasm32");
+    if unavailable {
+        ui.horizontal(|ui| {
+            connection_header(app, ui, t, c, true);
+        });
+        return;
+    }
+    // A click on the name opens the row: the datasets the connection offers are listed under it.
+    let state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(("connection", &c.id)), false);
+    let open = state.is_open();
+    let mut clicked = false;
+    let mut header = state.show_header(ui, |ui| clicked = connection_header(app, ui, t, c, false));
+    if clicked {
+        header.set_open(!open);
+    }
+    header.body(|ui| crate::connectiontree::show(app, ui, t, c));
+}
+
+/// A connection's icon, name, kind and menu. True when the name was clicked.
+fn connection_header(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connection, unavailable: bool) -> bool {
+    let icon = if DATABASE_KINDS.contains(&c.kind.as_str()) {
+        "table"
+    } else {
+        match c.kind.as_str() {
+            "stac" => "search",
+            "s3" => "package",
+            _ => "globe_view",
         }
-        ui.label(RichText::new(tl!(crate::connectionui::label(&c.kind))).small().weak());
-        response.context_menu(|ui| {
-            for (label, command, params) in [
-                (tl!("Edit…"), "ui.connection", json!({"id":c.id})),
-                (tl!("Test"), "ui.connection", json!({"id":c.id,"test":true})),
-                (tl!("Duplicate"), "connection.duplicate", json!({"id":c.id})),
-            ] {
-                if params.get("test") == Some(&Value::Bool(true)) && unavailable {
-                    continue;
-                }
-                if ui.button(label).clicked() {
-                    if let Err(e) = app.run(command, params) {
-                        app.session.notify(e, true);
-                    }
-                    ui.close();
-                }
-            }
-            if !c.address.is_empty() && ui.button(tl!("Copy Address")).clicked() {
-                ui.ctx().copy_text(c.address.clone());
-                ui.close();
-            }
-            if ui.button(tl!("Remove")).clicked() {
-                if let Err(e) = app.run("connection.remove", json!({"id":c.id})) {
+    };
+    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+    icons::paint(ui.painter(), r, icon, t.icon, t.accent);
+    let response = if unavailable {
+        ui.link(RichText::new(&c.name).weak()).on_hover_text(tl!("Database connections are used by the desktop app"))
+    } else {
+        ui.link(&c.name).on_hover_text(if c.kind == "s3" && c.address.is_empty() { tl!("Amazon S3") } else { &c.address })
+    };
+    ui.label(RichText::new(tl!(crate::connectionui::label(&c.kind))).small().weak());
+    response.context_menu(|ui| {
+        let mut items = vec![
+            (tl!("Edit…"), "ui.connection", json!({"id":c.id})),
+            (tl!("Test"), "ui.connection", json!({"id":c.id,"test":true})),
+            (tl!("Duplicate"), "connection.duplicate", json!({"id":c.id})),
+        ];
+        if unavailable {
+            items.remove(1);
+        }
+        for (label, command, params) in items {
+            if ui.button(label).clicked() {
+                if let Err(e) = app.run(command, params) {
                     app.session.notify(e, true);
                 }
                 ui.close();
             }
-        });
+        }
+        if !unavailable {
+            if ui.button(tl!("Refresh")).clicked() {
+                crate::connectiontree::refresh(app, Some(&c.id));
+                ui.close();
+            }
+            // The kind's own add dialog, as a click on the connection opened it before.
+            if ui.button(tl!("Add With Options…")).clicked() {
+                if let Err(e) = crate::connectionui::open_connection(app, c) {
+                    app.session.notify(e, true);
+                }
+                ui.close();
+            }
+        }
+        if !c.address.is_empty() && ui.button(tl!("Copy Address")).clicked() {
+            ui.ctx().copy_text(c.address.clone());
+            ui.close();
+        }
+        if ui.button(tl!("Remove")).clicked() {
+            if let Err(e) = app.run("connection.remove", json!({"id":c.id})) {
+                app.session.notify(e, true);
+            }
+            ui.close();
+        }
     });
+    !unavailable && response.clicked()
 }
 
 pub fn show(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {

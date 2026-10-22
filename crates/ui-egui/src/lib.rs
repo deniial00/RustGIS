@@ -17,6 +17,7 @@ mod bookmarkpane;
 mod catalogsui;
 mod chrome;
 mod comets;
+mod connectiontree;
 mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
 mod connectui;
@@ -291,11 +292,6 @@ pub struct ServiceConn {
     pub error: Option<String>,
     /// A capabilities request that failed, with what the server said (#509).
     pub failure: Option<Failure>,
-    /// An OGC API layer whose advertised tile template is being read before it is added.
-    pub resolving: Option<TilesResolve>,
-    /// A WCS coverage whose description is being read before it is asked for: `service.coverage`'s
-    /// parameters and the description on its way.
-    pub describing: Option<(Value, Slot<Result<Vec<u8>, String>>)>,
 }
 
 /// How Add From Service's list is browsed.
@@ -322,6 +318,16 @@ pub struct TilesResolve {
     /// The usual-path template, when the advertised one can't be read.
     pub fallback: String,
     pub slot: Slot<Result<Vec<u8>, String>>,
+}
+
+/// A service layer waiting on a document before it is added. `dialog` tells whether the add came
+/// from the add-service dialog (its result shows there) or from the Connections tree (a notice).
+pub enum ServiceStep {
+    /// An OGC API layer whose advertised tile template is being read.
+    Tiles { resolve: TilesResolve, dialog: bool },
+    /// A WCS coverage whose description is being read before it is asked for: `service.coverage`'s
+    /// parameters and the description on its way.
+    Coverage { params: Value, slot: Slot<Result<Vec<u8>, String>>, dialog: bool },
 }
 
 /// Fetches an address into a slot, off the frame.
@@ -365,7 +371,7 @@ pub enum LayersView {
 }
 
 /// Retains the GUI's legacy XML decoding while refusing malformed JSON text.
-fn service_text(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
+pub(crate) fn service_text(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
     String::from_utf8(bytes).or_else(|error| {
         let bytes = error.as_bytes();
         let without_bom = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
@@ -515,6 +521,9 @@ pub struct UiState {
     /// Add From Service's list: its filter, a time-enabled layer's date, and the directories
     /// opened on the way to the service shown (Back returns to them).
     pub service_browse: ServiceBrowse,
+    /// Service layers added from the dialog or the Connections tree that wait on a document
+    /// (a tileset list, a coverage's description) before they are added.
+    pub service_steps: Vec<ServiceStep>,
     /// The Web Data panels of single services (NASA Earthdata, EnviroAtlas, FEMA NFHL, The
     /// National Map, Fields of the World): their documents, searches and choices.
     pub web_services: webdataui::State,
@@ -528,6 +537,8 @@ pub struct UiState {
     pub s3: s3ui::State,
     /// New/Edit Connection: the form and the Test under way.
     pub connection: connectionui::State,
+    /// The datasets saved connections list under Data Sources › Connections, and the selection.
+    pub connection_tree: connectiontree::State,
     /// OpenStreetMap and Boundaries: their choices and the request under way.
     pub portals: portalsui::State,
     /// Overture Maps and Source Cooperative: choices, results and the request under way.
@@ -649,6 +660,7 @@ impl Default for UiState {
             link_zoomed: false,
             service: None,
             service_browse: ServiceBrowse::default(),
+            service_steps: Vec::new(),
             web_services: Default::default(),
             service_import: None,
             service_group_name: "My OGC Layer".into(),
@@ -656,6 +668,7 @@ impl Default for UiState {
             stac: Default::default(),
             s3: Default::default(),
             connection: Default::default(),
+            connection_tree: Default::default(),
             portals: Default::default(),
             catalogs: Default::default(),
             opendata: Default::default(),
@@ -2113,8 +2126,6 @@ impl RustGisApp {
                     listing: None,
                     error: None,
                     failure: None,
-                    resolving: None,
-                    describing: None,
                 });
             }
             "ui.addData" => {
@@ -2993,60 +3004,71 @@ impl RustGisApp {
         }
     }
 
-    /// Moves an OGC API layer's template reading along: the list, then the tileset when the list
-    /// doesn't carry the template; the layer is added with the template read, or the usual path.
-    fn poll_tiles_resolve(&mut self) {
-        use rustgis_engine::data::ogc::{TilesStep, resolve_tiles};
-        let Some(conn) = &mut self.ui.service else { return };
-        let Some(res) = &mut conn.resolving else { return };
-        let Some(r) = res.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-        let step = r.ok().and_then(|body| resolve_tiles(&res.list, &res.doc, &body, res.vector));
-        let template = match step {
-            Some(TilesStep::Next(next)) if res.read < 2 => {
-                res.read += 1;
-                res.doc = next.clone();
-                res.slot = fetch_into(&next);
-                return;
-            }
-            Some(TilesStep::Template(t)) => t,
-            _ => res.fallback.clone(),
-        };
-        let Some(res) = conn.resolving.take() else { return };
-        let mut p = res.params;
-        p["tiles"] = json!(template);
-        let title = p["name"].as_str().unwrap_or("").to_string();
-        match self.run("service.add", p) {
-            Ok(_) => self.dialogs.info = Some(format!("{} {title}", tl!("Added"))),
-            Err(e) => self.dialogs.error = Some(e),
+    /// Tells how a service layer added outside the add-service dialog (or in it) went: in the
+    /// dialog's own line, or as a notice for the Connections tree.
+    fn report_step(&mut self, dialog: bool, r: Result<String, String>) {
+        match (dialog, r) {
+            (true, Ok(m)) => self.dialogs.info = Some(m),
+            (true, Err(e)) => self.dialogs.error = Some(e),
+            (false, Ok(m)) => self.session.notify(m, false),
+            (false, Err(e)) => self.session.notify(e, true),
         }
-        self.map.invalidate();
     }
 
-    /// Asks for a WCS coverage once its description has arrived: its GetCoverage address for the
-    /// view, downloaded as From URL… does.
-    fn poll_describe(&mut self) {
-        let Some(conn) = &mut self.ui.service else { return };
-        let Some((_, slot)) = &conn.describing else { return };
-        let Some(r) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-        let Some((mut p, _)) = conn.describing.take() else { return };
-        let title = p["name"].as_str().unwrap_or("").to_string();
-        let r = r.and_then(|bytes| {
-            p["describe"] = json!(String::from_utf8_lossy(&bytes));
-            // Not `self.run`: an error belongs in the dialog, not the notices.
-            let c = self.session.run("service.coverage", &p)?;
-            let get = c.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-            self.run("ui.addUrl", json!({"url": get, "name": title, "coverage": true}))
-        });
-        match r {
-            Ok(_) => self.dialogs.info = Some(format!("{} {title}", tl!("Downloading…"))),
-            Err(e) => self.dialogs.error = Some(e),
+    /// Moves the service layers waiting on a document along: an OGC API layer's tile template
+    /// (read from its tileset list, then the tileset when the list doesn't carry it; the layer is
+    /// added with the template read, or the usual path) and a WCS coverage's description (the
+    /// coverage is then asked for the view and downloaded as From URL… does).
+    fn poll_service_steps(&mut self) {
+        use rustgis_engine::data::ogc::{TilesStep, resolve_tiles};
+        for step in std::mem::take(&mut self.ui.service_steps) {
+            match step {
+                ServiceStep::Tiles { mut resolve, dialog } => {
+                    let Some(r) = resolve.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                        self.ui.service_steps.push(ServiceStep::Tiles { resolve, dialog });
+                        continue;
+                    };
+                    let next = r.ok().and_then(|body| resolve_tiles(&resolve.list, &resolve.doc, &body, resolve.vector));
+                    let template = match next {
+                        Some(TilesStep::Next(next)) if resolve.read < 2 => {
+                            resolve.read += 1;
+                            resolve.doc = next.clone();
+                            resolve.slot = fetch_into(&next);
+                            self.ui.service_steps.push(ServiceStep::Tiles { resolve, dialog });
+                            continue;
+                        }
+                        Some(TilesStep::Template(t)) => t,
+                        _ => resolve.fallback.clone(),
+                    };
+                    let mut p = resolve.params;
+                    p["tiles"] = json!(template);
+                    let title = p["name"].as_str().unwrap_or("").to_string();
+                    let r = self.run("service.add", p).map(|_| format!("{} {title}", tl!("Added")));
+                    self.report_step(dialog, r);
+                    self.map.invalidate();
+                }
+                ServiceStep::Coverage { mut params, slot, dialog } => {
+                    let Some(r) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                        self.ui.service_steps.push(ServiceStep::Coverage { params, slot, dialog });
+                        continue;
+                    };
+                    let title = params["name"].as_str().unwrap_or("").to_string();
+                    let r = r.and_then(|bytes| {
+                        params["describe"] = json!(String::from_utf8_lossy(&bytes));
+                        // Not `self.run`: an error belongs where the step reports, not the notices.
+                        let c = self.session.run("service.coverage", &params)?;
+                        let get = c.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+                        self.run("ui.addUrl", json!({"url": get, "name": title, "coverage": true}))
+                    });
+                    self.report_step(dialog, r.map(|_| format!("{} {title}", tl!("Downloading…"))));
+                }
+            }
         }
     }
 
     /// Lists a service's layers once its capabilities have arrived.
     fn poll_service(&mut self) {
-        self.poll_tiles_resolve();
-        self.poll_describe();
+        self.poll_service_steps();
         let Some(conn) = &mut self.ui.service else { return };
         let Some(r) = conn.slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
         let document = conn.pending.take().unwrap_or_else(|| conn.url.clone());
@@ -3170,6 +3192,7 @@ impl RustGisApp {
         stacui::poll(self, ctx);
         s3ui::poll(self, ctx);
         connectionui::poll(self, ctx);
+        connectiontree::poll(self, ctx);
         portalsui::poll(self, ctx);
         catalogsui::poll(self, ctx);
         opendataui::poll(self, ctx);

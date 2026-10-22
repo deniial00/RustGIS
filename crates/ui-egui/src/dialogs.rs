@@ -800,60 +800,17 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         });
     }
     if let (Some(l), Some(conn)) = (add, &app.ui.service) {
-        let (url, kind, text) = (conn.url.clone(), conn.kind, conn.text.clone().unwrap_or_default());
-        let name = l.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-        let title = l.get("title").and_then(Value::as_str).unwrap_or(&name).to_string();
-        let offer = l.get("offer").cloned().unwrap_or_default();
-        // Features are downloaded in the background, as From URL… does; map layers are added now.
-        let r = if offer.get("type").and_then(Value::as_str) == Some("features") {
-            let items = offer.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-            app.run("ui.addUrl", json!({"url": items, "name": title, "service": true})).map(|_| tl!("Downloading…"))
-        } else if offer.get("type").and_then(Value::as_str) == Some("coverage") {
-            // A coverage: its description first, off the frame (poll_describe asks for it).
-            let describe = offer.get("describe").and_then(Value::as_str).unwrap_or("").to_string();
-            let mut p = json!({"url": url, "layer": name, "text": text, "name": title, "documents": conn.documents});
-            if kind != "auto" {
-                p["type"] = json!(kind);
-            }
-            let slot = crate::fetch_into(&describe);
-            if let Some(c) = &mut app.ui.service {
-                c.describing = Some((p, slot));
-            }
-            Ok(tl!("Describing"))
-        } else {
-            let mut p = json!({"url": url, "layer": name, "text": text, "documents": conn.documents, "source_url": l.get("source_url")});
-            if kind != "auto" {
-                p["type"] = json!(kind);
-            }
-            let time = app.ui.service_browse.time.trim();
-            if l.get("time").is_some() && !time.is_empty() {
-                p["time"] = json!(time);
-            }
-            match l.get("tilesets").and_then(Value::as_str) {
-                // An OGC API layer: its tileset's advertised template is read first, off the
-                // frame (poll_tiles_resolve adds the layer).
-                Some(list) => {
-                    p["name"] = json!(title);
-                    let fallback = offer.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-                    let vector = offer.get("type").and_then(Value::as_str) == Some("vectorTiles");
-                    let slot = crate::fetch_into(list);
-                    if let Some(c) = &mut app.ui.service {
-                        c.resolving = Some(crate::TilesResolve {
-                            params: p,
-                            list: list.to_string(),
-                            doc: list.to_string(),
-                            read: 0,
-                            vector,
-                            fallback,
-                            slot,
-                        });
-                    }
-                    Ok(tl!("Reading the tileset of"))
-                }
-                None => app.run("service.add", p).map(|_| tl!("Added")),
-            }
+        let src = crate::serviceui::ServiceSource {
+            url: conn.url.clone(),
+            kind: conn.kind,
+            text: conn.text.clone().unwrap_or_default(),
+            documents: conn.documents.clone(),
         };
-        match r {
+        let name = l.get("name").and_then(Value::as_str).unwrap_or("");
+        let title = l.get("title").and_then(Value::as_str).unwrap_or(name).to_string();
+        // Features are downloaded in the background, as From URL… does; map layers are added now.
+        let time = app.ui.service_browse.time.trim().to_string();
+        match crate::serviceui::add_layer(app, &src, &l, &time, true) {
             Ok(m) => app.dialogs.info = Some(format!("{m} {title}")),
             Err(e) => app.dialogs.error = Some(e),
         }

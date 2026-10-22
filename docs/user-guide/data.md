@@ -334,9 +334,14 @@ places data comes from:
   tables, Zarr variables, STAC assets, sample data), newest first.
 - **Folders**: the folders connected to the Browser (**Add Folder…**; desktop).
 - **Connections**: named services, databases, STAC APIs and S3 endpoints, organised by optional
-  groups. **New Connection ▾** opens a kind-specific form; right-click a row to edit, test,
-  duplicate, copy its address or remove it. A click opens the existing service, database,
-  STAC or S3 add dialog, connected or prefilled.
+  groups. **New Connection ▾** opens a kind-specific form. Click a connection to open it: its
+  datasets are listed under it, a level at a time as you open its folders, with **Refresh**
+  (a connection's or a folder's right-click menu; **⟳** refreshes every connection) and an error
+  with **Retry** (and **Log In…** for databases and keyed S3) when it can't be read. Click a
+  dataset to select it and **Add Selected (N)** adds them all; double-click, or right-click ›
+  **Add**, adds one. Each added layer is its own undo step. **Add With Options…** opens the
+  existing service, database, STAC or S3 add dialog, connected or prefilled. Right-click a row
+  to edit, test, duplicate, copy its address or remove it.
 - **Library**: well-known public sources: OpenStreetMap tiles, EOX Sentinel-2 cloudless and
   NASA GIBS (WMTS), USGS imagery, topographic and hydrography maps (ArcGIS), GEBCO bathymetry
   (WMS), swisstopo's maps and imagery (geo.admin.ch, WMTS), Earth Search and Planetary Computer (STAC), and the Natural Earth sample layers.
@@ -389,6 +394,18 @@ databases). For non-database kinds, pass that response text as `answer` with the
 to parse it without a network request. Database kinds ignore `answer` and test through their
 driver. An anonymous S3 test needs at least one named bucket.
 
+`connection.browse` lists what a connection offers, a level at a time: the tables of a database
+(under their schemas), the layers of a service, the records of a catalogue with the services and
+files they link to, the collections of a STAC API and the items and assets of a collection, or
+the buckets, folders and files of an S3 connection. Each child has a `key`, a `name` and what it
+is (`what`); a child with a `node` is browsed by asking again with that `node`; one with `add`
+names the command and parameters that add it (`service.add`, `layer.addDatabase`,
+`stac.addAsset`, `layer.addUrl`). A level lists at most 500 children and says `truncated` when
+it left some out. Like `connection.test`, it reads the address itself on the desktop and the
+command line; with `probe: true` it returns the address to fetch, and the app passes what it
+fetched back as `answer` (and further `documents` when a service asks for them, as `next`).
+Browsing never changes the project or the saved connections.
+
 Addresses are saved without passwords or tokens. `connection.login` remembers a database
 `password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
 only, using the same credential stores as the existing add commands. With login parameters,
@@ -400,7 +417,7 @@ connection also affects a session entry of the same name created there.
 Renaming clears the runtime entries under both the old and new names, so the renamed
 connection cannot inherit an unrelated login at its destination name.
 Web-service logins are not supported. Plugins may list connections but cannot manage, log in
-to or test them. The in-app assistant asks for approval each time for those operations;
+to, test or browse them. The in-app assistant asks for approval each time for those operations;
 external assistants using MCP cannot run them.
 Database passwords are shared by public DSN for the session, including existing layers and
 other named connections using that DSN. Editing or removing a named connection does not revoke
