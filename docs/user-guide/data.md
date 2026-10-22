@@ -437,7 +437,8 @@ Renaming clears the runtime entries under both the old and new names, so the ren
 connection cannot inherit an unrelated login at its destination name.
 Web-service logins are not supported. Plugins may list connections but cannot manage, log in
 to, test or browse them. The in-app assistant asks for approval each time for those operations;
-external assistants using MCP cannot run them.
+external assistants using MCP cannot run them. Even `probe: true` needs approval: connection
+operations cannot be approved for the whole conversation.
 Database passwords are shared by public DSN for the session, including existing layers and
 other named connections using that DSN. Editing or removing a named connection does not revoke
 that shared login; changing its address does not transfer the old password to the new address.

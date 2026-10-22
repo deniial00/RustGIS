@@ -799,6 +799,7 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         }
     }
     if keep_root && let Some((url, kind)) = keepable {
+        // "auto" is the dialog's detection mode; saved connections call that kind "service".
         match crate::connectionui::keep(app, json!({"kind": if kind == "auto" { "service" } else { kind }, "address": url})) {
             Ok(id) => app.dialogs.connection = Some(id),
             Err(e) => app.dialogs.error = Some(e),

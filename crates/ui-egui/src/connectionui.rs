@@ -93,9 +93,10 @@ pub(crate) fn picker_combo(
 /// Keeps an endpoint, never its secrets, as a new connection even at an existing address.
 pub(crate) fn keep(app: &mut RustGisApp, p: Value) -> Result<String, String> {
     let v = app.run("connection.new", p)?;
+    let id = v["id"].as_str().map(str::to_owned).ok_or_else(|| "connection.new returned no id".to_string())?;
     stripped_notice(app, &v);
     app.session.notify(i18n::fmt("Saved as the connection {name}", &[("name", v["name"].as_str().unwrap_or(""))]), false);
-    v["id"].as_str().map(str::to_owned).ok_or_else(|| "connection.new returned no id".to_string())
+    Ok(id)
 }
 
 /// Offers to keep the endpoint connected by an add dialog.
