@@ -482,7 +482,7 @@ pub(crate) fn coverage_check(name: &str, bytes: &[u8]) -> Result<(), String> {
 
 /// `catalog.search`: a page of a catalogue's (CSW) records matching words and an area, with the
 /// links RustGIS can follow (those pointing where a document on the web may not send it left out).
-fn catalog_search(s: &mut Session, p: &Value) -> CmdResult {
+pub(super) fn catalog_search(s: &mut Session, p: &Value) -> CmdResult {
     let url = url_of(p)?;
     let request = records_request(s, p)?;
     let page = match ps(p, "text") {

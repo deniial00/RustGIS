@@ -144,6 +144,11 @@ pub(crate) fn remembered_password(dsn: &str) -> Option<String> {
     passwords().lock().unwrap_or_else(|e| e.into_inner()).get(dsn).cloned()
 }
 
+/// Whether a password is remembered for a connection this session.
+pub fn has_password(dsn: &str) -> bool {
+    passwords().lock().unwrap_or_else(|e| e.into_inner()).contains_key(dsn)
+}
+
 /// The remembered password of a query's database, handed to DuckDB's PostgreSQL client in its
 /// environment (`PGPASSWORD`): never in the script, where the process list and DuckDB's errors
 /// would show it.

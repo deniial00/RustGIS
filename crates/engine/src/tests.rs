@@ -1099,6 +1099,9 @@ fn hostile_params_never_panic() {
         json!({"transform": "spline", "crs": "EPSG:999999999", "pointsCrs": [7], "resampling": 1, "cellSize": -1e308, "path": 5, "points": [[0, 0, 1, 1]]}),
         json!({"transform": "affine", "crs": 32613, "pointsCrs": 4326, "cellSize": 1e-300, "path": "/nonexistent/x.tif", "points": [[0, 0, 1, 1], [1, 0, 2, 1], [0, 1, 1, 2]]}),
         json!({"points": [[0, 0, f64::MAX, f64::MAX], [1, 0, -f64::MAX, f64::MAX], [0, 1, f64::MAX, -f64::MAX]], "compare": true}),
+        // Connections: junk kinds, options and secrets; no connection exists in a fresh session.
+        json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "accessKeyId": "A", "secretAccessKey": 9}),
+        json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
     let streamed = grid_fgb("hostile", 20);
@@ -8454,6 +8457,57 @@ fn data_sources_recent_favourites_and_saved() {
     }
     assert!(s.run("sources.save", &json!({"kind": "nope", "address": "x"})).is_err());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn connections_commands() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    let a = s.run("connection.new", &json!({"kind":"wms","address":"https://a.example/wms?token=t","name":"A"})).unwrap();
+    assert_eq!(a["stripped"], true);
+    assert_eq!(a["address"], "https://a.example/wms");
+    s.run("connection.new", &json!({"kind":"wms","address":"https://a.example/wms","name":"B"})).unwrap();
+    assert!(s.run("connection.new", &json!({"kind":"wms","address":"https://b.example/wms","name":"a"})).is_err());
+    s.run("connection.edit", &json!({"id":"A","name":"C","group":"Work"})).unwrap();
+    let listed = s.run("connection.list", &json!({"group":"work"})).unwrap();
+    assert_eq!(listed["connections"][0]["id"], a["id"]);
+    assert_eq!(listed["connections"][0]["name"], "C");
+    let copy = s.run("connection.duplicate", &json!({"id":"C"})).unwrap();
+    assert_eq!(copy["name"], "C (2)");
+    s.run("connection.remove", &json!({"id":copy["id"]})).unwrap();
+    assert!(s.connections.find(copy["id"].as_str().unwrap()).is_none());
+    assert!(s.run("connection.edit", &json!({"id":"C","kind":"wfs"})).is_err());
+    assert!(s.run("connection.edit", &json!({"id":"C","name":"b"})).is_err());
+    assert!(s.run("connection.new", &json!({"kind":"s3","options":{"region":[1]}})).is_err());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let db = s
+            .run(
+                "connection.new",
+                &json!({"kind":"postgres","address":"postgres:host=127.0.0.1 port=9 dbname=connections_commands user=u"}),
+            )
+            .unwrap();
+        s.run("connection.login", &json!({"id":db["id"],"password":"pw"})).unwrap();
+        let list = s.run("connection.list", &json!({"kind":"postgres"})).unwrap();
+        assert_eq!(list["connections"][0]["loggedIn"], true);
+        assert!(!s.connections.to_json().contains("pw"));
+    }
+    s.run("connection.new", &json!({"kind":"s3","name":"conn-test-s3","options":{"credentials":"keys","buckets":"b11"}})).unwrap();
+    assert!(s.run("connection.test", &json!({"id":"conn-test-s3"})).unwrap_err().contains("log in first"));
+    s.run("connection.login", &json!({"id":"conn-test-s3","accessKeyId":"AKIDTEST","secretAccessKey":"very-secret-key"})).unwrap();
+    assert!(s3::connection("conn-test-s3").is_some());
+    assert!(!s.connections.to_json().contains("very-secret"));
+    s.run("connection.edit", &json!({"id":"conn-test-s3","address":"https://other.example"})).unwrap();
+    assert!(s3::connection("conn-test-s3").is_none());
+    s.run("connection.new", &json!({"kind":"wms","name":"Closed","address":"http://127.0.0.1:9/wms"})).unwrap();
+    assert!(s.run("connection.test", &json!({"id":"Closed"})).unwrap_err().contains("127.0.0.1:9"));
+    assert!(s.run("connection.login", &json!({"id":"Closed"})).unwrap_err().contains("don't log in"));
+    assert!(crate::sources::holds_secret(&json!({"id":"x","password":"p"})));
+    for id in ["connection.new", "connection.edit", "connection.duplicate", "connection.remove", "connection.login", "connection.test"] {
+        assert!(crate::cmd::plugins::user_only(id), "{id}");
+    }
+    assert!(!crate::cmd::plugins::user_only("connection.list"));
+    assert!(!s.dirty && !s.can_undo());
 }
 
 fn rustgis_engine_sources_roundtrip(text: &str) -> crate::sources::Sources {

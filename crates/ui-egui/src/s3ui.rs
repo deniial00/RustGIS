@@ -12,7 +12,7 @@ use crate::{RustGisApp, Slot, i18n};
 type Answer = Slot<Result<Vec<u8>, String>>;
 
 /// The preference holding remembered connections (never their secrets).
-const SAVED: &str = "s3_connections";
+pub(crate) const SAVED: &str = "s3_connections";
 
 /// A remembered connection: what's needed to connect again, without the secret.
 #[derive(Clone, Debug, Default, PartialEq)]

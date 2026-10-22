@@ -13,6 +13,8 @@ use crate::{RustGisApp, icons};
 
 /// The preference the sources are kept under.
 pub const PREF: &str = "data_sources";
+/// Named connections, separate from the project's data sources.
+pub const CONNECTIONS_PREF: &str = "connections";
 
 /// What the pane's "save" boxes hold.
 #[derive(Default)]
@@ -63,6 +65,35 @@ pub fn save(app: &mut RustGisApp) {
     app.ui.sources_saved = app.session.sources.generation;
     if let Some(save) = &app.services.save_pref {
         save(PREF, &app.session.sources.to_json());
+    }
+}
+
+/// Loads connections before commands can run, importing legacy saved endpoints only once.
+pub fn load_connections(app: &mut RustGisApp) {
+    use rustgis_engine::{connections::Connections, sources::Sources};
+    let Some(load) = &app.services.load_pref else { return };
+    app.session.connections = if let Some(text) = load(CONNECTIONS_PREF) {
+        Connections::from_json(&text)
+    } else {
+        let imported =
+            Connections::import(&Sources::from_json(&load(PREF).unwrap_or_default()), &load(crate::s3ui::SAVED).unwrap_or_default());
+        // Even an empty import is saved, so removing everything cannot re-import old entries.
+        if let Some(save) = &app.services.save_pref {
+            save(CONNECTIONS_PREF, &imported.to_json());
+        }
+        imported
+    };
+    app.ui.connections_saved = app.session.connections.generation;
+}
+
+/// Keeps command and assistant changes with the app's preferences, never the project.
+pub fn save_connections(app: &mut RustGisApp) {
+    if app.session.connections.generation == app.ui.connections_saved {
+        return;
+    }
+    app.ui.connections_saved = app.session.connections.generation;
+    if let Some(save) = &app.services.save_pref {
+        save(CONNECTIONS_PREF, &app.session.connections.to_json());
     }
 }
 

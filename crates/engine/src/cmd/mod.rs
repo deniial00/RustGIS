@@ -2,6 +2,7 @@
 
 pub mod catalogs;
 pub mod clipboard;
+pub mod connections;
 pub mod cube;
 pub mod deeplearning;
 pub mod design;
@@ -62,6 +63,7 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(service::commands());
     v.extend(s3::commands());
     v.extend(sources::commands());
+    v.extend(connections::commands());
     v.extend(layer::commands());
     v.extend(group::commands());
     v.extend(layer_copy::commands());

@@ -79,7 +79,7 @@ fn credentials(p: &Value) -> Result<(Option<Credentials>, Option<String>, Option
     Ok((None, None, None, "anonymous"))
 }
 
-fn connect(_s: &mut Session, p: &Value) -> CmdResult {
+pub(super) fn connect(_s: &mut Session, p: &Value) -> CmdResult {
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("default").to_string();
     let endpoint = ps(p, "endpoint").map(str::trim).filter(|e| !e.is_empty()).map(str::to_string);
     let (creds, region, profile_endpoint, source) = credentials(p)?;
@@ -140,7 +140,7 @@ fn target(p: &Value) -> Result<(Option<String>, String), String> {
     Ok((bucket, prefix))
 }
 
-fn list(_s: &mut Session, p: &Value) -> CmdResult {
+pub(super) fn list(_s: &mut Session, p: &Value) -> CmdResult {
     let (bucket, prefix) = target(p)?;
     let named = match ps(p, "connection").map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => Some(s3::connection(n).ok_or_else(|| format!("no S3 connection named '{n}'"))?),

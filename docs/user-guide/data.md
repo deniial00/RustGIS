@@ -346,6 +346,43 @@ database is kept without its password. The commands `sources.list`, `sources.sav
 `sources.favourite` and `sources.remove` read and change the lists, for the command line and the
 [AI Assistant](assistant.md). On the command line they last for the run.
 
+### Named connections
+
+The `connection.*` commands keep named, reusable endpoints independently of the project.
+Each has a stable id (`c1`, `c2`, …), a case-insensitively unique name and an optional group.
+Different names may use the same address. `connection.new`, `connection.edit`,
+`connection.duplicate` and `connection.remove` manage them; commands that take `id` accept
+either the id or the name. `connection.list` can filter by `kind` or `group`, and reports
+availability, session login state and the commands to use to add data.
+
+```sh
+rustgis-cli run \
+  --cmd 'connection.new={"kind":"wms","address":"https://ows.terrestris.de/osm/service","name":"OSM WMS","group":"Public"}' \
+  --cmd 'connection.test={"id":"OSM WMS"}' \
+  --cmd 'connection.list={"group":"public"}'
+```
+
+Kinds are `postgres`, `mysql` (including MariaDB), `sqlserver`, `service` (detected on
+connect), `wms`, `wmts`, `wfs`, `wcs`, `ogcapi`, `arcgis`, `csw`, `stac` and `s3`.
+Database connections are used on the desktop only. S3 options are `region`, `buckets`
+(comma-separated), `credentials` (`keys`, `profile`, `environment` or `none`) and `profile`.
+`connection.test` lists the endpoint's tables, layers, records, collections or buckets;
+the web app's network listings still require the existing add dialogs.
+
+Addresses are saved without passwords or tokens. `connection.login` remembers a database
+`password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
+only, using the same credential stores as the existing add commands. `connection.test`
+can take these login parameters too. S3 profiles and environment credentials remain subject
+to the existing endpoint restrictions; editing an S3 name, endpoint or options disconnects
+its session login. Web-service logins are not supported. Plugins may list connections but
+cannot manage, log in to or test them; the assistant asks for approval for those operations.
+
+Desktop and web apps save connections with their preferences (`connections` in desktop
+`prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,
+databases other than DuckDB files, STAC APIs and remembered S3 connections once, without
+changing the old lists. The Data Sources pane and add dialogs are unchanged. CLI and Python
+connections last only for the run.
+
 ## Large files
 
 GeoPackage, GeoParquet, FlatGeobuf and (on the desktop) Shapefile files with more than 100,000

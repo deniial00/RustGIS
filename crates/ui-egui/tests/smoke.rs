@@ -773,6 +773,47 @@ fn start_up_preferences() {
     assert_eq!(store.lock().unwrap().get("start_projection").map(String::as_str), Some(""));
 }
 
+#[test]
+fn connections_persist_and_import_once() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    let old = json!({"saved":[
+        {"kind":"service","name":"State WMS","address":"https://w.example/wms","extra":{"type":"wms"}},
+        {"kind":"database","name":"Prod","address":"postgres:host=h dbname=g user=u"},
+        {"kind":"database","name":"F","address":"/x/a.duckdb"}
+    ]})
+    .to_string();
+    let old_s3 = json!([{"name":"Lake","endpoint":"","region":"eu-west-1","source":"profile","profile":"work"}]).to_string();
+    let store =
+        Arc::new(Mutex::new(HashMap::from([("data_sources".to_string(), old.clone()), ("s3_connections".to_string(), old_s3.clone())])));
+    let services = || {
+        let (load, save) = (store.clone(), store.clone());
+        rustgis_ui_egui::Services {
+            load_pref: Some(Box::new(move |k| load.lock().unwrap().get(k).cloned())),
+            save_pref: Some(Box::new(move |k, v| {
+                save.lock().unwrap().insert(k.to_string(), v.to_string());
+            })),
+            ..Default::default()
+        }
+    };
+    let mut app = RustGisApp::with_sample().with_services(services());
+    let kinds: Vec<_> = app.session.connections.connections.iter().map(|c| c.kind.as_str()).collect();
+    assert_eq!(kinds, ["wms", "postgres", "s3"]);
+    assert_eq!(app.session.connections.find("Lake").unwrap().options["credentials"], "profile");
+    assert!(store.lock().unwrap().contains_key("connections"));
+    assert_eq!(store.lock().unwrap()["data_sources"], old);
+    assert_eq!(store.lock().unwrap()["s3_connections"], old_s3);
+    app.run("connection.remove", json!({"id":"Prod"})).unwrap();
+    let mut again = RustGisApp::with_sample().with_services(services());
+    assert_eq!(again.session.connections.connections.len(), 2);
+    assert!(again.session.connections.find("Prod").is_none());
+    for id in ["State WMS", "Lake"] {
+        again.run("connection.remove", json!({"id":id})).unwrap();
+    }
+    let empty = RustGisApp::with_sample().with_services(services());
+    assert!(empty.session.connections.connections.is_empty(), "an empty saved list must not import again");
+}
+
 /// Settings › Start-up › Start With a project (#377): the last one opened or saved, or one picked
 /// once. It opens with its own projection and view, a shell's `blank` still wins, one that no
 /// longer opens leaves the sample with a notice, and after a crash none is opened.

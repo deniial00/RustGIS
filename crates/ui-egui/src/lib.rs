@@ -549,6 +549,7 @@ pub struct UiState {
     /// The Data Sources pane's boxes, and the sources' generation last kept in the preferences.
     pub sources: sourcespane::State,
     pub sources_saved: u64,
+    pub connections_saved: u64,
     /// The default raster style last kept in the preferences.
     pub raster_defaults_saved: rustgis_engine::map::RasterDefaults,
     /// Add Data › Zarr…: its store, choices and fetches.
@@ -663,6 +664,7 @@ impl Default for UiState {
             search: Default::default(),
             sources: Default::default(),
             sources_saved: 0,
+            connections_saved: 0,
             raster_defaults_saved: Default::default(),
             zarr: Default::default(),
             hidden_tabs: Vec::new(),
@@ -815,6 +817,7 @@ impl RustGisApp {
 
     pub fn with_services(mut self, services: Services) -> Self {
         self.services = services;
+        sourcespane::load_connections(&mut self);
         if let Some(lang) = self.services.load_pref.as_ref().and_then(|load| load("language")) {
             self.ui.language = lang;
         }
@@ -1402,6 +1405,7 @@ impl RustGisApp {
         self.note_last_project();
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
+        sourcespane::save_connections(self);
         self.save_raster_defaults();
         r
     }
@@ -3100,6 +3104,7 @@ impl RustGisApp {
         // Sources the AI Assistant or a background add brought in (not through `run`) are kept
         // too: a generation compared each frame. So is a default raster style it set.
         sourcespane::save(self);
+        sourcespane::save_connections(self);
         self.save_raster_defaults();
         cswui::poll(self);
         stacui::poll(self, ctx);

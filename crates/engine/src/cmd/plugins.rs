@@ -270,6 +270,12 @@ const NEVER: &[&str] = &[
     "edit.undo",
     "edit.redo",
     // Credentials: a plugin never sets where the user's are sent.
+    "connection.new",
+    "connection.edit",
+    "connection.duplicate",
+    "connection.remove",
+    "connection.login",
+    "connection.test",
     "s3.connect",
     "s3.disconnect",
     "earthdata.login",

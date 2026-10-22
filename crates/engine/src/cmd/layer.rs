@@ -1178,7 +1178,7 @@ pub fn sql_database_param(p: &Value) -> Result<Option<rustgis_data::source::duck
 }
 
 /// The tables of a database (a live connection or a DuckDB file) that have a geometry column.
-fn database_tables(_s: &mut Session, p: &Value) -> CmdResult {
+pub(super) fn database_tables(_s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = p;

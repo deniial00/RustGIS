@@ -102,7 +102,7 @@ pub(crate) fn add_collection(s: &mut Session, fc: &Value, name: &str) -> Result<
     Ok(Some(id))
 }
 
-fn collections(_s: &mut Session, p: &Value) -> CmdResult {
+pub(super) fn collections(_s: &mut Session, p: &Value) -> CmdResult {
     let api = stac::api(ps(p, "url"))?;
     #[cfg(target_arch = "wasm32")]
     {
