@@ -340,9 +340,10 @@ places data comes from:
   with **Retry** (and **Log In…** for databases and keyed S3) when it can't be read. Click a
   dataset to select it (click again to clear it); double-click, or right-click › **Add**, adds
   one, and right-click › **Add Selected (N)** adds them all (**Clear Selection** empties the
-  selection). Each added layer is its own undo step. **Add With Options…** opens the
-  existing service, database, STAC or S3 add dialog, connected or prefilled. Right-click a row
-  to edit, test, duplicate, copy its address or remove it.
+  selection). Each dataset is added by one command, so each is one undo step. On a table, a
+  service layer or a STAC collection, **Add With Options…** opens the database, service or STAC
+  add dialog on it; on a connection, it opens the kind's add dialog. Right-click a connection to
+  edit, test, duplicate, copy its address or remove it.
 - **Library**: well-known public sources: OpenStreetMap tiles, EOX Sentinel-2 cloudless and
   NASA GIBS (WMTS), USGS imagery, topographic and hydrography maps (ArcGIS), GEBCO bathymetry
   (WMS), swisstopo's maps and imagery (geo.admin.ch, WMTS), Earth Search and Planetary Computer (STAC), and the Natural Earth sample layers.
