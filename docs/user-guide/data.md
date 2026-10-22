@@ -316,8 +316,10 @@ rustgis-cli run --cmd 's3.connect={"name":"minio","endpoint":"https://minio.exam
 ```
 
 Keys are kept until RustGIS closes: never in a project (which keeps the `s3://` address), a
-command's result, a notice or the log. **Remember** keeps a connection's name, endpoint and region
-in the app's settings, never its secret; storing secrets in the system keychain isn't supported.
+command's result, a notice or the log. After **Connect**, **Save as Connection** keeps its name,
+endpoint, region and credential source under **Data Sources › Connections**, never its keys.
+Use **Saved connection** to pick it again; typed keys must be entered again after RustGIS closes.
+Storing secrets in the system keychain isn't supported.
 Keys go only to the endpoint they're for: a signed request that is redirected isn't followed, and
 keys from a profile or the environment are used only with AWS or the profile's own
 `endpoint_url`. In the web app, the bucket's CORS rules must allow the page's origin (and, for a
@@ -363,6 +365,20 @@ without saving it: web-service, catalogue, STAC and S3 requests run in the backg
 desktop and web; database tests run synchronously on desktop. Database rows remain visible
 but cannot be opened or tested in the web app. Earth Search and Planetary Computer remain
 available under **Library**.
+
+**From Service…** (including **Catalogue search (CSW)**), **From Database…**, **STAC Search**
+and **S3…** can use saved connections directly. Service, database and S3 dialogs offer a
+**Saved connection** picker; STAC includes saved connections in its existing API/catalog list.
+Picking one keeps its identity, not just its address: two connections can point to the same
+server with different names or users.
+
+To keep an endpoint entered by hand, click **Save as Connection** after it connects: after
+**List Tables** for a database, **Collections** or **Browse** for STAC, a catalogue search with
+results, or **Connect** for a service or S3. Nothing is saved automatically. The new connection
+is selected and the button disappears. An endpoint typed by hand can be saved even when another
+connection has the same address; its default name is made unique. S3 uses the session name, so
+choose a different name and connect again if that name is already saved. DuckDB files aren't
+saved database connections. Within an ArcGIS directory, the button keeps the root directory.
 
 Changing a form field clears pending or completed Test feedback; a late response from the
 previous inputs is ignored. PostgreSQL accepts a bare `host=… dbname=… user=…` connection
@@ -429,8 +445,8 @@ that shared login; changing its address does not transfer the old password to th
 Desktop and web apps save connections with their preferences (`connections` in desktop
 `prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,
 databases other than DuckDB files, STAC APIs and remembered S3 connections once, without
-changing the old lists. Legacy saved endpoint lists are no longer shown in the pane; remembered
-S3 connections remain available in the S3 dialog. Testing S3 can register or replace the
+changing the old lists. Legacy saved endpoint lists are no longer shown in the pane or the
+S3 dialog; use the imported named connections instead. Testing S3 can register or replace the
 session endpoint and credentials under the form's connection name, including a same-name
 session created in the S3 dialog. Cancel does not disconnect that login or restore the
 previous one. CLI and Python connections last only for the run.

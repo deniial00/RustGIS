@@ -1563,6 +1563,177 @@ fn connections_section_and_dialog() {
 }
 
 #[test]
+fn add_service_keeps_and_picks_connections() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let body = br#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="http://127.0.0.1/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+        for stream in listener.incoming().take(3) {
+            let mut stream = stream.unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    let wait_for_listing = |h: &mut egui_kittest::Harness<'_, RustGisApp>| {
+        for _ in 0..100 {
+            h.step();
+            if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let conn = h.state().ui.service.as_ref().unwrap();
+        assert_eq!(conn.error, None);
+        assert!(conn.failure.is_none());
+        assert_eq!(conn.listing.as_ref().unwrap()["layers"][0]["name"], "a");
+        h.step();
+    };
+    let mut h = harness();
+    let url = format!("http://{addr}/wms");
+    let other = h.state_mut().run("connection.new", json!({"kind":"wms","address":url,"name":"Other user"})).unwrap();
+    let other_id = other["id"].as_str().unwrap().to_string();
+    h.state_mut().run("ui.addService", json!({"url":url,"type":"wms"})).unwrap();
+    wait_for_listing(&mut h);
+    assert_eq!(h.state().session.connections.connections.len(), 1, "connecting never saves automatically");
+    assert_eq!(h.state().dialogs.connection, None);
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    let same_address: Vec<_> = h.state().session.connections.connections.iter().filter(|c| c.address == url).collect();
+    assert_eq!(same_address.len(), 2, "an existing address is not a connection identity");
+    let saved = same_address.into_iter().find(|c| c.id != other_id).unwrap();
+    let saved_id = saved.id.clone();
+    assert_ne!(saved.name, other["name"].as_str().unwrap(), "the new connection has a unique default name");
+    assert_eq!(saved.kind, "wms");
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(saved_id.as_str()));
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    h.state_mut().ui.service = None;
+    h.state_mut().run("ui.dialog", json!({"name":"addService"})).unwrap();
+    h.step();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Pick one…")).unwrap().click();
+    h.step();
+    h.get_by_label("Other user").click();
+    h.step();
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(other_id.as_str()));
+    assert_eq!(h.state().dialogs.text, url);
+    wait_for_listing(&mut h);
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    let edited = format!("{url}?x=1");
+    h.state_mut().dialogs.text = edited.clone();
+    h.state_mut().run("ui.addService", json!({"url":edited,"type":"wms"})).unwrap();
+    wait_for_listing(&mut h);
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(other_id.as_str()));
+    h.get_by_label("Save as Connection");
+    assert_eq!(h.state().session.connections.connections.len(), 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn add_database_picks_and_keeps_connections() {
+    let mut h = harness();
+    let address = "postgres:host=db.example dbname=gis user=me";
+    let picked = h.state_mut().run("connection.new", json!({"kind":"postgres","address":address,"name":"Picked DB"})).unwrap();
+    let picked_id = picked["id"].as_str().unwrap().to_string();
+    h.state_mut().run("ui.dialog", json!({"name":"addDatabase"})).unwrap();
+    h.step();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Pick one…")).unwrap().click();
+    h.step();
+    h.get_by_label("Picked DB").click();
+    h.step();
+    assert_eq!(h.state().dialogs.a, address);
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(picked_id.as_str()));
+    assert!(h.state().dialogs.b.is_empty(), "picking a connection never fills the password");
+    // Simulate a successful List Tables without needing a database server.
+    h.state_mut().dialogs.listed = Some(address.into());
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    // The same address entered by hand is still a new connection.
+    h.state_mut().dialogs.connection = None;
+    h.step();
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    let same_address: Vec<_> = h.state().session.connections.connections.iter().filter(|c| c.address == address).collect();
+    assert_eq!(same_address.len(), 2);
+    let saved = same_address.into_iter().find(|c| c.id != picked_id).unwrap();
+    let saved_id = saved.id.clone();
+    assert_eq!(saved.kind, "postgres");
+    assert_ne!(saved.name, "Picked DB");
+    assert_eq!(h.state().dialogs.connection.as_deref(), Some(saved_id.as_str()));
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+    h.state_mut().dialogs.connection = None;
+    h.state_mut().dialogs.listed = None;
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none(), "an unlisted endpoint cannot be kept");
+}
+
+#[test]
+fn stac_dialog_keeps_and_picks_connections() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let body = br#"{"collections":[{"id":"c1","title":"C"}]}"#;
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = stream.read(&mut buf).unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+            .unwrap();
+        stream.write_all(body).unwrap();
+    });
+    let mut h = harness();
+    let api = format!("http://{addr}/stac");
+    h.state_mut().ui.stac.api = api.clone();
+    h.state_mut().run("ui.dialog", json!({"name":"stac"})).unwrap();
+    h.step();
+    h.get_by_label("Collections").click();
+    for _ in 0..100 {
+        h.step();
+        if !h.state().ui.stac.collections.is_empty() || h.state().ui.stac.error.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(h.state().ui.stac.error, None);
+    assert_eq!(h.state().ui.stac.collections, vec![("c1".to_string(), "C".to_string())]);
+    assert_eq!(h.state().ui.stac.listed, api);
+    assert!(h.state().session.connections.connections.is_empty(), "listing never saves automatically");
+    h.step();
+    h.get_by_label("Save as Connection").click();
+    h.step();
+    assert_eq!(h.state().session.connections.connections.len(), 1);
+    let saved = &h.state().session.connections.connections[0];
+    let saved_id = saved.id.clone();
+    assert_eq!(saved.kind, "stac");
+    assert_eq!(saved.address, api);
+    assert_eq!(h.state().ui.stac.connection.as_deref(), Some(saved_id.as_str()));
+    h.step();
+    assert!(h.query_by_label("Save as Connection").is_none());
+
+    h.state_mut().run("connection.edit", json!({"id":saved_id,"name":"Picked STAC"})).unwrap();
+    h.state_mut().ui.stac.api = "https://other.example/stac".into();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Other")).unwrap().click();
+    h.step();
+    h.get_by_label("Picked STAC").click();
+    h.step();
+    assert_eq!(h.state().ui.stac.api, api);
+    assert!(h.state().ui.stac.collections.is_empty(), "the existing combo resets collections when picking a saved API");
+    assert_eq!(h.state().ui.stac.connection.as_deref(), Some(saved_id.as_str()));
+    server.join().unwrap();
+}
+
+#[test]
 fn connections_postgres_requires_an_address() {
     use egui::accesskit::Role;
     let mut h = harness();

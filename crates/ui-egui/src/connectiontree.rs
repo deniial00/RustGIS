@@ -229,21 +229,32 @@ fn add_asset(app: &mut RustGisApp, href: &str, name: &str) -> Result<(), String>
 /// in the service dialog, a STAC collection in the STAC dialog.
 fn add_with_options(app: &mut RustGisApp, c: &Connection, child: &Value, source: Option<&ServiceSource>) -> Result<(), String> {
     match child["what"].as_str().unwrap_or("") {
-        "table" => crate::sourcespane::open(
-            app,
-            &Source { kind: "database".into(), name: c.name.clone(), address: c.address.clone(), extra: json!({"layer": child["key"]}) },
-        ),
+        "table" => {
+            crate::sourcespane::open(
+                app,
+                &Source {
+                    kind: "database".into(),
+                    name: c.name.clone(),
+                    address: c.address.clone(),
+                    extra: json!({"layer": child["key"]}),
+                },
+            )?;
+            app.dialogs.connection = Some(c.id.clone());
+            Ok(())
+        }
         "collection" => {
             crate::sourcespane::open(
                 app,
                 &Source { kind: "stac".into(), name: c.name.clone(), address: c.address.clone(), extra: json!({"api": "true"}) },
             )?;
             app.ui.stac.collection = child["detail"].as_str().unwrap_or("").to_string();
+            app.ui.stac.connection = Some(c.id.clone());
             Ok(())
         }
         _ => match (source, child.get("layer").filter(|l| l.is_object())) {
             (Some(source), Some(layer)) => {
                 app.run("ui.addService", json!({"url": source.url, "type": source.kind}))?;
+                app.dialogs.connection = Some(c.id.clone());
                 app.ui.service_browse.filter = layer["name"].as_str().unwrap_or("").to_string();
                 Ok(())
             }

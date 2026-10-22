@@ -42,6 +42,75 @@ pub(crate) const KINDS: [(&str, &str); 13] = [
     ("s3", "S3"),
 ];
 
+/// The kinds Add From Service connects to.
+pub(crate) const SERVICE_KINDS: &[&str] = &["service", "wms", "wmts", "wfs", "wcs", "ogcapi", "arcgis", "csw"];
+
+/// The connection a dialog was opened on, while its trimmed, redacted address still matches.
+/// Never infers identity from an address alone.
+pub(crate) fn picked<'a>(list: &'a [Connection], id: Option<&str>, address: &str) -> Option<&'a Connection> {
+    let id = id?;
+    let c = list.iter().find(|c| c.id == id)?;
+    (c.address == rustgis_engine::sources::redact(address.trim())).then_some(c)
+}
+
+/// Draws a saved-connection row when these kinds exist; returns only a newly picked connection.
+pub(crate) fn picker(ui: &mut egui::Ui, id: &str, list: &[Connection], kinds: &[&str], current: Option<&Connection>) -> Option<Connection> {
+    if !list.iter().any(|c| kinds.contains(&c.kind.as_str())) {
+        return None;
+    }
+    ui.horizontal(|ui| {
+        ui.label(tl!("Saved connection"));
+        picker_combo(ui, id, list, kinds, current)
+    })
+    .inner
+}
+
+/// The picker control without its label, for a dialog's existing form grid.
+pub(crate) fn picker_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    list: &[Connection],
+    kinds: &[&str],
+    current: Option<&Connection>,
+) -> Option<Connection> {
+    let label = |c: &Connection| if c.group.is_empty() { c.name.clone() } else { format!("{} › {}", c.group, c.name) };
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id)
+        .width(280.0)
+        .selected_text(current.map(label).unwrap_or_else(|| tl!("Pick one…").to_string()))
+        .show_ui(ui, |ui| {
+            for c in list.iter().filter(|c| kinds.contains(&c.kind.as_str())) {
+                let selected = current.is_some_and(|x| x.id == c.id);
+                let hover = if c.kind == "s3" && c.address.is_empty() { tl!("Amazon S3") } else { &c.address };
+                if ui.selectable_label(selected, label(c)).on_hover_text(hover).clicked() && !selected {
+                    picked = Some(c.clone());
+                }
+            }
+        });
+    picked
+}
+
+/// Keeps an endpoint, never its secrets, as a new connection even at an existing address.
+pub(crate) fn keep(app: &mut RustGisApp, p: Value) -> Result<String, String> {
+    let v = app.run("connection.new", p)?;
+    stripped_notice(app, &v);
+    app.session.notify(i18n::fmt("Saved as the connection {name}", &[("name", v["name"].as_str().unwrap_or(""))]), false);
+    v["id"].as_str().map(str::to_owned).ok_or_else(|| "connection.new returned no id".to_string())
+}
+
+/// Offers to keep the endpoint connected by an add dialog.
+pub(crate) fn keep_button(ui: &mut egui::Ui) -> bool {
+    ui.button(tl!("Save as Connection"))
+        .on_hover_text(tl!("Keep this endpoint under Data Sources › Connections, without its password or keys"))
+        .clicked()
+}
+
+fn stripped_notice(app: &mut RustGisApp, v: &Value) {
+    if v["stripped"] == true {
+        app.session.notify(tl!("A password or token in the address was left out: connections never keep secrets.").to_string(), false);
+    }
+}
+
 pub(crate) fn label(kind: &str) -> &'static str {
     KINDS.iter().find(|(k, _)| *k == kind).map(|(_, l)| *l).unwrap_or("Connection")
 }
@@ -218,9 +287,7 @@ fn save(app: &mut RustGisApp) -> Result<(), String> {
         "connection.new"
     };
     let v = app.run(command, p)?;
-    if v["stripped"] == true {
-        app.session.notify(tl!("A password or token in the address was left out: connections never keep secrets.").to_string(), false);
-    }
+    stripped_notice(app, &v);
     let mut login = json!({"id": v["id"]});
     secrets(&app.ui.connection, &mut login);
     if login.as_object().is_some_and(|p| p.len() > 1)
@@ -373,12 +440,43 @@ pub fn open_connection(app: &mut RustGisApp, c: &Connection) -> Result<(), Strin
                 }
                 app.run("connection.login", json!({"id":c.id}))?;
             }
-            return crate::sourcespane::open(
+            crate::s3ui::fill(app, c);
+            let r = crate::sourcespane::open(
                 app,
                 &Source { kind: "s3".into(), name: c.name.clone(), address: c.name.clone(), extra: Value::Null },
             );
+            if r.is_ok() {
+                app.ui.s3.connection = Some(c.id.clone());
+            }
+            return r;
         }
         _ => return Err(format!("unknown kind '{}'", c.kind)),
     };
-    crate::sourcespane::open(app, &Source { kind: kind.into(), name: c.name.clone(), address: c.address.clone(), extra })
+    let r = crate::sourcespane::open(app, &Source { kind: kind.into(), name: c.name.clone(), address: c.address.clone(), extra });
+    if r.is_ok() {
+        if kind == "stac" {
+            app.ui.stac.connection = Some(c.id.clone());
+        } else {
+            app.dialogs.connection = Some(c.id.clone());
+        }
+    }
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picked_requires_identity_and_the_unchanged_public_address() {
+        let list = vec![
+            Connection { id: "c1".into(), address: "https://example.com/wms".into(), ..Default::default() },
+            Connection { id: "c2".into(), address: "https://example.com/wms".into(), ..Default::default() },
+        ];
+        assert!(picked(&list, None, &list[0].address).is_none());
+        assert_eq!(picked(&list, Some("c2"), " https://example.com/wms ").map(|c| c.id.as_str()), Some("c2"));
+        assert!(picked(&list, Some("removed"), &list[0].address).is_none());
+        assert!(picked(&list, Some("c1"), "https://example.com/other").is_none());
+        assert_eq!(picked(&list, Some("c1"), "https://example.com/wms?token=secret").map(|c| c.id.as_str()), Some("c1"));
+    }
 }

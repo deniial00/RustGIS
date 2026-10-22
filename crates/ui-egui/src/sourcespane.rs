@@ -37,7 +37,7 @@ fn snapshot(app: &mut RustGisApp) -> std::sync::Arc<rustgis_engine::sources::Sou
     }
 }
 
-fn connections_snapshot(app: &mut RustGisApp) -> std::sync::Arc<Vec<Connection>> {
+pub(crate) fn connections_snapshot(app: &mut RustGisApp) -> std::sync::Arc<Vec<Connection>> {
     let generation = app.session.connections.generation;
     match &app.ui.sources.connections {
         Some((g, list)) if *g == generation => list.clone(),
