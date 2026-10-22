@@ -1562,6 +1562,136 @@ fn connections_section_and_dialog() {
     assert!(h.state().session.connections.find("Local").is_none());
 }
 
+#[test]
+fn connections_postgres_requires_an_address() {
+    use egui::accesskit::Role;
+    let mut h = harness();
+    for address in ["", " \t "] {
+        h.state_mut().run("ui.connection", json!({"kind":"postgres"})).unwrap();
+        h.state_mut().ui.connection.address = address.into();
+        h.step();
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        h.step();
+        assert_eq!(h.state().dialogs.open, Some("newConnection"));
+        assert!(h.state().dialogs.error.is_some());
+        assert!(h.state().session.connections.connections.is_empty());
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        h.step();
+        assert!(h.state().dialogs.error.as_ref().unwrap().contains("isn't a postgres address"));
+        assert!(h.state().dialogs.info.is_none());
+        assert!(h.state().session.connections.connections.is_empty());
+    }
+    let address = "host=127.0.0.1 port=9 dbname=connection_form user=u";
+    h.state_mut().ui.connection.name = "Bare PostgreSQL".into();
+    h.state_mut().ui.connection.address = address.into();
+    h.step();
+    h.get_by_role_and_label(Role::Button, "Save").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, None);
+    let connection = h.state().session.connections.find("Bare PostgreSQL").unwrap();
+    let id = connection.id.clone();
+    assert_eq!(connection.address, format!("postgres:{address}"));
+    h.state_mut().run("ui.connection", json!({"id":id})).unwrap();
+    h.state_mut().ui.connection.address = "  ".into();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(Role::Button, "Save").click();
+    h.step();
+    assert_eq!(h.state().dialogs.open, Some("editConnection"));
+    assert!(h.state().dialogs.error.is_some());
+    assert_eq!(h.state().session.connections.find(&id).unwrap().address, format!("postgres:{address}"));
+}
+
+#[test]
+fn connections_test_feedback_tracks_edited_inputs() {
+    use egui::accesskit::Role;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}/stac", listener.local_addr().unwrap());
+    let (started, requests) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let bodies: [&[u8]; 3] =
+            [br#"{"collections":[{"id":"old","title":"Old"}]}"#, br#"{"collections":[{"id":"current","title":"Current"}]}"#, b"not JSON"];
+        for body in bodies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0; 2048];
+            assert!(stream.read(&mut buf).unwrap() > 0, "the client must send a request before the response is released");
+            if started.send(()).is_err() || wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                break;
+            }
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    let mut h = harness();
+    h.state_mut().run("ui.connection", json!({"kind":"stac"})).unwrap();
+    h.state_mut().ui.connection.name = "Endpoint".into();
+    h.state_mut().ui.connection.address = address.clone();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(Role::Button, "Test").click();
+    h.step();
+    requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let old = h.state().ui.connection.test.as_ref().unwrap().1.clone();
+    h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(&address)).unwrap().focus();
+    h.step();
+    h.key_press(egui::Key::End);
+    h.event(egui::Event::Text("/changed".into()));
+    h.step();
+    assert_eq!(h.state().ui.connection.address, format!("{address}/changed"));
+    assert!(h.state().ui.connection.test.is_none(), "editing must discard the pending test");
+    assert_eq!(h.state().dialogs.info, None);
+    release.send(()).unwrap();
+    for _ in 0..250 {
+        h.step();
+        if old.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(old.lock().unwrap().is_some(), "the discarded request must actually finish");
+    assert_eq!(h.state().dialogs.info, None);
+    assert_eq!(h.state().dialogs.error, None);
+
+    // A new test can run immediately; editing also clears its completed success or failure.
+    for succeeds in [true, false] {
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        h.step();
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        release.send(()).unwrap();
+        for _ in 0..250 {
+            h.step();
+            if h.state().ui.connection.test.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(h.state().ui.connection.test.is_none());
+        if succeeds {
+            assert!(h.state().dialogs.info.as_ref().unwrap().contains("1 collections"));
+            assert_eq!(h.state().dialogs.error, None);
+        } else {
+            assert!(h.state().dialogs.error.is_some());
+            assert_eq!(h.state().dialogs.info, None);
+        }
+        let name = h.state().ui.connection.name.clone();
+        h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(&name)).unwrap().focus();
+        h.step();
+        h.key_press(egui::Key::End);
+        h.event(egui::Event::Text(" changed".into()));
+        h.step();
+        assert_eq!(h.state().ui.connection.name, format!("{name} changed"));
+        assert_eq!(h.state().dialogs.info, None);
+        assert_eq!(h.state().dialogs.error, None);
+    }
+    server.join().unwrap();
+    assert!(h.state().session.connections.connections.is_empty());
+}
+
 /// Save in the web app (issue #197): the browser has no save dialog, so the first Save and every
 /// Save As ask for the file name, and Save then downloads under it; an opened file keeps its name.
 #[test]

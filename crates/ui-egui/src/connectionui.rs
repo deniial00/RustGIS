@@ -80,7 +80,7 @@ pub fn open_edit(app: &mut RustGisApp, id: &str) -> Result<(), String> {
 fn definition(st: &State) -> Value {
     let address = st.address.trim();
     let lower = address.to_ascii_lowercase();
-    let address = if st.kind == "postgres" && !lower.starts_with("postgres:") && !lower.starts_with("postgresql:") {
+    let address = if st.kind == "postgres" && !address.is_empty() && !lower.starts_with("postgres:") && !lower.starts_with("postgresql:") {
         format!("postgres:{address}")
     } else {
         address.to_owned()
@@ -244,15 +244,16 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     );
     let st = &mut app.ui.connection;
     let database = DATABASE_KINDS.contains(&st.kind.as_str());
+    let mut changed = false;
     egui::Grid::new("connection").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
         ui.label(tl!("Type"));
         ui.label(tl!(label(&st.kind)));
         ui.end_row();
         ui.label(tl!("Name"));
-        ui.add(egui::TextEdit::singleline(&mut st.name).hint_text(tl!("From the address")).desired_width(360.0));
+        changed |= ui.add(egui::TextEdit::singleline(&mut st.name).hint_text(tl!("From the address")).desired_width(360.0)).changed();
         ui.end_row();
         ui.label(tl!("Group"));
-        ui.add(egui::TextEdit::singleline(&mut st.group).hint_text(tl!("None")).desired_width(360.0));
+        changed |= ui.add(egui::TextEdit::singleline(&mut st.group).hint_text(tl!("None")).desired_width(360.0)).changed();
         ui.end_row();
         if database {
             ui.label(tl!("Connection"));
@@ -261,15 +262,17 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 "sqlserver" => "mssql://user@host:1433/db",
                 _ => "host=… dbname=… user=…",
             };
-            ui.add(egui::TextEdit::singleline(&mut st.address).hint_text(hint).desired_width(360.0));
+            changed |= ui.add(egui::TextEdit::singleline(&mut st.address).hint_text(hint).desired_width(360.0)).changed();
             ui.end_row();
             ui.label(tl!("Password"));
-            ui.add(
-                egui::TextEdit::singleline(&mut st.password)
-                    .password(true)
-                    .hint_text(tl!("This session only (optional)"))
-                    .desired_width(360.0),
-            );
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut st.password)
+                        .password(true)
+                        .hint_text(tl!("This session only (optional)"))
+                        .desired_width(360.0),
+                )
+                .changed();
             ui.end_row();
         } else if st.kind == "s3" {
             for (label, field, hint) in [
@@ -278,7 +281,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 (tl!("Buckets"), &mut st.buckets, tl!("Comma-separated (optional)")),
             ] {
                 ui.label(label);
-                ui.add(egui::TextEdit::singleline(field).hint_text(hint).desired_width(360.0));
+                changed |= ui.add(egui::TextEdit::singleline(field).hint_text(hint).desired_width(360.0)).changed();
                 ui.end_row();
             }
             ui.label(tl!("Keys from"));
@@ -288,13 +291,13 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     if cfg!(target_arch = "wasm32") && matches!(code, "profile" | "environment") {
                         continue;
                     }
-                    ui.selectable_value(&mut st.credentials, code.to_owned(), tl!(label));
+                    changed |= ui.selectable_value(&mut st.credentials, code.to_owned(), tl!(label)).changed();
                 }
             });
             ui.end_row();
             if st.credentials == "profile" {
                 ui.label(tl!("Profile"));
-                ui.add(egui::TextEdit::singleline(&mut st.profile).desired_width(360.0));
+                changed |= ui.add(egui::TextEdit::singleline(&mut st.profile).desired_width(360.0)).changed();
                 ui.end_row();
             }
             if st.credentials == "keys" {
@@ -304,7 +307,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                     (tl!("Session token"), &mut st.session_token, true),
                 ] {
                     ui.label(label);
-                    ui.add(egui::TextEdit::singleline(field).password(secret).desired_width(360.0));
+                    changed |= ui.add(egui::TextEdit::singleline(field).password(secret).desired_width(360.0)).changed();
                     ui.end_row();
                 }
             }
@@ -316,10 +319,16 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 "csw" => "https://…/csw",
                 _ => "https://…",
             };
-            ui.add(egui::TextEdit::singleline(&mut st.address).hint_text(hint).desired_width(360.0));
+            changed |= ui.add(egui::TextEdit::singleline(&mut st.address).hint_text(hint).desired_width(360.0)).changed();
             ui.end_row();
         }
     });
+    if changed {
+        // A late download may finish, but its detached slot cannot report on the edited form.
+        st.test = None;
+        app.dialogs.info = None;
+        app.dialogs.error = None;
+    }
     let testing = st.test.is_some();
     let unavailable = database && cfg!(target_arch = "wasm32");
     let clicked = ui

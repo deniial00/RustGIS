@@ -357,6 +357,10 @@ desktop and web; database tests run synchronously on desktop. Database rows rema
 but cannot be opened or tested in the web app. Earth Search and Planetary Computer remain
 available under **Library**.
 
+Changing a form field clears pending or completed Test feedback; a late response from the
+previous inputs is ignored. PostgreSQL accepts a bare `host=… dbname=… user=…` connection
+string, but a blank address cannot be saved or tested.
+
 The `connection.*` commands keep named, reusable endpoints independently of the project.
 Each has a stable id (`c1`, `c2`, …), a case-insensitively unique name and an optional group.
 Different names may use the same address. `connection.new`, `connection.edit`,
@@ -381,8 +385,9 @@ Database connections are used on the desktop only. S3 options are `region`, `buc
 `connection.test` lists the endpoint's tables, layers, records, collections or buckets.
 It also accepts an unsaved definition (`kind`, `address`, `name`, `group`, `options`) instead
 of `id`. With `probe: true`, it returns the secret-free address to fetch (`fetch: null` for
-databases); pass that response text as `answer` with the same definition to parse it without
-a network request. An anonymous S3 test needs at least one named bucket.
+databases). For non-database kinds, pass that response text as `answer` with the same definition
+to parse it without a network request. Database kinds ignore `answer` and test through their
+driver. An anonymous S3 test needs at least one named bucket.
 
 Addresses are saved without passwords or tokens. `connection.login` remembers a database
 `password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
@@ -405,8 +410,10 @@ Desktop and web apps save connections with their preferences (`connections` in d
 `prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,
 databases other than DuckDB files, STAC APIs and remembered S3 connections once, without
 changing the old lists. Legacy saved endpoint lists are no longer shown in the pane; remembered
-S3 connections remain available in the S3 dialog. Testing S3 can register a session login even
-if you cancel the connection form. CLI and Python connections last only for the run.
+S3 connections remain available in the S3 dialog. Testing S3 can register or replace the
+session endpoint and credentials under the form's connection name, including a same-name
+session created in the S3 dialog. Cancel does not disconnect that login or restore the
+previous one. CLI and Python connections last only for the run.
 
 ## Large files
 
