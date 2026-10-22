@@ -931,6 +931,13 @@ fn add_database(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).hint_text(tl!("of a geometry that doesn't say")).desired_width(280.0));
         ui.end_row();
     });
+    // The tables listed and the one chosen belong to the address they were listed for.
+    if app.dialogs.listed.as_deref().is_some_and(|l| l != database(&app.dialogs.a)) {
+        app.dialogs.listed = None;
+        app.dialogs.list.clear();
+        app.dialogs.c.clear();
+        app.dialogs.info = None;
+    }
     if let Some(c) = pick {
         if let Err(e) = crate::connectionui::open_connection(app, &c) {
             app.dialogs.error = Some(e);

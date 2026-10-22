@@ -230,7 +230,9 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
 fn connection_form(app: &mut RustGisApp, ui: &mut egui::Ui) {
     let list = crate::sourcespane::connections_snapshot(app);
     let st = &app.ui.s3;
-    let current = list.iter().find(|c| c.kind == "s3" && Some(c.id.as_str()) == st.connection.as_deref() && c.name == st.name.trim());
+    // A blank name connects as "default" (see `connect`), so it is that connection's name here too.
+    let shown_name = if st.name.trim().is_empty() { "default" } else { st.name.trim() };
+    let current = list.iter().find(|c| c.kind == "s3" && Some(c.id.as_str()) == st.connection.as_deref() && c.name == shown_name);
     if let Some(c) = crate::connectionui::picker(ui, "s3_saved", &list, &["s3"], current) {
         pick(app, &c);
         return;

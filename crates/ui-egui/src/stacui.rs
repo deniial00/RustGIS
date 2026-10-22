@@ -676,6 +676,8 @@ pub fn title(app: &RustGisApp) -> &'static str {
 fn switch_api(st: &mut State, url: &str) {
     st.api = url.to_string();
     st.collections.clear();
+    st.items.clear();
+    st.collection.clear();
     // Nothing of the last catalog's browsing is kept.
     (st.node, st.node_title) = (String::new(), String::new());
     st.trail.clear();
@@ -725,9 +727,13 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 });
             // A catalog typed in is browsed with Browse, from its top.
             if ui.add(egui::TextEdit::singleline(&mut st.api).desired_width(ui.available_width().max(80.0))).changed() {
+                // Collections and items belong to the address they came from.
                 (st.node, st.node_title) = (String::new(), String::new());
                 st.trail.clear();
                 st.children.clear();
+                st.collections.clear();
+                st.items.clear();
+                st.collection.clear();
             }
         });
         ui.end_row();
