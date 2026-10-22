@@ -9107,6 +9107,26 @@ fn connection_browse_levels_and_adds() {
         new(&mut s, json!({"kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 dbname=x user=u", "name": "Pg"}));
         assert!(!s.run("connection.browse", &json!({"id": "Pg"})).unwrap_err().is_empty());
     }
+    // A catalogue's download link too long to be one (the parser keeps addresses to 2000 bytes) is not listed.
+    let long_link = format!("https://files.example.org/{}.tif", "a".repeat(5000));
+    let records = format!(
+        r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2" xmlns:dc="http://purl.org/dc/elements/1.1/"><csw:SearchResults numberOfRecordsMatched="1"><csw:Record><dc:title>Files</dc:title>
+          <dc:URI protocol="WWW:DOWNLOAD">https://files.example.org/a.tif</dc:URI><dc:URI protocol="WWW:DOWNLOAD">{long_link}</dc:URI></csw:Record></csw:SearchResults></csw:GetRecordsResponse>"#
+    );
+    let v = s.run("connection.browse", &json!({"id": "Cat", "answer": records})).unwrap();
+    let links = v["children"][0]["children"].as_array().unwrap();
+    assert_eq!(links.len(), 1, "{v}");
+    assert_eq!(links[0]["add"]["params"]["url"], "https://files.example.org/a.tif");
+    assert!(v.get("truncated").is_none(), "{v}");
+    // An answer larger than a service document may be is refused before it is parsed.
+    let huge = "x".repeat(65 << 20);
+    assert!(s.run("connection.browse", &json!({"id": "W", "answer": huge})).unwrap_err().contains("too large"));
+    // An OGC API's feature collections are imported together: listed, with options, not added alone.
+    new(&mut s, json!({"kind": "ogcapi", "address": "https://o.example/collections", "name": "Ogc"}));
+    let collections = r#"{"collections":[{"id":"lakes","title":"Lakes","links":[{"rel":"items","type":"application/geo+json","href":"https://o.example/collections/lakes/items"}]}]}"#;
+    let v = s.run("connection.browse", &json!({"id": "Ogc", "answer": collections})).unwrap();
+    assert_eq!((v["children"][0]["what"].as_str(), v["children"][0]["options"].as_bool()), (Some("features"), Some(true)), "{v}");
+    assert!(v["children"][0].get("add").is_none(), "{v}");
     let saved = s.connections.connections.len();
     assert!(saved >= 5);
     s.run("connection.browse", &json!({"id": "W", "answer": wms_caps})).unwrap();

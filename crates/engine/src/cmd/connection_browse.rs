@@ -350,11 +350,6 @@ fn catalogue(s: &mut Session, c: &Connection, text: &str, out: &mut Value) -> Re
                             Some(json!({"key": node, "node": node, "name": if name.is_empty() { url.as_str() } else { name.as_str() }, "what": "service", "detail": kind}))
                         }
                         "download" => {
-                            // Like a service's node, a link that is too long to follow is left out.
-                            if !node_ok(&url) {
-                                dropped = true;
-                                return None;
-                            }
                             let last = url.split(['?', '#']).next().unwrap_or("").trim_end_matches('/').rsplit('/').next().unwrap_or("");
                             let shown: String = if name.is_empty() { last } else { name.as_str() }.chars().take(200).collect();
                             let named: String = title.chars().take(200).collect();
