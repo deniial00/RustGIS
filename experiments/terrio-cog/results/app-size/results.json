@@ -1,0 +1,259 @@
+{
+  "base_commit": "ee149b861c1061c5ba2fc181f5a6cf16257363f8",
+  "system": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "trunk": "trunk 0.21.14",
+  "method": "fresh target dir per build, dependencies pre-fetched, four Cargo jobs, no incremental, sequential builds, warm OS/Cargo caches",
+  "desktop": {
+    "baseline": {
+      "features": [],
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "rustgis",
+        "-p",
+        "rustgis-cli"
+      ],
+      "build_seconds": 370.5780554159992,
+      "rustgis": {
+        "bytes": 70019488,
+        "stripped_bytes": 58918832
+      },
+      "rustgis-cli": {
+        "bytes": 43993328,
+        "stripped_bytes": 36714088
+      },
+      "macos_package": {
+        "app_bundle_bytes": 70167825,
+        "dmg_bytes": 30128656,
+        "cli_tar_gz_bytes": 16752679
+      }
+    },
+    "replace": {
+      "features": [
+        "terrio-cog"
+      ],
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "rustgis",
+        "-p",
+        "rustgis-cli",
+        "--features",
+        "terrio-cog"
+      ],
+      "build_seconds": 461.2329425829994,
+      "rustgis": {
+        "bytes": 77972320,
+        "stripped_bytes": 66148304
+      },
+      "rustgis-cli": {
+        "bytes": 51473888,
+        "stripped_bytes": 43519784
+      },
+      "macos_package": {
+        "app_bundle_bytes": 78074449,
+        "dmg_bytes": 33607054,
+        "cli_tar_gz_bytes": 19167170
+      }
+    },
+    "alongside": {
+      "features": [
+        "terrio-cog-alongside"
+      ],
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "rustgis",
+        "-p",
+        "rustgis-cli",
+        "--features",
+        "terrio-cog-alongside"
+      ],
+      "build_seconds": 435.7267308750015,
+      "rustgis": {
+        "bytes": 78006624,
+        "stripped_bytes": 66182464
+      },
+      "rustgis-cli": {
+        "bytes": 51508400,
+        "stripped_bytes": 43553960
+      },
+      "package_attempts": 1,
+      "macos_package": {
+        "app_bundle_bytes": 78108561,
+        "dmg_bytes": 33610401,
+        "cli_tar_gz_bytes": 19183017
+      }
+    }
+  },
+  "web": {
+    "baseline": {
+      "features": [],
+      "command": [
+        "/tmp/rustgis-appsize/bin/trunk",
+        "build",
+        "--release",
+        "--public-url",
+        "/",
+        "--dist",
+        "/private/tmp/rustgis-appsize/run1/artifacts/baseline/web-dist"
+      ],
+      "build_seconds": 420.5057969160007,
+      "files": {
+        "index.html": {
+          "bytes": 5606,
+          "gzip9_bytes": 2351
+        },
+        "manifest.webmanifest": {
+          "bytes": 775,
+          "gzip9_bytes": 343
+        },
+        "rustgis-web-d06511ff988c48a.js": {
+          "bytes": 175040,
+          "gzip9_bytes": 25553
+        },
+        "rustgis-web-d06511ff988c48a_bg.wasm": {
+          "bytes": 35165679,
+          "gzip9_bytes": 11933290,
+          "brotli11_bytes": 7807420
+        },
+        "sw.js": {
+          "bytes": 4449,
+          "gzip9_bytes": 1868
+        }
+      },
+      "wasm": {
+        "bytes": 35165679,
+        "gzip9_bytes": 11933290,
+        "brotli11_bytes": 7807420
+      },
+      "dist_total_bytes": 35351549,
+      "dist_total_gzip9_bytes": 11963405
+    },
+    "replace": {
+      "features": [
+        "terrio-cog"
+      ],
+      "command": [
+        "/tmp/rustgis-appsize/bin/trunk",
+        "build",
+        "--release",
+        "--public-url",
+        "/",
+        "--dist",
+        "/private/tmp/rustgis-appsize/run1/artifacts/replace/web-dist",
+        "--features",
+        "terrio-cog"
+      ],
+      "build_seconds": 452.119136917001,
+      "files": {
+        "index.html": {
+          "bytes": 5610,
+          "gzip9_bytes": 2354
+        },
+        "manifest.webmanifest": {
+          "bytes": 775,
+          "gzip9_bytes": 343
+        },
+        "rustgis-web-240abc566a20b899.js": {
+          "bytes": 175058,
+          "gzip9_bytes": 25556
+        },
+        "rustgis-web-240abc566a20b899_bg.wasm": {
+          "bytes": 39444833,
+          "gzip9_bytes": 13105745,
+          "brotli11_bytes": 8706631
+        },
+        "sw.js": {
+          "bytes": 4451,
+          "gzip9_bytes": 1868
+        }
+      },
+      "wasm": {
+        "bytes": 39444833,
+        "gzip9_bytes": 13105745,
+        "brotli11_bytes": 8706631
+      },
+      "dist_total_bytes": 39630727,
+      "dist_total_gzip9_bytes": 13135866
+    },
+    "alongside": {
+      "features": [
+        "terrio-cog-alongside"
+      ],
+      "command": [
+        "/tmp/rustgis-appsize/bin/trunk",
+        "build",
+        "--release",
+        "--public-url",
+        "/",
+        "--dist",
+        "/private/tmp/rustgis-appsize/run1/artifacts/alongside/web-dist",
+        "--features",
+        "terrio-cog-alongside"
+      ],
+      "build_seconds": 450.4412852909991,
+      "files": {
+        "index.html": {
+          "bytes": 5610,
+          "gzip9_bytes": 2353
+        },
+        "manifest.webmanifest": {
+          "bytes": 775,
+          "gzip9_bytes": 343
+        },
+        "rustgis-web-5590a3d56664b0d7.js": {
+          "bytes": 175058,
+          "gzip9_bytes": 25556
+        },
+        "rustgis-web-5590a3d56664b0d7_bg.wasm": {
+          "bytes": 39468523,
+          "gzip9_bytes": 13114324,
+          "brotli11_bytes": 8708538
+        },
+        "sw.js": {
+          "bytes": 4451,
+          "gzip9_bytes": 1871
+        }
+      },
+      "wasm": {
+        "bytes": 39468523,
+        "gzip9_bytes": 13114324,
+        "brotli11_bytes": 8708538
+      },
+      "dist_total_bytes": 39654417,
+      "dist_total_gzip9_bytes": 13144447
+    }
+  },
+  "artifact_sha256": {
+    "baseline/rustgis": "ed064027cf828e10736725fdea2dee431f1845cc524c5f8db62d3f562b7546f7",
+    "baseline/rustgis-cli": "59c3fc6c12648fec3a548b1a20dcc15db128b29bb0145c84c1e60447277a4ffe",
+    "baseline/web.wasm": "f6fcdf8d50fa6ccf99418b2d6bed8b0c65230e7b7eb49d020221627bb56e1307",
+    "replace/rustgis": "d1102c3fe69cd7264f4f7caefeb39c2db837d48000a44ffde27969432bc2ad7e",
+    "replace/rustgis-cli": "0f4d798585080315fabae37f6f706a3f1849381dc3c798c22ab449bb7c430fff",
+    "replace/web.wasm": "0d33cef5ac641b717dbce5707bbac9ee161733925c12a38af5cff8dbdcb0c820",
+    "alongside/rustgis": "32c93ffed044ee8f1d5d83c7ad5509e7b8ad0bdd607587a1aff05806ff4a9f6b",
+    "alongside/rustgis-cli": "37480967607d71677e9ac507c2e91d631276f712e88a104be6b57082ce0e3300",
+    "alongside/web.wasm": "c00d5330667c3f43f38fd1c8bac47b48563fdcfc1e61c320c305fa77e82a77ee"
+  },
+  "patch_sha256": "f6f0a526f24af26481c7cabfcdd4bb6c982046304c5d7a13bde987a6647a7278",
+  "terrio": {
+    "repository": "https://github.com/deniial00/terrio",
+    "rev": "290ce2aa997f40369e32293cc87475bee6444fe1",
+    "features": "default-features = false, features = [\"geotiff\"]"
+  },
+  "notes": {
+    "desktop_runs": "baseline in the first run; replace and alongside resumed after intermittent hdiutil \"No space left on device\" failures in package.sh (disk had >50 GB free); alongside/replace builds were repeated by --resume, so build times are one sample each",
+    "web_baseline_first_attempt": "failed because this shell exports NO_COLOR=1, which Trunk rejects; fixed in the runner and rerun"
+  }
+}

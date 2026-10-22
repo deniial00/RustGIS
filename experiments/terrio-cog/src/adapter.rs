@@ -1,7 +1,7 @@
 //! Narrow, lossless RustGIS-to-Terrio conversion for the isolated COG evaluation.
 //!
-//! The requested overview algorithm is passed through unchanged. In the evaluated upstream
-//! revision COG ignores `overview_resampling`; this adapter deliberately does not repair it.
+//! The requested overview algorithm is passed through unchanged. The original evaluated pin
+//! ignored COG `overview_resampling`; the fork rerun uses the same adapter options and oracle.
 
 use rustgis_data::raster::{ColorHint, MAX_SAMPLES, Raster};
 use terrio::formats::RasterDriver;

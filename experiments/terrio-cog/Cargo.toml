@@ -15,7 +15,7 @@ terrio = ["dep:terrio"]
 rustgis-data = { path = "../../crates/data" }
 serde_json = "1"
 web-time = "1"
-terrio = { git = "https://github.com/opengeos/terrio", rev = "ce3c4463f19864284d743720123c4d022784c497", default-features = false, features = ["geotiff"], optional = true }
+terrio = { git = "https://github.com/deniial00/terrio", rev = "290ce2aa997f40369e32293cc87475bee6444fe1", default-features = false, features = ["geotiff"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.129"

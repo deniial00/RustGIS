@@ -1,0 +1,25 @@
+{
+  "adapter_unit_tests": {
+    "status": "PASS",
+    "passed": 3
+  },
+  "cargo_fmt_evaluation": {
+    "status": "PASS"
+  },
+  "cargo_fmt_probe": {
+    "status": "PASS"
+  },
+  "cargo_clippy_release_all_targets_terrio_D_warnings": {
+    "status": "PASS"
+  },
+  "python_syntax_compare_compare_revisions_measure_build_verify_wasm": {
+    "status": "PASS"
+  },
+  "node_syntax_smoke_wasm": {
+    "status": "PASS"
+  },
+  "cargo_xtask_layers": {
+    "status": "PASS"
+  },
+  "full_workspace_ci": "Not rerun for this uncommitted experiment-only change."
+}

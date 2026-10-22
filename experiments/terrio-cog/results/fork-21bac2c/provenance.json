@@ -1,0 +1,17 @@
+{
+  "terrio_repository": "https://github.com/deniial00/terrio",
+  "terrio_branch": "cog-overviews-honour-overview_resampling-weight",
+  "terrio_revision": "21bac2c0d645e5f9e12c345510e737ce706cc628",
+  "rustgis_base_commit": "ee149b8",
+  "original_result_sha256": {
+    "dependencies.json": "4942bdfe7f27a00d0a1b205a89db886ad1ae257197808a669e73190f082c395a",
+    "wasm-baseline.json": "0e4866811c5cc1157195132f70dc81e1e731f513ee7a389adfe05c63e0733594",
+    "baseline-performance.json": "c2da30eacb9471637f001b053334d3654f8840e8f582c0440b57dc902a34007e",
+    "builds.json": "b115d0d462a8e826ae185c17f6d8248a4f651dad75579d22ccdc6bb1bca98f87",
+    "environment.json": "af0ccc50813f0b6d80bce0dfa249fb490952ddae42f04fed43932cfebcd54c4f",
+    "wasm-terrio.json": "05e82714f316c637bce52aa7045990e8efb4deb8e5a624c06b5a914d0760d7a8",
+    "desktop.json": "677233c96163b25b3834346d6f4ba1d3a46a0fd0a81026255d5bdc3992655b1d"
+  },
+  "experimental_runtime_changes": "Dependency pin only; adapter comment updated. Fixtures, CLI, oracle and writer settings unchanged.",
+  "publication": "Rerun not committed, pushed, or posted to issues."
+}

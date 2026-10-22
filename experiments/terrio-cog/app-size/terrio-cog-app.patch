@@ -1,0 +1,1114 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 162d639..9c7094a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -169,19 +169,34 @@ dependencies = [
+  "memchr",
+ ]
+ 
++[[package]]
++name = "alloc-no-stdlib"
++version = "2.0.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
++
+ [[package]]
+ name = "alloc-no-stdlib"
+ version = "3.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
+ 
++[[package]]
++name = "alloc-stdlib"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
++dependencies = [
++ "alloc-no-stdlib 2.0.4",
++]
++
+ [[package]]
+ name = "alloc-stdlib"
+ version = "0.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
+ dependencies = [
+- "alloc-no-stdlib",
++ "alloc-no-stdlib 3.0.0",
+ ]
+ 
+ [[package]]
+@@ -646,6 +661,12 @@ version = "1.8.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+ 
++[[package]]
++name = "bin-rs"
++version = "0.0.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "23f756521115a60a84bc45722261eaf03aa6a59d886c9c3b41d08ac1c39e3e24"
++
+ [[package]]
+ name = "bit-set"
+ version = "0.10.0"
+@@ -728,9 +749,19 @@ version = "9.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f8b851b75c23ca7873623d612fe49bd1989aeb03d08fb9432187eb253d3d4c6b"
+ dependencies = [
+- "alloc-no-stdlib",
+- "alloc-stdlib",
+- "brotli-decompressor",
++ "alloc-no-stdlib 3.0.0",
++ "alloc-stdlib 0.3.0",
++ "brotli-decompressor 6.0.1",
++]
++
++[[package]]
++name = "brotli-decompressor"
++version = "5.0.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
++dependencies = [
++ "alloc-no-stdlib 2.0.4",
++ "alloc-stdlib 0.2.4",
+ ]
+ 
+ [[package]]
+@@ -739,8 +770,8 @@ version = "6.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "941cd9bd4ddab83cb46fa5a2d428f1c857b24ac78cb876cf7beb710840934bd7"
+ dependencies = [
+- "alloc-no-stdlib",
+- "alloc-stdlib",
++ "alloc-no-stdlib 3.0.0",
++ "alloc-stdlib 0.3.0",
+ ]
+ 
+ [[package]]
+@@ -820,7 +851,7 @@ dependencies = [
+  "encoding_rs",
+  "fast-float2",
+  "log",
+- "quick-xml",
++ "quick-xml 0.41.0",
+  "serde",
+  "zip 8.6.0",
+ ]
+@@ -2178,7 +2209,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+ dependencies = [
+  "color_quant",
+- "weezl",
++ "weezl 0.1.12",
+ ]
+ 
+ [[package]]
+@@ -2629,7 +2660,7 @@ dependencies = [
+  "image-webp",
+  "moxcms",
+  "num-traits",
+- "png",
++ "png 0.18.1",
+  "tiff",
+  "zune-core",
+  "zune-jpeg",
+@@ -2766,6 +2797,27 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "jpeg-decoder"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
++dependencies = [
++ "rayon",
++]
++
++[[package]]
++name = "jpeg-encoder"
++version = "0.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
++
++[[package]]
++name = "jpeg-encoder"
++version = "0.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
++
+ [[package]]
+ name = "js-sys"
+ version = "0.3.106"
+@@ -2777,6 +2829,184 @@ dependencies = [
+  "wasm-bindgen",
+ ]
+ 
++[[package]]
++name = "jxl-bitstream"
++version = "1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b480e752277e29eb4054f69546887a9b84656fe78c08f54ba5850ced98a378fe"
++dependencies = [
++ "tracing",
++]
++
++[[package]]
++name = "jxl-coding"
++version = "1.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cd972bcd125e776f1eb241ac50e39f956095a1c2770c64736c968f8946bd9a3c"
++dependencies = [
++ "jxl-bitstream",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-color"
++version = "0.11.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f316b1358c1711755b3ee8e8cb5c4a1dad12e796233088a7a513440782de80b2"
++dependencies = [
++ "jxl-bitstream",
++ "jxl-coding",
++ "jxl-grid",
++ "jxl-image",
++ "jxl-oxide-common",
++ "jxl-threadpool",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-frame"
++version = "0.13.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2d967c6fd669c7c01060b5022d8835fa82fd46b06ffc98b549f17600a097c2b3"
++dependencies = [
++ "jxl-bitstream",
++ "jxl-coding",
++ "jxl-grid",
++ "jxl-image",
++ "jxl-modular",
++ "jxl-oxide-common",
++ "jxl-threadpool",
++ "jxl-vardct",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-grid"
++version = "0.6.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "01671307879a033bfa52e6e8784b941aca770b3f3a7d33830b455b6844f793fb"
++dependencies = [
++ "tracing",
++]
++
++[[package]]
++name = "jxl-image"
++version = "0.13.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c5f752d62577c702a94dbbce4045caf08cb58639e8a4d56464b40ecf33ffe565"
++dependencies = [
++ "jxl-bitstream",
++ "jxl-grid",
++ "jxl-oxide-common",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-jbr"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e35d032bcec660647828527ff42c6f5776d2fd44b8357f9f6d9ac6dc07218e46"
++dependencies = [
++ "brotli-decompressor 5.0.3",
++ "jxl-bitstream",
++ "jxl-frame",
++ "jxl-grid",
++ "jxl-image",
++ "jxl-modular",
++ "jxl-oxide-common",
++ "jxl-threadpool",
++ "jxl-vardct",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-modular"
++version = "0.11.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2a2f045b24c738dd91d482be385512b512721ae08a671bd4b27bf1c47f215235"
++dependencies = [
++ "jxl-bitstream",
++ "jxl-coding",
++ "jxl-grid",
++ "jxl-oxide-common",
++ "jxl-threadpool",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-oxide"
++version = "0.12.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d36c662923f47586880211f3bc7c0d83fb3a9b410d278c7bde93450748abeef3"
++dependencies = [
++ "brotli-decompressor 5.0.3",
++ "jxl-bitstream",
++ "jxl-color",
++ "jxl-frame",
++ "jxl-grid",
++ "jxl-image",
++ "jxl-jbr",
++ "jxl-oxide-common",
++ "jxl-render",
++ "jxl-threadpool",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-oxide-common"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b62394c5021b3a9e7e0dbb2d639d555d019090c9946c39f6d3b09d390db4157b"
++dependencies = [
++ "jxl-bitstream",
++]
++
++[[package]]
++name = "jxl-render"
++version = "0.12.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d34386bfdb6a19b5a30cc9beb4d475d537422c31ae8c39bb69640fcce3fcaf19"
++dependencies = [
++ "bytemuck",
++ "jxl-bitstream",
++ "jxl-coding",
++ "jxl-color",
++ "jxl-frame",
++ "jxl-grid",
++ "jxl-image",
++ "jxl-modular",
++ "jxl-oxide-common",
++ "jxl-threadpool",
++ "jxl-vardct",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-threadpool"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "25f15eb830aa77a7f21148d72e153562a26bfe570139bd4922eab1908dd499d3"
++dependencies = [
++ "rayon",
++ "rayon-core",
++ "tracing",
++]
++
++[[package]]
++name = "jxl-vardct"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ce72a18c6d3a47172ab6c479be2bdb56f22066b5d7092663f03b4490820b4511"
++dependencies = [
++ "jxl-bitstream",
++ "jxl-coding",
++ "jxl-grid",
++ "jxl-modular",
++ "jxl-oxide-common",
++ "jxl-threadpool",
++ "tracing",
++]
++
+ [[package]]
+ name = "khronos-egl"
+ version = "6.0.0"
+@@ -2986,6 +3216,24 @@ dependencies = [
+  "num-traits",
+ ]
+ 
++[[package]]
++name = "lz4_flex"
++version = "0.11.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
++dependencies = [
++ "twox-hash",
++]
++
++[[package]]
++name = "lz4_flex"
++version = "0.13.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
++dependencies = [
++ "twox-hash",
++]
++
+ [[package]]
+ name = "lz4_flex"
+ version = "0.14.0"
+@@ -3213,6 +3461,18 @@ dependencies = [
+  "jni-sys 0.3.1",
+ ]
+ 
++[[package]]
++name = "nix"
++version = "0.31.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
++dependencies = [
++ "bitflags 2.13.2",
++ "cfg-if",
++ "cfg_aliases",
++ "libc",
++]
++
+ [[package]]
+ name = "nohash-hasher"
+ version = "0.2.0"
+@@ -3723,7 +3983,7 @@ dependencies = [
+  "flate2",
+  "half",
+  "hashbrown 0.17.1",
+- "lz4_flex",
++ "lz4_flex 0.14.0",
+  "num-bigint 0.5.1",
+  "num-integer",
+  "num-traits",
+@@ -3854,6 +4114,19 @@ version = "0.2.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+ 
++[[package]]
++name = "png"
++version = "0.17.16"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
++dependencies = [
++ "bitflags 1.3.2",
++ "crc32fast",
++ "fdeflate",
++ "flate2",
++ "miniz_oxide 0.8.9",
++]
++
+ [[package]]
+ name = "png"
+ version = "0.18.1"
+@@ -4122,6 +4395,15 @@ dependencies = [
+  "memchr",
+ ]
+ 
++[[package]]
++name = "quick-xml"
++version = "0.42.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
++dependencies = [
++ "memchr",
++]
++
+ [[package]]
+ name = "quote"
+ version = "1.0.47"
+@@ -4512,7 +4794,7 @@ dependencies = [
+  "geozero",
+  "image",
+  "laz",
+- "lz4_flex",
++ "lz4_flex 0.14.0",
+  "miniz_oxide 0.8.9",
+  "mysql",
+  "parquet",
+@@ -4522,7 +4804,7 @@ dependencies = [
+  "rusqlite",
+  "rustgis-geom",
+  "rustls",
+- "ruzstd",
++ "ruzstd 0.9.1",
+  "serde",
+  "serde_json",
+  "shapefile",
+@@ -4534,7 +4816,7 @@ dependencies = [
+  "tokio-util",
+  "url",
+  "webpki-roots",
+- "weezl",
++ "weezl 0.1.12",
+  "zstd 0.14.2",
+ ]
+ 
+@@ -4557,6 +4839,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "sys-locale",
++ "terrio",
+  "tiny-skia",
+  "web-time",
+ ]
+@@ -4652,14 +4935,14 @@ name = "rustgis-tiles"
+ version = "0.3.0"
+ dependencies = [
+  "brotli",
+- "brotli-decompressor",
++ "brotli-decompressor 6.0.1",
+  "image",
+  "log",
+  "miniz_oxide 0.8.9",
+  "roxmltree",
+  "rustgis-data",
+  "rustgis-geom",
+- "ruzstd",
++ "ruzstd 0.9.1",
+  "serde_json",
+  "sha2 0.11.1",
+  "tiny-skia",
+@@ -4800,11 +5083,23 @@ version = "1.0.23"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+ 
++[[package]]
++name = "ruzstd"
++version = "0.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
++dependencies = [
++ "twox-hash",
++]
++
+ [[package]]
+ name = "ruzstd"
+ version = "0.9.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
++dependencies = [
++ "twox-hash",
++]
+ 
+ [[package]]
+ name = "ryu"
+@@ -4812,6 +5107,15 @@ version = "1.0.23"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+ 
++[[package]]
++name = "safe_arch"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
++dependencies = [
++ "bytemuck",
++]
++
+ [[package]]
+ name = "same-file"
+ version = "1.0.6"
+@@ -4940,6 +5244,8 @@ version = "1.0.154"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+ dependencies = [
++ "foldhash 0.2.0",
++ "indexmap",
+  "itoa",
+  "memchr",
+  "serde",
+@@ -5357,6 +5663,39 @@ dependencies = [
+  "winapi-util",
+ ]
+ 
++[[package]]
++name = "terrio"
++version = "0.4.0"
++source = "git+https://github.com/deniial00/terrio?rev=290ce2aa997f40369e32293cc87475bee6444fe1#290ce2aa997f40369e32293cc87475bee6444fe1"
++dependencies = [
++ "flate2",
++ "geographiclib-rs",
++ "half",
++ "image-webp",
++ "jpeg-decoder",
++ "jpeg-encoder 0.7.1",
++ "jxl-oxide",
++ "libc",
++ "memmap2",
++ "png 0.18.1",
++ "quick-xml 0.42.0",
++ "rayon",
++ "ruzstd 0.9.1",
++ "serde",
++ "serde_json",
++ "tempfile",
++ "thiserror 2.0.21",
++ "tiff",
++ "wbprojection",
++ "wbraster",
++ "wbvector",
++ "weezl 0.2.1",
++ "zip 9.0.5",
++ "zstd 0.14.2",
++ "zune-core",
++ "zune-jpegxl",
++]
++
+ [[package]]
+ name = "thiserror"
+ version = "1.0.69"
+@@ -5452,8 +5791,9 @@ dependencies = [
+  "fax",
+  "flate2",
+  "half",
++ "image-webp",
+  "quick-error",
+- "weezl",
++ "weezl 0.1.12",
+  "zstd 0.13.3",
+  "zune-jpeg",
+ ]
+@@ -5497,7 +5837,7 @@ dependencies = [
+  "bytemuck",
+  "cfg-if",
+  "log",
+- "png",
++ "png 0.18.1",
+  "tiny-skia-path",
+ ]
+ 
+@@ -6246,7 +6586,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
+ dependencies = [
+  "proc-macro2",
+- "quick-xml",
++ "quick-xml 0.41.0",
+  "quote",
+ ]
+ 
+@@ -6262,6 +6602,85 @@ dependencies = [
+  "pkg-config",
+ ]
+ 
++[[package]]
++name = "wbgeotiff"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9f94d40b7a6f808f6d15622230940cc796f3e8b4594328eba4e85b881e73498f"
++dependencies = [
++ "flate2",
++ "jpeg-decoder",
++ "jpeg-encoder 0.6.1",
++ "jxl-oxide",
++ "lz4_flex 0.11.6",
++ "png 0.17.16",
++ "rayon",
++ "thiserror 1.0.69",
++ "webp-rust",
++ "weezl 0.1.12",
++ "zune-core",
++ "zune-jpegxl",
++]
++
++[[package]]
++name = "wbhdf"
++version = "0.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3081b5bab8f8bbc5913f820e9deec74b00c4f636def956ae0e23e83aefe1e447"
++dependencies = [
++ "byteorder",
++ "flate2",
++ "miniz_oxide 0.8.9",
++ "thiserror 1.0.69",
++]
++
++[[package]]
++name = "wbprojection"
++version = "0.3.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "49ffb3b0e4ecad3782c6649d4a7655e6ee709f7a0e8977955d59471d6f6eafa1"
++dependencies = [
++ "rayon",
++ "thiserror 1.0.69",
++ "wide",
++]
++
++[[package]]
++name = "wbraster"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1ef76e1913c1e729aee4bbe2566212b6c405548dda360b5f6dc5ef78c870452b"
++dependencies = [
++ "flate2",
++ "jpeg-decoder",
++ "jpeg-encoder 0.7.1",
++ "lz4_flex 0.13.1",
++ "png 0.18.1",
++ "rayon",
++ "ruzstd 0.8.3",
++ "serde",
++ "serde_json",
++ "tar",
++ "thiserror 2.0.21",
++ "wbgeotiff",
++ "wbhdf",
++ "wbprojection",
++ "wide",
++ "zip 8.6.0",
++]
++
++[[package]]
++name = "wbvector"
++version = "0.1.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "622581e510df4500d3173fc3cb1323476f843d74ff4d52073f518b9e1c0188d5"
++dependencies = [
++ "flatbuffers 24.12.23",
++ "thiserror 1.0.69",
++ "wbprojection",
++ "zip 0.6.6",
++]
++
+ [[package]]
+ name = "web-sys"
+ version = "0.3.106"
+@@ -6298,6 +6717,15 @@ dependencies = [
+  "web-sys",
+ ]
+ 
++[[package]]
++name = "webp-rust"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7d5967f27dbd1796f7ca3f9f555500ed7ae4aef4c153bf1f8e9e8a72751ed1b4"
++dependencies = [
++ "bin-rs",
++]
++
+ [[package]]
+ name = "webpki"
+ version = "0.22.4"
+@@ -6323,6 +6751,12 @@ version = "0.1.12"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+ 
++[[package]]
++name = "weezl"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d4ca08e5ef825b65b056d9efbd95c8750683f0a6d0466d02e96dc2e4e360f3d2"
++
+ [[package]]
+ name = "wgpu"
+ version = "30.0.1"
+@@ -6519,6 +6953,16 @@ dependencies = [
+  "web-sys",
+ ]
+ 
++[[package]]
++name = "wide"
++version = "1.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
++dependencies = [
++ "bytemuck",
++ "safe_arch",
++]
++
+ [[package]]
+ name = "winapi"
+ version = "0.3.9"
+@@ -7246,6 +7690,18 @@ dependencies = [
+  "syn 3.0.7",
+ ]
+ 
++[[package]]
++name = "zip"
++version = "0.6.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "760394e246e4c28189f19d488c058bf16f564016aefac5d32bb1f3b51d5e9261"
++dependencies = [
++ "byteorder",
++ "crc32fast",
++ "crossbeam-utils",
++ "flate2",
++]
++
+ [[package]]
+ name = "zip"
+ version = "2.4.2"
+@@ -7277,6 +7733,21 @@ dependencies = [
+  "zopfli",
+ ]
+ 
++[[package]]
++name = "zip"
++version = "9.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
++dependencies = [
++ "crc32fast",
++ "flate2",
++ "indexmap",
++ "memchr",
++ "nix",
++ "typed-path",
++ "zopfli",
++]
++
+ [[package]]
+ name = "zlib-rs"
+ version = "0.6.8"
+@@ -7362,6 +7833,15 @@ dependencies = [
+  "zune-core",
+ ]
+ 
++[[package]]
++name = "zune-jpegxl"
++version = "0.5.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cba11ecd07cc23351500e840ae03841b7e4997923ec8e4832ee3ae199ea0b6b4"
++dependencies = [
++ "zune-core",
++]
++
+ [[package]]
+ name = "zvariant"
+ version = "5.15.0"
+diff --git a/apps/rustgis/Cargo.toml b/apps/rustgis/Cargo.toml
+index 898b6b3..054aa45 100644
+--- a/apps/rustgis/Cargo.toml
++++ b/apps/rustgis/Cargo.toml
+@@ -18,6 +18,10 @@ egui = { workspace = true }
+ serde_json = { workspace = true }
+ log = { workspace = true }
+ 
++[features]
++terrio-cog = ["rustgis-engine/terrio-cog"]
++terrio-cog-alongside = ["rustgis-engine/terrio-cog-alongside"]
++
+ # The Windows exe icon (build.rs). Gated on the host, so other platforms build neither.
+ [target.'cfg(windows)'.build-dependencies]
+ tiny-skia = { workspace = true }
+diff --git a/apps/rustgis-cli/Cargo.toml b/apps/rustgis-cli/Cargo.toml
+index 96c617f..88fe7f2 100644
+--- a/apps/rustgis-cli/Cargo.toml
++++ b/apps/rustgis-cli/Cargo.toml
+@@ -13,3 +13,7 @@ workspace = true
+ rustgis-engine = { workspace = true, features = ["geolibre"] }
+ serde_json = { workspace = true }
+ rustgis-assistant = { workspace = true }
++
++[features]
++terrio-cog = ["rustgis-engine/terrio-cog"]
++terrio-cog-alongside = ["rustgis-engine/terrio-cog-alongside"]
+diff --git a/apps/rustgis-web/Cargo.toml b/apps/rustgis-web/Cargo.toml
+index 8124b00..aeaaa32 100644
+--- a/apps/rustgis-web/Cargo.toml
++++ b/apps/rustgis-web/Cargo.toml
+@@ -18,6 +18,10 @@ log = { workspace = true }
+ serde_json = { workspace = true }
+ web-time = { workspace = true }
+ 
++[features]
++terrio-cog = ["rustgis-engine/terrio-cog"]
++terrio-cog-alongside = ["rustgis-engine/terrio-cog-alongside"]
++
+ [target.'cfg(target_arch = "wasm32")'.dependencies]
+ eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
+ # The picked file itself, so a large GeoTIFF is read a part at a time (`parts.rs`).
+diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+index 2866075..96e42e6 100644
+--- a/crates/engine/Cargo.toml
++++ b/crates/engine/Cargo.toml
+@@ -26,9 +26,15 @@ iana-time-zone = { version = "0.1", features = ["fallback"] }
+ sys-locale = { version = "0.3", features = ["js"] }
+ # The GeoLibre tool suite (native only: its tools read and write files).
+ rustgis-geolibre = { workspace = true, optional = true }
++# Snapshot-only size experiment: Terrio's COG writer, pinned to the performance branch.
++terrio = { git = "https://github.com/deniial00/terrio", rev = "290ce2aa997f40369e32293cc87475bee6444fe1", default-features = false, features = ["geotiff"], optional = true }
+ 
+ [features]
+ geolibre = ["dep:rustgis-geolibre"]
++# COG export goes through Terrio instead of the native writer.
++terrio-cog = ["dep:terrio"]
++# COG export keeps the native writer and adds Terrio, chosen with "writer": "terrio".
++terrio-cog-alongside = ["dep:terrio"]
+ 
+ [dev-dependencies]
+ # Writing sample GeoPackages.
+diff --git a/crates/engine/src/cmd/raster.rs b/crates/engine/src/cmd/raster.rs
+index c07e067..970f69a 100644
+--- a/crates/engine/src/cmd/raster.rs
++++ b/crates/engine/src/cmd/raster.rs
+@@ -633,8 +633,48 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
+ pub fn geotiff_bytes(s: &Session, p: &Value) -> Result<(String, Vec<u8>), String> {
+     let (_, r) = get(s, p)?;
+     let bi = band(p, "band", &r)?.unwrap_or(0);
+-    let bytes = if b(p, "cog") == Some(true) { raster::cogwrite::write(&r, bi) } else { raster::geotiff::write(&r, bi) };
+-    Ok((r.name.clone(), bytes.map_err(|e| e.to_string())?))
++    let bytes = if b(p, "cog") == Some(true) { cog_bytes(&r, bi, p)? } else { raster::geotiff::write(&r, bi).map_err(|e| e.to_string())? };
++    Ok((r.name.clone(), bytes))
++}
++
++#[cfg(feature = "terrio-cog")]
++fn cog_bytes(r: &Raster, bi: usize, _p: &Value) -> Result<Vec<u8>, String> {
++    crate::terrio_cog::export(r, bi, false).map_err(|e| e.to_string())
++}
++
++#[cfg(not(feature = "terrio-cog"))]
++fn cog_bytes(r: &Raster, bi: usize, p: &Value) -> Result<Vec<u8>, String> {
++    #[cfg(feature = "terrio-cog-alongside")]
++    if ps(p, "writer") == Some("terrio") {
++        return crate::terrio_cog::export(r, bi, false).map_err(|e| e.to_string());
++    }
++    let _ = p;
++    raster::cogwrite::write(r, bi).map_err(|e| e.to_string())
++}
++
++#[cfg(all(feature = "terrio-cog", not(target_arch = "wasm32")))]
++fn cog_file(r: &Raster, bi: usize, path: &str, _p: &Value) -> Result<raster::cogwrite::CogInfo, String> {
++    crate::terrio_cog::write_file(r, bi, false, Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
++    let bytes = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?.len();
++    Ok(crate::terrio_cog::info(r, bytes, false))
++}
++
++#[cfg(all(feature = "terrio-cog", target_arch = "wasm32"))]
++fn cog_file(_r: &Raster, _bi: usize, path: &str, _p: &Value) -> Result<raster::cogwrite::CogInfo, String> {
++    Err(format!("{path}: files are not written in the browser"))
++}
++
++#[cfg(not(feature = "terrio-cog"))]
++fn cog_file(r: &Raster, bi: usize, path: &str, p: &Value) -> Result<raster::cogwrite::CogInfo, String> {
++    #[cfg(all(feature = "terrio-cog-alongside", not(target_arch = "wasm32")))]
++    if ps(p, "writer") == Some("terrio") {
++        crate::terrio_cog::write_file(r, bi, false, Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
++        let bytes = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?.len();
++        return Ok(crate::terrio_cog::info(r, bytes, false));
++    }
++    let _ = p;
++    // Tiles go to the file as they are made: the whole file is never held in memory.
++    raster::cogwrite::write_file(r, bi, Path::new(path)).map_err(|e| format!("{path}: {e}"))
+ }
+ 
+ fn export(s: &mut Session, p: &Value) -> CmdResult {
+@@ -642,9 +682,8 @@ fn export(s: &mut Session, p: &Value) -> CmdResult {
+     let (_, r) = get(s, p)?;
+     let mut cog = None;
+     if b(p, "cog") == Some(true) {
+-        // Tiles go to the file as they are made: the whole file is never held in memory.
+         let bi = band(p, "band", &r)?.unwrap_or(0);
+-        cog = Some(raster::cogwrite::write_file(&r, bi, Path::new(&path)).map_err(|e| format!("{path}: {e}"))?);
++        cog = Some(cog_file(&r, bi, &path, p)?);
+     } else {
+         let (_, bytes) = geotiff_bytes(s, p)?;
+         rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index eacff0b..6559940 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -10,6 +10,8 @@ pub mod model;
+ pub mod project;
+ pub mod sample;
+ pub mod sources;
++#[cfg(any(feature = "terrio-cog", feature = "terrio-cog-alongside"))]
++mod terrio_cog;
+ #[cfg(test)]
+ mod tests;
+ 
+diff --git a/crates/engine/src/terrio_cog.rs b/crates/engine/src/terrio_cog.rs
+new file mode 100644
+index 0000000..9c8e1be
+--- /dev/null
++++ b/crates/engine/src/terrio_cog.rs
+@@ -0,0 +1,192 @@
++//! Snapshot-only experiment: Terrio's COG writer behind the engine's COG export (never part of production).
++
++use rustgis_data::raster::{ColorHint, MAX_SAMPLES, Raster};
++use terrio::formats::RasterDriver;
++use terrio::raster::RasterData;
++use terrio::{DataType, RasterDataset, RasterWriteOptions};
++
++pub type Error = Box<dyn std::error::Error>;
++
++fn invalid(message: impl Into<String>) -> Error {
++    std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into()).into()
++}
++
++/// Encode the selected scalar band, or the raster's explicitly declared colour bands.
++///
++/// Only explicit UInt8, UInt16 and Float32 storage is supported. Integer samples and nodata
++/// must fit exactly; metadata never licenses rounding, clamping or a float fallback. All source
++/// shapes are checked because `Raster` exposes mutable public dimensions and band buffers.
++/// On native targets Terrio's public memory writer itself uses temporary files.
++pub fn export(r: &Raster, band: usize, big: bool) -> Result<Vec<u8>, Error> {
++    let (dataset, options) = prepare(r, band, big)?;
++    Ok(terrio::memory::write_raster_bytes(&dataset, "evaluation.tif", &options)?)
++}
++
++/// Write a new native COG without routing the result through a temporary file and byte buffer.
++#[cfg(not(target_arch = "wasm32"))]
++pub fn write_file(r: &Raster, band: usize, big: bool, path: &std::path::Path) -> Result<(), Error> {
++    let (dataset, options) = prepare(r, band, big)?;
++    let path_text = path.to_str().ok_or_else(|| invalid("Terrio requires a UTF-8 output path"))?;
++    // Reserve a new target before upstream's truncating create. Never overwrite user output.
++    let reservation = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
++    drop(reservation);
++    Ok(terrio::write_raster_dataset(&dataset, path_text, &options)?)
++}
++
++fn prepare(r: &Raster, band: usize, big: bool) -> Result<(RasterDataset, RasterWriteOptions), Error> {
++    let cols = r.width as usize;
++    let rows = r.height as usize;
++    let pixels = cols.checked_mul(rows).ok_or_else(|| invalid("raster dimensions overflow"))?;
++    let source_samples = pixels.checked_mul(r.bands.len()).ok_or_else(|| invalid("raster sample count overflows"))?;
++    if pixels == 0 || r.bands.is_empty() || source_samples > MAX_SAMPLES {
++        return Err(invalid("raster is empty or exceeds the RustGIS sample limit"));
++    }
++    if r.bands.iter().any(|b| b.data.len() != pixels) {
++        return Err(invalid("raster band length does not match its dimensions"));
++    }
++    if r.bands.get(band).is_none() {
++        return Err(invalid(format!("raster has no zero-based band {band}")));
++    }
++    let gt = r.transform;
++    if !r.georeferenced || !gt.is_valid() || gt.pixel_width <= 0.0 || gt.pixel_height >= 0.0 {
++        return Err(invalid("Terrio evaluation requires a finite, georeferenced north-up transform"));
++    }
++    let east = gt.origin_x + f64::from(r.width) * gt.pixel_width;
++    let south = gt.origin_y + f64::from(r.height) * gt.pixel_height;
++    if !east.is_finite() || !south.is_finite() || east <= gt.origin_x || south >= gt.origin_y {
++        return Err(invalid("raster transform has nonfinite or numerically empty bounds"));
++    }
++    let epsg = r.crs.epsg();
++    if epsg == 0 || rustgis_data::raster::Crs::from_epsg(u32::from(epsg)).is_none() {
++        return Err(invalid("Terrio evaluation supports recognized EPSG coordinate systems only"));
++    }
++    let crs = terrio::crs::SpatialRef::from_epsg(u32::from(epsg))?.to_crs_info();
++    let data_type = match r.data_type.as_str() {
++        "UInt8" => DataType::U8,
++        "UInt16" => DataType::U16,
++        "Float32" => DataType::F32,
++        other => return Err(invalid(format!("unsupported explicit raster type {other:?}"))),
++    };
++    validate_nodata(r.nodata, data_type)?;
++
++    let scalar = [band];
++    let (selected, photometric, alpha, palette): (&[usize], &str, bool, &[[u8; 4]]) = match &r.color {
++        ColorHint::Gray => (&scalar, "MINISBLACK", false, &[]),
++        ColorHint::GrayAlpha => (&[0, 1], "MINISBLACK", true, &[]),
++        ColorHint::Rgb { alpha: false } => (&[0, 1, 2], "RGB", false, &[]),
++        ColorHint::Rgb { alpha: true } => (&[0, 1, 2, 3], "RGB", true, &[]),
++        ColorHint::Palette(colors) => {
++            if band != 0 || !matches!(data_type, DataType::U8 | DataType::U16) {
++                return Err(invalid("a palette requires band zero with explicit UInt8 or UInt16 indexes"));
++            }
++            let limit = if data_type == DataType::U8 { 256 } else { 65_536 };
++            if colors.is_empty() || colors.len() > limit || colors.iter().any(|c| c[3] != 255) {
++                return Err(invalid("TIFF palette must be nonempty, fit its index type and have opaque entries"));
++            }
++            (&scalar, "PALETTE", false, colors)
++        }
++    };
++    if selected.iter().any(|&b| r.bands.get(b).is_none()) {
++        return Err(invalid("declared colour interpretation is missing required bands"));
++    }
++    let samples = pixels.checked_mul(selected.len()).ok_or_else(|| invalid("output sample count overflows"))?;
++    let data = match data_type {
++        DataType::U8 => RasterData::U8(convert(r, selected, samples, |v| {
++            if v.is_finite() && (0.0..=255.0).contains(&v) && v.fract() == 0.0 {
++                Ok(v as u8)
++            } else {
++                Err(invalid("UInt8 sample cannot be represented without loss"))
++            }
++        })?),
++        DataType::U16 => RasterData::U16(convert(r, selected, samples, |v| {
++            if v.is_finite() && (0.0..=65_535.0).contains(&v) && v.fract() == 0.0 {
++                Ok(v as u16)
++            } else {
++                Err(invalid("UInt16 sample cannot be represented without loss"))
++            }
++        })?),
++        DataType::F32 => RasterData::F32(convert(r, selected, samples, |v| {
++            if v.is_infinite() { Err(invalid("infinite samples are not supported by the Terrio evaluation")) } else { Ok(v) }
++        })?),
++        _ => return Err(invalid("unsupported output sample type")),
++    };
++    // Do not call from_data_native: wbraster 0.2.1 first allocates and fills a second full
++    // nodata buffer in Raster::new, then drops it when moving in the provided typed buffer.
++    // Public-field coupling is intentional and confined to this pinned evaluation.
++    // Construct the validated representation directly without that discarded allocation.
++    let raster = terrio::Raster {
++        cols,
++        rows,
++        bands: selected.len(),
++        x_min: gt.origin_x,
++        y_min: south,
++        cell_size_x: gt.pixel_width,
++        cell_size_y: -gt.pixel_height,
++        nodata: r.nodata.unwrap_or(f64::NAN),
++        data_type,
++        crs,
++        metadata: Vec::new(),
++        data,
++    };
++    let dataset = RasterDataset::with_driver(raster, RasterDriver::Cog, r.nodata.is_some());
++    let categorical = !palette.is_empty()
++        || (!alpha
++            && selected.len() == 1
++            && data_type != DataType::F32
++            && r.bands.get(band).is_some_and(|b| b.stats.categories.as_ref().is_some_and(|c| c.len() <= 64)));
++    let mut creation_options =
++        vec![("PHOTOMETRIC".into(), photometric.into()), ("PREDICTOR".into(), "1".into()), ("INTERLEAVE".into(), "PIXEL".into())];
++    if alpha {
++        creation_options.push(("ALPHA".into(), "YES".into()));
++    }
++    let options = RasterWriteOptions {
++        driver: Some(RasterDriver::Cog),
++        compression: Some("DEFLATE".into()),
++        tile_size: Some(512),
++        bigtiff: big,
++        creation_options,
++        color_table: palette.to_vec(),
++        overview_resampling: Some(if categorical { "nearest" } else { "average" }.into()),
++        // Carry the original north edge explicitly; deriving it back from y_min can round.
++        geo_transform: Some([gt.origin_x, gt.pixel_width, 0.0, gt.origin_y, 0.0, gt.pixel_height]),
++        ..Default::default()
++    };
++    Ok((dataset, options))
++}
++
++fn validate_nodata(nodata: Option<f64>, data_type: DataType) -> Result<(), Error> {
++    let Some(v) = nodata else { return Ok(()) };
++    let exact = match data_type {
++        DataType::U8 => v.is_finite() && (0.0..=255.0).contains(&v) && v.fract() == 0.0,
++        DataType::U16 => v.is_finite() && (0.0..=65_535.0).contains(&v) && v.fract() == 0.0,
++        DataType::F32 => v.is_nan() || (v.is_finite() && f64::from(v as f32) == v),
++        _ => false,
++    };
++    if exact { Ok(()) } else { Err(invalid("nodata cannot be represented exactly by the explicit sample type")) }
++}
++
++fn convert<T>(
++    r: &Raster,
++    selected: &[usize],
++    samples: usize,
++    mut sample: impl FnMut(f32) -> Result<T, Error>,
++) -> Result<Vec<T>, Error> {
++    let mut out = Vec::new();
++    out.try_reserve_exact(samples)?;
++    for &index in selected {
++        let band = r.bands.get(index).ok_or_else(|| invalid("missing selected raster band"))?;
++        for &value in &band.data {
++            out.push(sample(value)?);
++        }
++    }
++    Ok(out)
++}
++
++/// What the engine reports for an export: the TIFF flavour, the image sizes and the file size.
++pub fn info(r: &Raster, bytes: u64, big: bool) -> rustgis_data::raster::cogwrite::CogInfo {
++    let mut levels = vec![(r.width, r.height)];
++    while let Some(&(w, h)) = levels.last().filter(|(w, h)| (*w).max(*h) > 512) {
++        levels.push((w.div_ceil(2), h.div_ceil(2)));
++    }
++    rustgis_data::raster::cogwrite::CogInfo { big, levels, bytes }
++}

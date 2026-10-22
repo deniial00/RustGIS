@@ -1,6 +1,31 @@
 # Terrio COG integration experiment
 
-**Recommendation: retain the native RustGIS writer. Do not adopt this adapter in production.**
+## Current performance-branch rerun
+
+The current manifests pin
+[`deniial00/terrio@290ce2aa`](https://github.com/deniial00/terrio/tree/290ce2aa997f40369e32293cc87475bee6444fe1),
+branch `perf-cog-average-rows` (Terrio 0.4.0).
+See the [performance-branch report](results/perf-290ce2a/README.md) for the unchanged corpus,
+clipped-edge checks, same-run paired timings, and repeated build/artifact costs.
+The [previous fix-branch report](results/fork-21bac2c/README.md) remains preserved.
+
+**Upstream status.** Both tested fork branches were squash-merged into
+[opengeos/terrio](https://github.com/opengeos/terrio) `main`: the overview fix as
+[#165](https://github.com/opengeos/terrio/pull/165) and the row-averaging speed-up as
+[#168](https://github.com/opengeos/terrio/pull/168). The pins here are therefore not ancestors of
+`main`, but `crates/terrio/src/drivers/gtiff_write.rs` on `main` (`ece3482`) is byte-identical to the
+tested `290ce2aa`, so the parity results apply to it. `main` also carries unrelated commits (CRS
+work), so its exact build and size numbers were not measured.
+
+The [real application sizes](results/app-size/README.md) (desktop `.app`/`.dmg`, CLI and web
+bundle, with and without Terrio) are measured against the same pin.
+
+**Everything below is the original evaluation at `ce3c4463`, not the current fork's results.**
+The original JSON files remain byte-for-byte unchanged. Check out
+[`ee149b8`](https://github.com/deniial00/RustGIS/tree/ee149b8) to reproduce that original pin;
+commands in the current working tree use the new fork pin instead.
+
+**Original recommendation: retain the native RustGIS writer rather than adopting the original pin.**
 The feature split makes an isolated experiment practical, but a structurally valid COG is not
 necessarily a semantically equivalent export. The measured desktop comparison passes GDAL's
 full COG validator for all 18 files; Terrio fails six of the nine pixel/overview comparisons.
@@ -8,7 +33,8 @@ full COG validator for all 18 files; Terrio fails six of the nine pixel/overview
 This is the separate experiment requested in
 [RustGIS #629](https://github.com/opengeos/RustGIS/pull/629#issuecomment-6301598478), not a writer
 replacement. No production source, production manifest, production lockfile, UI, or other I/O
-was changed. No PR or upstream changes were published.
+was changed. The evaluation is tracked in [RustGIS #663](https://github.com/opengeos/RustGIS/issues/663)
+and [Terrio #158](https://github.com/opengeos/terrio/issues/158).
 
 ## Isolation and revision
 
@@ -17,7 +43,7 @@ They are not members of the RustGIS production workspace. This package defaults 
 writer only; `--features terrio` explicitly links the experimental adapter. Normal RustGIS
 builds neither resolve nor compile this dependency.
 
-Terrio is pinned to **`ce3c4463f19864284d743720123c4d022784c497`**, versioned upstream as 0.3.2,
+The original Terrio pin was **`ce3c4463f19864284d743720123c4d022784c497`**, versioned upstream as 0.3.2,
 with `default-features = false, features = ["geotiff"]`. This is the inspected main revision:
 [feature merge #154](https://github.com/opengeos/terrio/pull/154) followed by
 [CRS fix #155](https://github.com/opengeos/terrio/pull/155). A floating `0.3` constraint would
@@ -229,8 +255,8 @@ measurements.
 export modules containing the RustGIS Raster/native writer, with and without the Terrio path.
 They are not the full RustGIS GUI executable or web application's total download. This deliberately
 isolates writer integration without changing production apps. LTO and shared dependencies mean
-these deltas must not be added arithmetically to production application sizes. No full-application
-size or build-time claim is made.
+these deltas must not be added arithmetically to production application sizes. The full RustGIS
+applications were measured separately: see [results/app-size](results/app-size/README.md).
 
 ## Measured results
 
