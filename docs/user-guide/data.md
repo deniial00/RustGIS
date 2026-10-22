@@ -374,11 +374,15 @@ the web app's network listings still require the existing add dialogs.
 
 Addresses are saved without passwords or tokens. `connection.login` remembers a database
 `password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
-only, using the same credential stores as the existing add commands. `connection.test`
-can take these login parameters too. S3 profiles and environment credentials remain subject
-to the existing endpoint restrictions; editing an S3 name, endpoint or options disconnects
-its session login. Web-service logins are not supported. Plugins may list connections but
-cannot manage, log in to or test them; the assistant asks for approval for those operations.
+only, using the same credential stores as the existing add commands. With login parameters,
+`connection.test` logs in first; a failed listing does not undo that session login.
+S3 profiles and environment credentials remain subject to the existing endpoint restrictions;
+editing an S3 name, endpoint or options disconnects its session login. S3 shares the name-based
+session registry used by the S3 dialog and `s3.connect`, so editing or removing a saved
+connection also affects a session entry of the same name created there.
+Web-service logins are not supported. Plugins may list connections but cannot manage, log in
+to or test them. The in-app assistant asks for approval each time for those operations;
+external assistants using MCP cannot run them.
 Database passwords are shared by public DSN for the session, including existing layers and
 other named connections using that DSN. Editing or removing a named connection does not revoke
 that shared login; changing its address does not transfer the old password to the new address.

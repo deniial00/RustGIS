@@ -27,6 +27,7 @@ mod editpanes;
 mod embeddingsui;
 mod failureui;
 mod geocodeui;
+mod geometrycalc;
 mod globe_drape;
 mod graphicformat;
 pub mod icons;
@@ -2738,6 +2739,12 @@ impl RustGisApp {
             }
             "ui.dialog" => {
                 let which = p.get("name").and_then(Value::as_str).unwrap_or("");
+                if which == "calculateGeometry" {
+                    let id = self.session.layer_id(p)?;
+                    let form = geometrycalc::Form::new(&self.session, id)?;
+                    self.dialogs = dialogs::Dialogs { open: Some("calculateGeometry"), geometry: Some(form), ..Default::default() };
+                    return Ok(Value::Null);
+                }
                 // A Web Data service opens in the right pane, beside the map it searches.
                 if let Some(name) = panes::web_data_name(which) {
                     // A Web Data panel opened on a search.

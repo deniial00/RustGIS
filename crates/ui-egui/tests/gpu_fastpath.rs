@@ -30,7 +30,10 @@ fn wait_for_frame(h: &mut egui_kittest::Harness<'_, RustGisApp>) {
             std::thread::sleep(std::time::Duration::from_millis(2));
             h.step();
         }
-        if cache::generation() == tiles {
+        // Uploading a finished scene changes whether tile generations participate in its key.
+        // Let an idle frame adopt that live-tile key before the test starts moving the camera.
+        h.step();
+        if !h.state().map.drawing() && cache::in_flight() == 0 && cache::generation() == tiles {
             break;
         }
     }

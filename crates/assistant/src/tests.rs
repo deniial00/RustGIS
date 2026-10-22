@@ -149,6 +149,22 @@ fn file_access_needs_approval() {
 }
 
 #[test]
+fn connection_management_requires_fresh_approval_but_can_run_in_app() {
+    let mut s = Session::new(Project::default());
+    let mut a = Agent::new(cfg("openai"), &s);
+    assert!(matches!(a.ask("save a connection", &s), Step::Send(_)));
+    let args = json!({"command":"connection.new","params":{"kind":"s3","name":"Approved connection"}});
+    assert_eq!(a.receive(a.generation(), ok(call("first", "run_command", args.clone())), &mut s), Step::Confirm);
+    assert!(s.connections.find("Approved connection").is_none());
+    assert!(!a.pending(&s).unwrap().2, "reserved commands cannot be allowed for the whole conversation");
+    assert!(matches!(a.decide(true, true, &mut s), Step::Send(_)));
+    assert_eq!(s.connections.find("Approved connection").unwrap().kind, "s3");
+    assert_eq!(a.receive(a.generation(), ok(call("again", "run_command", args)), &mut s), Step::Confirm);
+    assert!(matches!(a.decide(false, false, &mut s), Step::Send(_)));
+    assert_eq!(s.connections.connections.len(), 1, "declining a repeat must leave the approved connection unchanged");
+}
+
+#[test]
 fn gate_rules() {
     let s = sample();
     let g = |name: &str, args: Value| tools::gate(&s, &ToolCall { id: "x".into(), name: name.into(), args });

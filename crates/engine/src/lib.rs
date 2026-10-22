@@ -7,6 +7,7 @@
 
 pub mod cmd;
 pub mod connections;
+pub mod geometry_calc;
 pub mod model;
 pub mod project;
 pub mod sample;
