@@ -398,7 +398,8 @@ driver. An anonymous S3 test needs at least one named bucket.
 
 `connection.browse` lists what a connection offers, a level at a time: the tables of a database
 (under their schemas), the layers of a service, the records of a catalogue with the services and
-files they link to, the collections of a STAC API and the items and assets of a collection, or
+files they link to, the collections of a STAC API and the items and assets of a collection (for a
+static STAC catalog, its catalogs, collections and items, each item opened for its assets), or
 the buckets, folders and files of an S3 connection. Each child has a `key`, a `name` and what it
 is (`what`); a child with a `node` is browsed by asking again with that `node`; one with `add`
 names the command and parameters that add it (`service.add`, `layer.addDatabase`,

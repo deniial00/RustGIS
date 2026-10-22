@@ -9069,6 +9069,37 @@ fn connection_browse_levels_and_adds() {
     );
     assert!(v.get("truncated").is_none());
 
+    // A static STAC catalog: catalogs and collections, then a collection's items, each opened
+    // for its assets.
+    new(&mut s, json!({"kind": "stac", "address": "https://s.example/static/catalog.json", "name": "Static"}));
+    let root = json!({"type": "Catalog", "id": "r", "links": [{"rel": "child", "href": "./c1/collection.json", "title": "C1"}]});
+    let v = s.run("connection.browse", &json!({"id": "Static", "answer": root.to_string()})).unwrap();
+    assert_eq!(v["children"][0]["node"], "catalog:https://s.example/static/c1/collection.json");
+    let collection = json!({"type": "Collection", "id": "c1", "links": [
+        {"rel": "item", "href": "./i1/i1.json", "title": "Scene 1"}, {"rel": "child", "href": "./sub/catalog.json", "title": "Sub"}]});
+    let node = "catalog:https://s.example/static/c1/collection.json";
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": node, "answer": collection.to_string()})).unwrap();
+    let kinds: Vec<_> =
+        v["children"].as_array().unwrap().iter().map(|c| (c["what"].as_str().unwrap(), c["node"].as_str().unwrap())).collect();
+    assert_eq!(
+        kinds,
+        [("catalog", "catalog:https://s.example/static/c1/sub/catalog.json"), ("item", "item:https://s.example/static/c1/i1/i1.json")]
+    );
+    let item_node = "item:https://s.example/static/c1/i1/i1.json";
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "probe": true})).unwrap();
+    assert_eq!(v["fetch"], "https://s.example/static/c1/i1/i1.json");
+    let item = json!({"type": "Feature", "id": "i1", "collection": "c1", "bbox": [0, 0, 1, 1], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+        "assets": {"visual": {"href": "https://s.example/static/a.tif", "type": "image/tiff; application=geotiff"}},
+        "links": [{"rel": "self", "href": "https://s.example/static/c1/i1/i1.json"}]});
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": item.to_string()})).unwrap();
+    assert_eq!(
+        v["children"][0]["add"],
+        json!({"command": "stac.addAsset", "params": {"url": "https://s.example/static/c1/i1/i1.json", "asset": "visual", "name": "i1 visual"}})
+    );
+    // An item node belongs to a STAC connection, and is judged as its documents are.
+    assert!(s.run("connection.browse", &json!({"id": "W", "node": item_node})).is_err());
+    assert!(s.run("connection.browse", &json!({"id": "Static", "node": "item:http://127.0.0.1:9/i.json"})).is_err());
     // S3: buckets from the connection's options need no fetch; a bucket's level is read.
     new(&mut s, json!({"kind": "s3", "name": "BrowseB", "options": {"credentials": "none", "buckets": "bkt1"}}));
     let v = s.run("connection.browse", &json!({"id": "BrowseB", "probe": true})).unwrap();

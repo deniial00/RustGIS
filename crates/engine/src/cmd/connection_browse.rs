@@ -28,6 +28,7 @@ enum Level {
     StacRoot { api: String },
     StacCollection { api: String, id: String },
     StacCatalog { url: String },
+    StacItem { url: String },
     S3Root,
     S3Prefix { bucket: String, prefix: String },
 }
@@ -81,6 +82,14 @@ fn level(c: &Connection, node: &str) -> Result<Level, String> {
         address::check(url, Some(&c.address))?;
         return Ok(Level::StacCatalog { url: url.to_string() });
     }
+    if let Some(url) = node.strip_prefix("item:") {
+        // A static catalog's item: its own file, read when opened.
+        if kind != "stac" {
+            return Err(not_a_node());
+        }
+        address::check(url, Some(&c.address))?;
+        return Ok(Level::StacItem { url: url.to_string() });
+    }
     if let Some(rest) = node.strip_prefix("s3:") {
         let (bucket, prefix) = rest
             .split_once('/')
@@ -116,7 +125,7 @@ fn fetch_url(s: &Session, c: &Connection, level: &Level, conn: Option<&s3::Conne
         Level::StacCollection { api, id } => {
             Some(stac::search_url(api, &stac::Search { collections: vec![id.clone()], limit: ITEMS, ..stac::Search::default() })?)
         }
-        Level::StacCatalog { url } => Some(url.clone()),
+        Level::StacCatalog { url } | Level::StacItem { url } => Some(url.clone()),
         Level::S3Root => match (super::first_bucket(c), conn) {
             (Some(_), _) => None,
             (None, Some(conn)) if conn.credentials.is_some() => Some(s3::buckets_url(conn)),
@@ -196,6 +205,7 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> CmdResult {
                 Level::StacRoot { api } if stac::catalog::is_static(api) => catalogs(bytes, api)?,
                 Level::StacRoot { .. } => collections(bytes)?,
                 Level::StacCatalog { url } => catalogs(bytes, url)?,
+                Level::StacItem { url } => item_file(bytes, url)?,
                 Level::StacCollection { .. } => items(bytes, at)?,
                 Level::S3Root => buckets(s3::parse_buckets(bytes)?.into_iter()),
                 Level::S3Prefix { bucket, prefix } => objects(bytes, bucket, prefix)?,
@@ -388,23 +398,57 @@ fn collections(bytes: &[u8]) -> Result<Found, String> {
     ))
 }
 
-/// The catalogs and collections below a static catalog's document fetched from `from`.
+/// What a static catalog's document lists below it: its catalogs and collections (`child` links)
+/// and its items (`item` links), each a node read when it is opened (an item's file holds its
+/// assets).
 fn catalogs(bytes: &[u8], from: &str) -> Result<Found, String> {
-    let list = stac::catalog::parse_children(bytes, from)?;
     let mut dropped = false;
-    let children = list
-        .into_iter()
-        .take(MAX_CHILDREN + 1)
-        .filter_map(|c| {
-            let node = format!("catalog:{}", c.url);
-            let ok = node_ok(&node);
-            dropped |= !ok;
-            ok.then(|| json!({"key": node, "node": node, "name": c.title, "what": "catalog"}))
-        })
-        .collect();
+    let mut children = Vec::new();
+    for (prefix, what, list) in [
+        ("catalog", "catalog", stac::catalog::parse_children(bytes, from)?),
+        ("item", "item", stac::catalog::parse_item_links(bytes, from)?),
+    ] {
+        for c in list {
+            let node = format!("{prefix}:{}", c.url);
+            if node_ok(&node) {
+                children.push(json!({"key": node, "node": node, "name": c.title, "what": what}));
+            } else {
+                dropped = true;
+            }
+        }
+    }
     let mut found = Found::new(children);
     found.truncated |= dropped;
     Ok(found)
+}
+
+/// The assets of an item that can be added, each with the `stac.addAsset` that adds it.
+fn assets_of(item: &stac::Item) -> Vec<Value> {
+    item.assets
+        .iter()
+        .take(MAX_CHILDREN)
+        .filter_map(|a| {
+            let (key, href) = item.asset_href(Some(&a.key)).ok()?;
+            let mut params = json!({"asset": key, "name": format!("{} {key}", item.id)});
+            match &item.url {
+                Some(u) => params["url"] = json!(u),
+                None => params["item"] = stac::item_json_with(item, false),
+            }
+            Some(json!({
+                "key": href,
+                "name": if a.title.is_empty() { key.as_str() } else { a.title.as_str() },
+                "what": "asset",
+                "detail": a.media_type,
+                "href": href,
+                "add": {"command": "stac.addAsset", "params": params},
+            }))
+        })
+        .collect()
+}
+
+/// A static catalog's item (its own file): its assets.
+fn item_file(bytes: &[u8], from: &str) -> Result<Found, String> {
+    Ok(Found::new(assets_of(&stac::parse_item(bytes, from)?)))
 }
 
 /// The items of a collection's search, each with the assets that can be added.
@@ -415,30 +459,7 @@ fn items(bytes: &[u8], from: &str) -> Result<Found, String> {
     let children = list
         .iter()
         .take(MAX_CHILDREN)
-        .map(|item| {
-            let assets: Vec<Value> = item
-                .assets
-                .iter()
-                .take(MAX_CHILDREN)
-                .filter_map(|a| {
-                    let (key, href) = item.asset_href(Some(&a.key)).ok()?;
-                    let mut params = json!({"asset": key, "name": format!("{} {key}", item.id)});
-                    match &item.url {
-                        Some(u) => params["url"] = json!(u),
-                        None => params["item"] = stac::item_json_with(item, false),
-                    }
-                    Some(json!({
-                        "key": href,
-                        "name": if a.title.is_empty() { key.as_str() } else { a.title.as_str() },
-                        "what": "asset",
-                        "detail": a.media_type,
-                        "href": href,
-                        "add": {"command": "stac.addAsset", "params": params},
-                    }))
-                })
-                .collect();
-            json!({"key": format!("item:{}", item.id), "name": item.id, "what": "item", "detail": item.datetime, "children": assets})
-        })
+        .map(|item| json!({"key": format!("item:{}", item.id), "name": item.id, "what": "item", "detail": item.datetime, "children": assets_of(item)}))
         .collect();
     Ok(Found { children, truncated, matched })
 }
