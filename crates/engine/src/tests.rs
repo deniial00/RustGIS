@@ -9097,6 +9097,8 @@ fn connection_browse_levels_and_adds() {
         v["children"][0]["add"],
         json!({"command": "stac.addAsset", "params": {"url": "https://s.example/static/c1/i1/i1.json", "asset": "visual", "name": "i1 visual"}})
     );
+    // An asset's key names its item, so the same file under two items is two rows.
+    assert_eq!(v["children"][0]["key"], "https://s.example/static/c1/i1/i1.json#visual");
     // A relative asset address is resolved against the item's own file.
     let relative = item.to_string().replace(r#""assets":{"#, r#""assets":{"data":{"href":"./data/b.tif","type":"image/tiff"},"#);
     let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": relative})).unwrap();
@@ -9157,6 +9159,11 @@ fn connection_browse_levels_and_adds() {
     // An answer larger than a service document may be is refused before it is parsed.
     let huge = "x".repeat(65 << 20);
     assert!(s.run("connection.browse", &json!({"id": "W", "answer": huge})).unwrap_err().contains("too large"));
+    assert!(
+        s.run("connection.browse", &json!({"id": "W", "answer": "<x/>", "documents": [{"url": "https://a.example/x", "text": huge}]}))
+            .unwrap_err()
+            .contains("too large")
+    );
     // An OGC API's feature collections are imported together: listed, with options, not added alone.
     new(&mut s, json!({"kind": "ogcapi", "address": "https://o.example/collections", "name": "Ogc"}));
     let collections = r#"{"collections":[{"id":"lakes","title":"Lakes","links":[{"rel":"items","type":"application/geo+json","href":"https://o.example/collections/lakes/items"}]}]}"#;

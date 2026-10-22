@@ -101,6 +101,8 @@ fn level(c: &Connection, node: &str) -> Result<Level, String> {
 }
 
 /// The session's S3 connection for an S3 level, logging in with what needs no typing.
+/// (A probe logs in too, as `connection.test` does: the address it names, and the signature the
+/// fetch needs, depend on the connection.)
 fn s3_login(s: &mut Session, c: &Connection, level: &Level) -> Result<Option<s3::Connection>, String> {
     if !matches!(level, Level::S3Root | Level::S3Prefix { .. }) {
         return Ok(None);
@@ -176,8 +178,9 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> CmdResult {
         return Err("node is a child's node, as connection.browse lists it".into());
     }
     // The app's answers come from a fetch the cache already limits; a caller's may be any size.
-    if ps(p, "answer").is_some_and(|a| a.len() > super::super::service::MAX_GROUP_BYTES) {
-        return Err("answer is too large to read".into());
+    let documents = p.get("documents").and_then(Value::as_array).into_iter().flatten().filter_map(|d| ps(d, "text")).map(str::len);
+    if ps(p, "answer").map(str::len).into_iter().chain(documents).sum::<usize>() > super::super::service::MAX_GROUP_BYTES {
+        return Err("answer and documents are too large to read".into());
     }
     let level = level(&c, node)?;
     let conn = s3_login(s, &c, &level)?;
@@ -435,7 +438,7 @@ fn assets_of(item: &stac::Item) -> Vec<Value> {
                 None => params["item"] = stac::item_json_with(item, false),
             }
             Some(json!({
-                "key": href,
+                "key": format!("{}#{key}", item.url.as_deref().unwrap_or(&item.id)),
                 "name": if a.title.is_empty() { key.as_str() } else { a.title.as_str() },
                 "what": "asset",
                 "detail": a.media_type,
