@@ -9097,6 +9097,11 @@ fn connection_browse_levels_and_adds() {
         v["children"][0]["add"],
         json!({"command": "stac.addAsset", "params": {"url": "https://s.example/static/c1/i1/i1.json", "asset": "visual", "name": "i1 visual"}})
     );
+    // A relative asset address is resolved against the item's own file.
+    let relative = item.to_string().replace(r#""assets":{"#, r#""assets":{"data":{"href":"./data/b.tif","type":"image/tiff"},"#);
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": relative})).unwrap();
+    let hrefs: Vec<&str> = v["children"].as_array().unwrap().iter().filter_map(|c| c["href"].as_str()).collect();
+    assert!(hrefs.contains(&"https://s.example/static/c1/i1/data/b.tif"), "{hrefs:?}");
     // An item node belongs to a STAC connection, and is judged as its documents are.
     assert!(s.run("connection.browse", &json!({"id": "W", "node": item_node})).is_err());
     assert!(s.run("connection.browse", &json!({"id": "Static", "node": "item:http://127.0.0.1:9/i.json"})).is_err());
