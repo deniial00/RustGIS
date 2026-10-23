@@ -213,6 +213,9 @@ pub struct Services {
     pub load_pref: Option<Box<dyn Fn(&str) -> Option<String>>>,
     /// Saves a preference.
     pub save_pref: Option<Box<dyn Fn(&str, &str)>>,
+    /// The system's secret store (see `docs/architecture.md` › Secrets): the desktop's keychain.
+    /// `None` in the browser and on the command line, where secrets last for the session only.
+    pub secrets: Option<std::sync::Arc<dyn rustgis_engine::data::secrets::SecretStore>>,
     /// Downloads a font by URL (web); the bytes land in `font_inbox`.
     pub fetch_font: Option<Box<dyn Fn(&str)>>,
     pub font_inbox: Option<Inbox>,

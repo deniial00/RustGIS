@@ -34,6 +34,29 @@ Production code avoids `unwrap`, `expect` and panics, and treats file contents a
 parameters as hostile. Tests run every command and every geoprocessing tool with junk
 parameters.
 
+## Secrets
+
+`Services::secrets` is the only way to the OS credential store. The desktop app implements it
+with the login Keychain on macOS, Windows Credential Manager (persistence Local), and the Secret
+Service (GNOME Keyring, KWallet) over pure-Rust D-Bus on Linux and the BSDs. It is `None` in the
+browser and the CLI, where callers keep a secret for the session only, as before. Crates below
+`apps/` use only the `rustgis_data::secrets` trait and never an OS API.
+
+- **Keys.** The service is `RustGIS`. The account is `owner/name` with a lowercase owner (for
+  example `assistant/<provider>` or `connection/<id>`); each feature defines its own. Values are
+  opaque strings in `Secret`.
+- **Errors, not fallbacks.** A missing or locked store, or a refused prompt, returns a
+  `SecretError` to show the user. Never write the secret anywhere else instead.
+- **No leaks.** `Secret`'s `Debug` is redacted and it has no `Display`. Never log a secret, and
+  never put one in command parameters, History, workspace recordings or assistant tool output.
+- **Blocking.** A call can wait on an OS prompt or D-Bus. Make it on a user action or a worker
+  thread, never every frame, and keep the value in memory for the session. Don't access one
+  account from two threads at once.
+- **macOS.** The system asks again for access when the app's code signature changes, which
+  happens with unsigned or re-signed builds.
+- **Tests.** Use `MemorySecrets`, and `MemorySecrets::failing(..)` for error paths. The desktop
+  backend's smoke test is `#[ignore]`d: `cargo test -p rustgis keychain_round_trip -- --ignored`.
+
 ## Quality gates
 
 ```sh

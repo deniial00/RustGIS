@@ -24,6 +24,7 @@ pub mod osm;
 pub mod photo;
 pub mod query;
 pub mod raster;
+pub mod secrets;
 pub mod sheets;
 pub mod source;
 pub mod sqlite;
