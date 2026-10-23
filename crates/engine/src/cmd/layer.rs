@@ -2598,15 +2598,24 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     } else {
         base
     };
-    let field = || -> Result<String, String> {
+    let field = |numeric_only: bool| -> Result<String, String> {
         if let Some(x) = ps(p, "field") {
             return Ok(x.to_string());
         }
         l.renderer
             .field()
+            .filter(|name| {
+                !numeric_only || l.dataset.field_index(name).and_then(|i| l.dataset.fields.get(i)).is_some_and(|f| f.ty.is_numeric())
+            })
             .map(str::to_string)
-            .or_else(|| l.dataset.fields.iter().find(|f| f.ty.is_numeric()).map(|f| f.name.clone()))
-            .ok_or_else(|| "field is required".into())
+            .or_else(|| l.dataset.fields.iter().find(|f| !numeric_only || f.ty.is_numeric()).map(|f| f.name.clone()))
+            .ok_or_else(|| {
+                if numeric_only {
+                    "no numeric field is available for this symbology".into()
+                } else {
+                    "no field is available for this symbology".into()
+                }
+            })
     };
     // Classes and sizes describe the rows the definition query lets through, taken once: changing
     // the query later keeps them until the symbology is applied again.
@@ -2619,15 +2628,15 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     };
     let mut r = match kind.as_str() {
         "single" | "singlesymbol" => Renderer::Single(base),
-        "unique" | "uniquevalues" => Renderer::unique(&l.dataset, &rows()?, &field()?, ramp.unwrap_or(Ramp::Harbour), base)?,
+        "unique" | "uniquevalues" => Renderer::unique(&l.dataset, &rows()?, &field(false)?, ramp.unwrap_or(Ramp::Harbour), base)?,
         "graduated" | "graduatedcolors" => {
-            Renderer::graduated(&l.dataset, &rows()?, &field()?, classes, method, ramp.unwrap_or(Ramp::Ember), base)?
+            Renderer::graduated(&l.dataset, &rows()?, &field(true)?, classes, method, ramp.unwrap_or(Ramp::Ember), base)?
         }
         "proportional" | "proportionalsymbols" => {
             if g != GeometryType::Point {
                 return Err("Proportional Symbols needs a point layer".into());
             }
-            Renderer::proportional(&l.dataset, &rows()?, &field()?, base)?
+            Renderer::proportional(&l.dataset, &rows()?, &field(true)?, base)?
         }
         other => return Err(format!("unknown symbology '{other}'")),
     };

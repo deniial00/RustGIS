@@ -1995,6 +1995,48 @@ fn terrain_is_set_from_a_dem_or_tiles() {
 }
 
 #[test]
+fn graduated_symbology_skips_a_current_text_field() {
+    let mut s = world();
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
+
+    s.run("layer.symbology", &json!({"layer": "Countries", "type": "graduated"})).unwrap();
+    let layer = s.map().layer_by_name("Countries").unwrap();
+    let rustgis_map::Renderer::Graduated { field, .. } = &layer.renderer else { panic!("Graduated Colors renderer expected") };
+    assert_ne!(field, "income_grp", "the text field from the previous renderer is not reused");
+    assert!(layer.dataset.field_index(field).and_then(|i| layer.dataset.fields.get(i)).is_some_and(|f| f.ty.is_numeric()));
+}
+
+#[test]
+fn symbology_chooses_fields_by_renderer_requirements() {
+    let mut s = Session::new(Project::default());
+    s.run(
+        "layer.addDataText",
+        &json!({
+            "fileName": "text-fields.geojson",
+            "text": r#"{"type":"FeatureCollection","features":[
+                {"type":"Feature","properties":{"g_id":"61259","g_name":"Liezen"},"geometry":{"type":"Point","coordinates":[14.24,47.57]}},
+                {"type":"Feature","properties":{"g_id":"61260","g_name":"Graz"},"geometry":{"type":"Point","coordinates":[15.44,47.07]}}
+            ]}"#
+        }),
+    )
+    .unwrap();
+
+    s.run("layer.symbology", &json!({"layer": "text-fields", "type": "unique"})).unwrap();
+    let rustgis_map::Renderer::Unique { field, classes, .. } = &s.map().layer_by_name("text-fields").unwrap().renderer else {
+        panic!("Unique Values renderer expected")
+    };
+    assert_eq!(field, "g_id");
+    assert_eq!(classes.len(), 2);
+
+    let before = s.map().layer_by_name("text-fields").unwrap().renderer.clone();
+    let depth = s.undo_depth();
+    let err = s.run("layer.symbology", &json!({"layer": "text-fields", "type": "graduated"})).unwrap_err();
+    assert_eq!(err, "no numeric field is available for this symbology");
+    assert_eq!(s.map().layer_by_name("text-fields").unwrap().renderer, before, "failed mode switch leaves current styling intact");
+    assert_eq!(s.undo_depth(), depth, "failed mode switch adds no undo step");
+}
+
+#[test]
 fn symbology_classes_follow_the_definition_query() {
     let mut s = world();
     s.run("layer.definitionQuery", &json!({"layer": "Countries", "where": "continent = 'Europe'"})).unwrap();

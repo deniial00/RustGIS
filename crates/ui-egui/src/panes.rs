@@ -3323,6 +3323,7 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             };
             let sel = cur_kind == *label;
             let (r, resp) = ui.allocate_exact_size(vec2(68.0, 56.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, sel, tl!(*label)));
             ui.painter().rect_filled(
                 r,
                 CornerRadius::same(6),
@@ -3350,7 +3351,11 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let short = tl!(label).split(' ').next().unwrap_or(label);
             ui.painter().text(pos2(r.center().x, r.max.y - 11.0), Align2::CENTER_CENTER, short, regular(11.0), t.text);
             if resp.on_hover_text(tl!(*label)).clicked() && !sel {
-                let _ = app.run("layer.symbology", json!({"type": code}));
+                if app.run("layer.symbology", json!({"type": code})).is_err() {
+                    ui.data_mut(|data| data.insert_temp(egui::Id::new("symbology_pending_field"), (l.id, (*code).to_string())));
+                } else {
+                    ui.data_mut(|data| data.remove::<(u32, String)>(egui::Id::new("symbology_pending_field")));
+                }
             }
         }
     });
@@ -3363,6 +3368,31 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     let numeric: Vec<String> = l.dataset.fields.iter().filter(|f| f.ty.is_numeric()).map(|f| f.name.clone()).collect();
     let all: Vec<String> = l.dataset.fields.iter().map(|f| f.name.clone()).collect();
+    let pending_id = egui::Id::new("symbology_pending_field");
+    let pending = ui.data(|data| data.get_temp::<(u32, String)>(pending_id)).filter(|(layer, _)| *layer == l.id);
+    if let Some((_, kind)) = pending {
+        let fields = if kind == "unique" { &all } else { &numeric };
+        ui.horizontal(|ui| {
+            ui.label(tl!("Choose a field to apply this renderer:"));
+            egui::ComboBox::from_id_salt("symbology_pending_field_choice").selected_text(tl!("Select a field")).show_ui(ui, |ui| {
+                for field in fields {
+                    if ui.selectable_label(false, field).clicked()
+                        && app.run("layer.symbology", json!({"type": kind, "field": field})).is_ok()
+                    {
+                        ui.data_mut(|data| data.remove::<(u32, String)>(pending_id));
+                    }
+                }
+            });
+        });
+        if fields.is_empty() {
+            if kind == "unique" {
+                ui.label(tl!("No field is available for this symbology."));
+            } else {
+                ui.label(tl!("No numeric field is available for this symbology."));
+            }
+        }
+        ui.add_space(6.0);
+    }
     match &l.renderer {
         Renderer::Single(s) => symbol_editor(app, ui, *s, g, t),
         Renderer::Unique { field, classes, ramp, .. } => {
