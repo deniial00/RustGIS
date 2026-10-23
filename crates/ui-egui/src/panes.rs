@@ -3290,6 +3290,10 @@ fn ramp_swatch(ui: &mut Ui, ramp: &Ramp, w: f32, selected: bool, t: &Tokens) -> 
 
 /// Shows the active layer's renderer controls, including No Fill for polygon layers.
 fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    let pending_id = egui::Id::new("symbology_pending_field");
+    if ui.data(|data| data.get_temp::<(u32, String)>(pending_id)).is_some_and(|(layer, _)| Some(layer) != app.session.active_layer) {
+        ui.data_mut(|data| data.remove::<(u32, String)>(pending_id));
+    }
     let Some(l) = app.session.active_layer.and_then(|id| app.session.map().layer(id)).cloned() else {
         ui.label(egui::RichText::new(tl!("Select a layer in the Layers pane.")).color(t.text_dim));
         return;
@@ -3368,7 +3372,6 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     let numeric: Vec<String> = l.dataset.fields.iter().filter(|f| f.ty.is_numeric()).map(|f| f.name.clone()).collect();
     let all: Vec<String> = l.dataset.fields.iter().map(|f| f.name.clone()).collect();
-    let pending_id = egui::Id::new("symbology_pending_field");
     let pending = ui.data(|data| data.get_temp::<(u32, String)>(pending_id)).filter(|(layer, _)| *layer == l.id);
     if let Some((_, kind)) = pending {
         let fields = if kind == "unique" { &all } else { &numeric };
@@ -4989,6 +4992,31 @@ mod tests {
         let _ = app.run("map.new", json!({"name": "Second"}));
         follow_layer_filter(&mut app);
         assert_eq!((app.ui.layer_filter.as_str(), app.ui.layer_filter_hid), ("", None));
+    }
+
+    /// A pending renderer choice belongs only to the layer where the switch failed.
+    #[test]
+    fn pending_symbology_choice_clears_when_active_layer_changes() {
+        let mut app = RustGisApp::with_sample();
+        let (countries, cities) = (layer(&app, "Countries"), layer(&app, "Cities"));
+        app.session.active_layer = Some(countries);
+        app.ui.open_right(RightPane::Symbology);
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(64).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        let pending_id = egui::Id::new("symbology_pending_field");
+        h.ctx.data_mut(|data| data.insert_temp(pending_id, (countries, "graduated".to_owned())));
+        h.step();
+        assert!(h.ctx.data(|data| data.get_temp::<(u32, String)>(pending_id).is_some()));
+
+        h.state_mut().session.active_layer = Some(cities);
+        h.step();
+        assert!(h.ctx.data(|data| data.get_temp::<(u32, String)>(pending_id).is_none()));
     }
 
     /// The Symbology pane's Transparency slider changes the layer while it's dragged, not only
