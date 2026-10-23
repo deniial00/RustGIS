@@ -497,8 +497,9 @@ features are read in place rather than loaded whole, avoiding an in-memory copy 
 dataset. The layer reads features in view in the background as the map moves, using spatial
 indexes: the GeoPackage R-tree, the FlatGeobuf packed R-tree, GeoParquet row-group bounding
 boxes, or a cached Shapefile R-tree built from the shapes' bounding boxes. When a
-view holds more than 250,000 features (100,000 in the web app), the layer draws an evenly spread
-sample of them and its tooltip in Layers says so: zoom in to see them all. Smaller files load
+local file's view holds more than 250,000 features (100,000 in the web app), the layer draws an
+evenly spread sample of them and its tooltip in Layers says so: zoom in to see them all. Remote files have lower limits (see
+[Data formats](data-formats.md)). Smaller files load
 whole; `layer.addData` with `"stream": true` or `false` overrides the choice.
 
 On the desktop, opening a large Shapefile for the first time scans its record headers to build

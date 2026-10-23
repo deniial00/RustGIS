@@ -671,7 +671,9 @@ in the desktop app instead. The nightly workflow runs every published plugin in 
 RustGIS. See the registry's [publishing instructions](https://plugins.rustgis.app/registry/)
 for details.
 
-A registry entry contains `id`, `name`, `version`, `description`, `author`, `homepage`,
+The file you submit is only a pointer to the release. The registry build turns it into the
+published `registry.json` that RustGIS reads, whose entries carry `package` (the package's address) and
+`sha256` in place of `source`. A registry entry contains `id`, `name`, `version`, `description`, `author`, `homepage`,
 `license`, `permissions`, `minRustgisVersion`, `i18n` (the name and description translated),
 `categories`, `package`, lower-case hexadecimal `sha256`, and `size` in bytes.
 `package` is an HTTPS address or a path relative to `registry.json`;

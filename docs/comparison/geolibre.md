@@ -112,8 +112,8 @@ compact, scriptable desktop GIS, or use both.
   coming from ArcGIS Pro often find it familiar. GeoLibre uses menus and panels, with a command
   palette and beginner, intermediate and advanced interface levels.
 - **Offline local workflows.** RustGIS's built-in readers, tools and rendering work without
-  a network or server; offline areas sync edits back to the project's source map, not a
-  remote database. GeoLibre tools, GDAL, DuckDB and process plugins use separate programs.
+  a network or server; offline areas sync edits back to the corresponding map in the project,
+  not to the underlying source data or a remote database. GeoLibre tools, GDAL, DuckDB and process plugins use separate programs.
   GeoLibre works
   offline too, but some features need a remote host (GDAL export, ONNX detection and story map
   HTML export among them), and on the desktop its raster tools and some vector tools use an

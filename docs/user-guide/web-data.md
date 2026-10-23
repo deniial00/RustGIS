@@ -6,8 +6,8 @@ opens in the Web Data pane on the right, beside the map it searches. Unless a se
 otherwise, the panes work in the web app too, provided the servers allow browser requests
 (CORS). The command-line examples below are for the desktop CLI; many network commands cannot
 fetch synchronously in the browser, where the panes fetch in the background instead.
-Commands that reach the network require the [AI Assistant](assistant.md)'s approval and a
-plugin's network permission. `ui.dialog` opens a panel on a search with `"search"`
+Commands that reach the network need the [AI Assistant](assistant.md)'s approval when it runs
+them, and the network permission when a plugin does. `ui.dialog` opens a panel on a search with `"search"`
 (`{"name": "nasaEarthdata", "search": "sea surface temperature"}`).
 
 | Entry | What it gives | Section |

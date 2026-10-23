@@ -27,7 +27,7 @@ sample again. **Settings › Start-up › Start With** chooses what opens next t
 3. **Select.** Open **Home › Select By Attributes**, choose *Countries* under *Input Rows*,
    enter `continent = 'Asia'` under *Where*, and press *Apply*. Open the attribute table with
    ++ctrl+t++. Rows and map features stay in sync.
-4. **Analyse.** Open **Analyze › Buffer**. Set *Input Features* to *Cities*, *Distance* to
+4. **Analyze.** Open **Analyze › Buffer**. Set *Input Features* to *Cities*, *Distance* to
    `300`, *Units* to *Kilometers* and *Dissolve* to *All*, then press *Run*. The result is added
    as a new layer, and the run is listed under **Analyze › History**.
 5. **Change the view.** **View › Globe** turns the map into a 3D globe; **View › Projection**
