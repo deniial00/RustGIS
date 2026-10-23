@@ -117,7 +117,10 @@ fn ident(s: &str) -> String {
 }
 
 fn refused_login(e: &postgres::Error) -> bool {
-    matches!(e.code(), Some(&postgres::error::SqlState::INVALID_PASSWORD | &postgres::error::SqlState::INVALID_AUTHORIZATION_SPECIFICATION))
+    // 28000 also covers access-policy and role failures that a password cannot fix.
+    matches!(e.code(), Some(&postgres::error::SqlState::INVALID_PASSWORD))
+        // tokio-postgres exposes no typed discriminator for this client-side config error.
+        // The no-password handshake in the engine regression guards its exact source message.
         || std::error::Error::source(e).is_some_and(|s| s.to_string() == "password missing")
 }
 

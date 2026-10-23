@@ -941,7 +941,9 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         "layer" => {
             let id = s.layer_id(p)?;
             let l = s.map().layer(id).ok_or("no such layer")?.clone();
-            (l.name.clone(), to_json(&embed_layer(l, &mut MAX_EMBED.clone()))?)
+            let mut layer = embed_layer(l, &mut MAX_EMBED.clone());
+            crate::project::strip_addresses(layer.addresses_mut().collect());
+            (layer.name.clone(), to_json(&layer)?)
         }
         "styles" => {
             if s.project.styles.is_empty() {

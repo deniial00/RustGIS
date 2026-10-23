@@ -715,10 +715,13 @@ routes, areas, observations…) to draw into. Add Folder connects a folder to th
 also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
 From History turns the geoprocessing history into a task you can replay.
 
-Saved projects, map files and packages keep no password, key, token or signature in layer web
-addresses. The open project keeps them for this session. Opening a plain `.rgis` file whose bytes
-are exactly ones this process wrote restores them; changed files, packages and files saved by
-another process never do. After RustGIS closes, add those layers again with their credentials.
+Saved projects, map and layer files, and packages keep no password, key, token or signature in
+layer web addresses. The open project keeps them for this session. RustGIS remembers the 32 most
+recent distinct saved snapshots whose addresses needed stripping. Opening a plain `.rgis` file
+whose bytes exactly match one of those snapshots restores its secrets; saving more distinct
+snapshots evicts the oldest. Changed files, packages, imports and files saved by another process
+never restore secrets. After a snapshot is evicted or RustGIS closes, add those layers again with
+their credentials.
 
 ### Complete streamed Shapefile rendering
 

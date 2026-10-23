@@ -225,6 +225,17 @@ fn rerun(d: &DuckdbOrigin) -> rustgis_data::Result<std::path::PathBuf> {
         .ok_or_else(|| rustgis_data::DataError::Format(format!("the query returns no {} any more", d.family.label())))
 }
 
+/// Adds the manual reconnect hint without losing a refused-password classification.
+#[cfg(not(target_arch = "wasm32"))]
+fn database_open_error(e: rustgis_data::DataError) -> rustgis_data::DataError {
+    match e {
+        rustgis_data::DataError::Login(message) => {
+            rustgis_data::DataError::Login(format!("{message} (connect again with Add Data › Database…, giving its password)"))
+        }
+        e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
+    }
+}
+
 /// Connects to a PostGIS layer's table again (a project opening). Only a password given this
 /// session is sent: a project file names its server, which must never get the user's own
 /// credentials (`PGPASSWORD`, the password file) just for being opened.
@@ -240,13 +251,7 @@ fn open_postgis(pg: &PostgisOrigin) -> rustgis_data::Result<Box<dyn FeatureSourc
         let Database::Postgres(dsn) = Database::parse(&pg.database) else {
             return Err(rustgis_data::DataError::Format(format!("{}: not a PostgreSQL connection", pg.database)));
         };
-        let again = |e: rustgis_data::DataError| match e {
-            rustgis_data::DataError::Login(m) => {
-                rustgis_data::DataError::Login(format!("{m} (connect again with Add Data › Database…, giving its password)"))
-            }
-            e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
-        };
-        let conn = postgis::connect(&dsn, false).map_err(again)?;
+        let conn = postgis::connect(&dsn, false).map_err(database_open_error)?;
         let table = postgis::find_table(&conn, &pg.table)?;
         Ok(Box::new(postgis::PostgisSource::open(conn, table, pg.family, pg.crs.as_deref())?))
     }
@@ -266,13 +271,7 @@ fn open_mysql(my: &MysqlOrigin) -> rustgis_data::Result<Box<dyn FeatureSource>> 
         let Database::Mysql(address) = Database::parse(&my.database) else {
             return Err(rustgis_data::DataError::Format(format!("{}: not a MySQL or MariaDB connection", my.database)));
         };
-        let again = |e: rustgis_data::DataError| match e {
-            rustgis_data::DataError::Login(m) => {
-                rustgis_data::DataError::Login(format!("{m} (connect again with Add Data › Database…, giving its password)"))
-            }
-            e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
-        };
-        let conn = mysql::connect(&address, false).map_err(again)?;
+        let conn = mysql::connect(&address, false).map_err(database_open_error)?;
         let table = mysql::find_table(&conn, &my.table)?;
         Ok(Box::new(mysql::MysqlSource::open(conn, table, my.family, my.crs.as_deref())?))
     }
@@ -292,13 +291,7 @@ fn open_sqlserver(ms: &SqlServerOrigin) -> rustgis_data::Result<Box<dyn FeatureS
         let Database::Sqlserver(address) = Database::parse(&ms.database) else {
             return Err(rustgis_data::DataError::Format(format!("{}: not a SQL Server connection", ms.database)));
         };
-        let again = |e: rustgis_data::DataError| match e {
-            rustgis_data::DataError::Login(m) => {
-                rustgis_data::DataError::Login(format!("{m} (connect again with Add Data › Database…, giving its password)"))
-            }
-            e => rustgis_data::DataError::Format(format!("{e} (connect again with Add Data › Database…, giving its password)")),
-        };
-        let conn = sqlserver::connect(&address, false).map_err(again)?;
+        let conn = sqlserver::connect(&address, false).map_err(database_open_error)?;
         let table = sqlserver::find_table(&conn, &ms.table)?;
         Ok(Box::new(sqlserver::SqlServerSource::open(conn, table, ms.family, ms.crs.as_deref())?))
     }

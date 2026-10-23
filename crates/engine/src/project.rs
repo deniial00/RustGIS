@@ -611,7 +611,9 @@ impl Project {
     }
 
     /// The file keeps no passwords, keys, tokens or signatures in layer addresses. The open project
-    /// keeps them, and opening this very file again before RustGIS closes gives them back.
+    /// keeps them. This process remembers the 32 most recent distinct saved snapshots with stripped
+    /// addresses: opening identical plain project text restores them until that snapshot is evicted
+    /// or RustGIS closes. Packages and imports never restore them.
     pub fn saved_text(&mut self) -> Result<(String, usize), String> {
         let was = strip_addresses(self.addresses_mut());
         let n = was.iter().flatten().count();

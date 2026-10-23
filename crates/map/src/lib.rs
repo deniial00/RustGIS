@@ -188,6 +188,14 @@ fn yes() -> bool {
 }
 
 impl Layer {
+    /// The dataset, streamed, raster and time-following Zarr addresses used to read this layer
+    /// again, in that order. Local paths are included; database origins stay password-free.
+    pub fn addresses_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        self.dataset.source.iter_mut().chain(self.source.iter_mut().filter_map(|source| source.path.as_mut())).chain(
+            self.raster.iter_mut().flat_map(|raster| raster.path.iter_mut().chain(raster.time_zarr.iter_mut().map(|zarr| &mut zarr.store))),
+        )
+    }
+
     pub fn new(id: u32, dataset: Dataset) -> Self {
         let renderer = Renderer::Single(Symbol::default_for(dataset.geometry_type, id));
         Layer {
@@ -900,20 +908,7 @@ impl Map {
             addresses.push(url);
         }
         for layer in &mut self.layers {
-            if let Some(source) = &mut layer.dataset.source {
-                addresses.push(source);
-            }
-            if let Some(path) = layer.source.as_mut().and_then(|source| source.path.as_mut()) {
-                addresses.push(path);
-            }
-            if let Some(raster) = &mut layer.raster {
-                if let Some(path) = &mut raster.path {
-                    addresses.push(path);
-                }
-                if let Some(zarr) = &mut raster.time_zarr {
-                    addresses.push(&mut zarr.store);
-                }
-            }
+            addresses.extend(layer.addresses_mut());
         }
         addresses
     }
