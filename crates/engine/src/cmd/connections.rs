@@ -39,7 +39,7 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("connection.forgetPassword", "Forget Saved Password", "Home › Add › Data Sources", forget_password).view().params(r#"{"id": "a database connection's id or name"}"#),
         C::new("connection.test", "Test Connection", "Home › Add › Data Sources", test).view().params(
-            r#"{"id"?: "a connection's id or name", "kind"?: "postgres"|"mysql"|"sqlserver"|"service"|"wms"|"wmts"|"wfs"|"wcs"|"ogcapi"|"arcgis"|"csw"|"stac"|"s3", "name"?: text, "group"?: text, "address"?: text, "options"?: "an unsaved connection, as connection.new (when no id)", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)", "probe"?: "true: only the address the test reads, {fetch} (null for databases, which their driver tests)", "answer"?: "non-database kinds only: what that address returned, when the app fetched it (no network request then); databases ignore answer and test through their driver"}"#,
+            r#"{"id"?: "a connection's id or name", "kind"?: "postgres"|"mysql"|"sqlserver"|"service"|"wms"|"wmts"|"wfs"|"wcs"|"ogcapi"|"arcgis"|"csw"|"stac"|"s3", "name"?: text, "group"?: text, "address"?: text, "options"?: "an unsaved connection, as connection.new (when no id)", "password"?: "for a named database, authentication refusal restores prior session credentials; a later listing failure keeps the new password; never persisted", "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)", "probe"?: "true: only the address the test reads, {fetch} (null for databases, which their driver tests)", "answer"?: "non-database kinds only: what that address returned, when the app fetched it (no network request then); databases ignore answer and test through their driver"}"#,
         ),
         C::new("connection.browse", "Browse Connection", "Home › Add › Data Sources", browse::browse).view().params(
             r#"{"id": "a connection's id or name", "node"?: "a child's node, as a listing gives it (the connection's top level when absent)", "probe"?: "true: only the address this level reads, {fetch} (null: read without a fetch, or by the database driver); an S3 connection logs in first, as connection.test does", "answer"?: "what that address returned, when the app fetched it", "documents"?: [{"url": "a further document a listing asked for (next)", "text": "its answer"}]} → {connection, node, children: [{key, name, what, detail?, node? (browse it), children? (listed already), add? {command, params}: the command that adds it}], truncated?, matched?, notes?, service? {url, type}, next? (fetch it, then ask again with answer and documents)}"#,
@@ -51,7 +51,7 @@ fn shown(s: &Session, c: &Connection) -> Value {
     let database = DATABASE_KINDS.contains(&c.kind.as_str());
     let available = !database || !cfg!(target_arch = "wasm32");
     let logged_in =
-        if c.kind == "s3" { s3::connection(&c.name).is_some() } else { database && s.database_logins.has_session_password(&c.id) };
+        if c.kind == "s3" { s3::connection(&c.name).is_some() } else { database && s.database_logins.known_password(&c.id).is_some() };
     let add_with = "connection.browse {id}, then {id, node} for a child's node; run a dataset's add {command, params}";
     let mut out = serde_json::to_value(c).unwrap_or(Value::Null);
     out["available"] = json!(available);
@@ -262,11 +262,19 @@ fn forget_password(s: &mut Session, p: &Value) -> CmdResult {
     s.database_logins.forget_saved(&c.id);
     #[cfg(not(target_arch = "wasm32"))]
     {
-        rustgis_data::source::duckdb::forget_connection_password(&c.id);
-        if let Some(pw) = s.database_logins.session_password(&c.id)
-            && let Some((_, key)) = crate::connections::database_key(&c.address)
+        use rustgis_data::source::duckdb;
+        let key = crate::connections::database_key(&c.address).map(|(_, key)| key);
+        let was_active = key.as_ref().is_some_and(|key| duckdb::has_connection_password(key, &c.id));
+        duckdb::forget_connection_password(&c.id);
+        if was_active
+            && let Some(key) = key
+            && !duckdb::has_explicit_password(&key)
+            && let Some(pw) = s.database_logins.session_password(&c.id)
         {
-            rustgis_data::source::duckdb::set_connection_password(&key, &c.id, Some(pw.expose()));
+            // Restore this ID's explicit session value only if it owned the active slot.
+            // An inactive ID must not replace another ID or a typed address password.
+            duckdb::set_connection_password(&key, &c.id, Some(pw.expose()));
+            s.database_logins.note_activation(&key, &c.id);
         }
     }
     let mut c = c;
@@ -557,13 +565,7 @@ fn test(s: &mut Session, p: &Value) -> CmdResult {
         return Ok(json!({"connection":c.id, "fetch":null}));
     }
     let secrets = ["password", "accessKeyId", "secretAccessKey", "sessionToken"].iter().any(|k| ps(p, k).is_some_and(|v| !v.is_empty()));
-    if DATABASE_KINDS.contains(&c.kind.as_str()) {
-        if let Some(pw) = ps(p, "password").filter(|p| !p.is_empty())
-            && !c.id.is_empty()
-        {
-            s.database_logins.set_session_password(&c.id, pw);
-        }
-    } else if secrets {
+    if !DATABASE_KINDS.contains(&c.kind.as_str()) && secrets {
         let mut input = p.clone();
         if let Some(o) = input.as_object_mut() {
             o.remove("remember");
@@ -596,7 +598,7 @@ fn test(s: &mut Session, p: &Value) -> CmdResult {
                 if c.id.is_empty() {
                     super::layer::database_tables(s, &json!({"database":c.address,"password":ps(p,"password")}))?
                 } else {
-                    let tables = connection_use::tables(s, &c)?;
+                    let tables = connection_use::tables(s, &c, ps(p, "password").filter(|pw| !pw.is_empty()))?;
                     let layers: Vec<_> = tables.iter().filter_map(|v| v["label"].as_str()).collect();
                     json!({"count":layers.len(),"layers":layers})
                 }

@@ -15,6 +15,11 @@ struct Server {
 }
 impl Server {
     fn new() -> Self {
+        Self::start(false)
+    }
+
+    /// When authentication succeeds, fail the first catalogue query instead of the password.
+    fn start(authenticate: bool) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -63,10 +68,56 @@ impl Server {
                 }
                 let echoed = String::from_utf8_lossy(&password).trim_end_matches('\0').to_string();
                 send.send(password).unwrap();
-                let body = format!("SFATAL\0VFATAL\0C28P01\0Mrefused {echoed}\0\0");
+                if authenticate {
+                    // AuthenticationOk and ReadyForQuery: the client's session setup is a
+                    // simple Query containing three SET statements.
+                    if stream.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").is_err() {
+                        continue;
+                    }
+                    let mut tag = [0];
+                    let mut size = [0; 4];
+                    if stream.read_exact(&mut tag).is_err() || tag[0] != b'Q' || stream.read_exact(&mut size).is_err() {
+                        continue;
+                    }
+                    let size = u32::from_be_bytes(size);
+                    if !(4..=65536).contains(&size) || stream.read_exact(&mut vec![0; (size - 4) as usize]).is_err() {
+                        continue;
+                    }
+                    for _ in 0..3 {
+                        stream.write_all(b"C\0\0\0\x08SET\0").unwrap();
+                    }
+                    stream.write_all(b"Z\0\0\0\x05I").unwrap();
+                    // The catalogue lookup uses an extended query. Consume through Sync so
+                    // the server's non-login error occurs after successful authentication.
+                    loop {
+                        let mut size = [0; 4];
+                        if stream.read_exact(&mut tag).is_err() || stream.read_exact(&mut size).is_err() {
+                            break;
+                        }
+                        let size = u32::from_be_bytes(size);
+                        if !(4..=65536).contains(&size) || stream.read_exact(&mut vec![0; (size - 4) as usize]).is_err() {
+                            break;
+                        }
+                        if tag[0] == b'S' {
+                            break;
+                        }
+                    }
+                }
+                let body = if authenticate {
+                    format!("SERROR\0VERROR\0C42P01\0Mfixture listing failed {echoed}\0\0")
+                } else {
+                    format!("SFATAL\0VFATAL\0C28P01\0Mrefused {echoed}\0\0")
+                };
                 let _ = stream.write_all(b"E");
                 let _ = stream.write_all(&((body.len() + 4) as u32).to_be_bytes());
                 let _ = stream.write_all(body.as_bytes());
+                if authenticate {
+                    let _ = stream.write_all(b"Z\0\0\0\x05I");
+                    // A catalogue error is nonfatal: keep the connection alive until the
+                    // client closes it, rather than racing its error response with TCP EOF.
+                    let mut terminate = [0; 5];
+                    let _ = stream.read_exact(&mut terminate);
+                }
             }
         });
         Self {
@@ -133,7 +184,15 @@ fn isolated_with(name: &str, extra: &[(&str, &str)]) -> bool {
         command.env(key, value);
     }
     let output = command.output().unwrap();
-    assert!(output.status.success(), "isolated database scenario failed: {}", String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut summaries = stdout.lines().filter(|line| line.starts_with("test result:"));
+    let ran_one = summaries.next().is_some_and(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"))
+        && summaries.next().is_none();
+    assert!(
+        output.status.success() && ran_one,
+        "isolated database scenario failed or did not run exactly one test:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     true
 }
 #[test]
@@ -262,5 +321,132 @@ fn remembered_database_saved_password_wins_over_ambient_environment() {
     // the saved one must be sent instead.
     assert!(s.run("connection.test", &json!({"id":id})).is_err(), "the refusing server must fail the listing");
     assert_eq!(server.take(), b"ambient-saved-sentinel\0");
+    server.empty();
+}
+
+#[test]
+fn remembered_database_forget_preserves_active_owner_and_explicit_input() {
+    if isolated("remembered_database_forget_preserves_active_owner_and_explicit_input") {
+        return;
+    }
+    use rustgis_data::source::{duckdb, postgis};
+    let server = Server::new();
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = app(store.clone(), "{}");
+    let a = remember(&mut s, "A", &server.address, "owner-a");
+    let b = remember(&mut s, "B", &server.address, "owner-b");
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    s.run("connection.forgetPassword", &json!({"id":a})).unwrap();
+    assert_eq!(s.database_logins.selection("postgres", &key), Some(b.as_str()));
+    assert!(postgis::connect(&key, false).is_err());
+    assert_eq!(server.take(), b"owner-b\0");
+    assert_eq!(s.database_logins.session_password(&a).unwrap().expose(), "owner-a");
+    assert!(store.load(&format!("connection/{a}")).unwrap().is_none());
+
+    duckdb::remember_password(&key, "address-typed");
+    s.run("connection.forgetPassword", &json!({"id":a})).unwrap();
+    assert!(duckdb::has_explicit_password(&key));
+    assert!(postgis::connect(&key, false).is_err());
+    assert_eq!(server.take(), b"address-typed\0");
+
+    s.run("connection.login", &json!({"id":b,"password":"owner-b"})).unwrap();
+    // A loaded/active cache value can differ from the ID's latest explicit session value.
+    // Forget must restore the session value, not preserve the old owned slot by accident.
+    s.database_logins.set_session_password(&b, "session-b-new");
+    s.run("connection.forgetPassword", &json!({"id":b})).unwrap();
+    assert!(postgis::connect(&key, false).is_err());
+    assert_eq!(server.take(), b"session-b-new\0");
+    assert_eq!(s.database_logins.selection("postgres", &key), Some(b.as_str()));
+    server.empty();
+}
+
+#[test]
+fn remembered_database_forget_saved_only_clears_its_activation() {
+    if isolated("remembered_database_forget_saved_only_clears_its_activation") {
+        return;
+    }
+    let server = Server::new();
+    let store = Arc::new(MemorySecrets::new());
+    let mut seed = app(store.clone(), "{}");
+    let id = remember(&mut seed, "Saved", &server.address, "saved-only");
+    let mut s = app(store, &seed.connections.to_json());
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    s.run("connection.login", &json!({"id":id})).unwrap();
+    assert!(!s.database_logins.has_session_password(&id));
+    s.run("connection.forgetPassword", &json!({"id":id})).unwrap();
+    assert!(!rustgis_data::source::duckdb::has_password(&key));
+    assert!(!s.database_logins.activations().iter().any(|(_, active)| active == &id));
+    server.empty();
+}
+
+#[test]
+fn remembered_database_test_refusal_restores_prior_session_and_active_password() {
+    if isolated("remembered_database_test_refusal_restores_prior_session_and_active_password") {
+        return;
+    }
+    use rustgis_data::source::{duckdb, postgis};
+    let server = Server::new();
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = app(store.clone(), "{}");
+    let a = remember(&mut s, "A", &server.address, "prior-a");
+    let b = remember(&mut s, "B", &server.address, "prior-b");
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    let saved = store.load(&format!("connection/{a}")).unwrap();
+    for (active, expected) in [(Some(b.as_str()), "prior-b"), (Some(a.as_str()), "prior-a"), (None, "prior-address")] {
+        if let Some(id) = active {
+            s.run("connection.login", &json!({"id":id,"password":expected})).unwrap();
+        } else {
+            duckdb::remember_password(&key, expected);
+        }
+        let selection = s.database_logins.selection("postgres", &key).map(str::to_string);
+        let activations = s.database_logins.activations();
+        let error = s.run("connection.test", &json!({"id":a,"password":"test-refused","remember":true})).unwrap_err();
+        assert!(!error.contains("test-refused"));
+        assert_eq!(server.take(), b"test-refused\0");
+        assert_eq!(s.database_logins.session_password(&a).unwrap().expose(), "prior-a");
+        assert_eq!(s.database_logins.selection("postgres", &key), selection.as_deref());
+        assert_eq!(s.database_logins.activations(), activations);
+        assert_eq!(duckdb::has_explicit_password(&key), active.is_none());
+        assert!(postgis::connect(&key, false).is_err());
+        let mut packet = expected.as_bytes().to_vec();
+        packet.push(0);
+        assert_eq!(server.take(), packet);
+        assert_eq!(store.load(&format!("connection/{a}")).unwrap(), saved);
+        assert!(!s.database_logins.is_rejected(&a));
+    }
+    duckdb::set_connection_password(&key, &a, Some("cleanup-owned"));
+    duckdb::forget_connection_password(&a);
+    let mut fresh = app(Arc::new(MemorySecrets::new()), "{}");
+    fresh.run("connection.new", &json!({"kind":"postgres","name":"Empty","address":server.address})).unwrap();
+    assert!(fresh.run("connection.test", &json!({"id":"c1","password":"test-refused"})).is_err());
+    assert_eq!(server.take(), b"test-refused\0");
+    assert!(!fresh.database_logins.has_session_password("c1"));
+    assert!(fresh.database_logins.selection("postgres", &key).is_none());
+    assert!(!duckdb::has_password(&key));
+    server.empty();
+}
+
+#[test]
+fn remembered_database_test_listing_failure_keeps_authenticated_session() {
+    if isolated("remembered_database_test_listing_failure_keeps_authenticated_session") {
+        return;
+    }
+    let server = Server::start(true);
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = app(store.clone(), "{}");
+    let a = remember(&mut s, "A", &server.address, "prior-a");
+    let b = remember(&mut s, "B", &server.address, "prior-b");
+    let error = s.run("connection.test", &json!({"id":a,"password":"accepted-new","remember":true})).unwrap_err();
+    assert!(error.contains("fixture listing failed"), "{error}");
+    assert!(!error.contains("accepted-new"));
+    assert_eq!(server.take(), b"accepted-new\0");
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    assert_eq!(s.database_logins.session_password(&a).unwrap().expose(), "accepted-new");
+    assert_eq!(s.database_logins.selection("postgres", &key), Some(a.as_str()));
+    assert!(s.database_logins.activations().contains(&(key.clone(), a.clone())));
+    assert!(s.database_logins.requests(s.opened).next().is_none());
+    let envelope: Value = serde_json::from_str(store.load(&format!("connection/{a}")).unwrap().unwrap().expose()).unwrap();
+    assert_eq!(envelope["password"], "prior-a");
+    assert_eq!(s.database_logins.session_password(&b).unwrap().expose(), "prior-b");
     server.empty();
 }

@@ -137,7 +137,15 @@ fn remembered_database_refused_saved_login_opens_empty_unchecked_form() {
             .env_remove("PGPASSFILE")
             .output()
             .unwrap();
-        assert!(output.status.success(), "isolated UI refusal failed: {}", String::from_utf8_lossy(&output.stdout));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut summaries = stdout.lines().filter(|line| line.starts_with("test result:"));
+        let ran_one = summaries.next().is_some_and(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"))
+            && summaries.next().is_none();
+        assert!(
+            output.status.success() && ran_one,
+            "isolated UI refusal failed or did not run exactly one test:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
     use std::io::{Read, Write};

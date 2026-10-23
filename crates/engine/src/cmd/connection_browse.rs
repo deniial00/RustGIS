@@ -230,7 +230,7 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> CmdResult {
 fn database(s: &mut Session, c: &Connection) -> Result<Found, String> {
     use std::collections::BTreeMap;
 
-    let tables = super::connection_use::tables(s, c)?;
+    let tables = super::connection_use::tables(s, c, None)?;
     let text = |t: &Value, k: &str| t.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let mut schemas: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let truncated = tables.len() > MAX_CHILDREN;

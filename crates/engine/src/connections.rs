@@ -651,6 +651,9 @@ impl DatabaseLogins {
     pub fn forget_saved(&mut self, id: &str) {
         self.saved.remove(id);
         self.rejected.remove(id);
+        if !self.session.contains_key(id) {
+            self.activations.retain(|_, active| active != id);
+        }
     }
 
     /// Adds a request, replacing the one for the same database. The app is asked again only when

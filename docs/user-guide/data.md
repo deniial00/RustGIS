@@ -481,7 +481,8 @@ fails, the definition remains unchanged. Invalid edits do not delete a password.
 Duplicating a connection copies neither its stored password nor its session login.
 **Saved password** marks a remembered connection without reading the store just to display it.
 **Forget Saved Password** (`connection.forgetPassword {"id":"c1"}`) deletes the stored value,
-but leaves an explicitly entered session password and already-open layers alone.
+but leaves an explicitly entered session password and already-open layers alone. Forgetting an
+inactive connection never selects it or replaces another connection's active password.
 
 Projects remain address-only: they contain neither passwords nor saved connection IDs.
 On opening a project, one exact matching remembered connection may reconnect automatically.
@@ -492,7 +493,8 @@ unavailable. Choose a connection explicitly, or use `connection.login {"id":"c2"
 its existing session or remembered password without exposing it. Selection lasts for this
 session, not in the project. `connection.list` reports secret-free `loginRequests` with the
 reason, database label, candidate IDs and affected-layer count; ambiguous layers are not
-attributed to the first saved row.
+attributed to the first saved row. `loggedIn` means this ID has a session password or an already
+loaded remembered password available; it does not certify successful server authentication.
 
 Explicit session input or selection takes precedence over a saved password; a saved password
 takes precedence over existing ambient fallbacks on explicitly initiated connections.
@@ -506,8 +508,11 @@ prompt. Use Forget to delete a previously saved password.
 
 A database login reopens waiting layers at the same password-free address;
 `connection.list` reports them as `waiting`, and `connection.login` returns `reopened` and
-`failed` counts. With login parameters, `connection.test` logs in first, but never persists a
-password; a failed listing does not undo the session login.
+`failed` counts. `connection.test` never persists a password. For a named connection, if the
+server positively refuses a password typed for that Test, the previous per-ID session credential,
+selection and active address password are restored (or the attempted credential is removed if
+none existed).
+A failure after authentication, such as a table-listing error, keeps the new session login.
 S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken` remain session-only.
 S3 profiles and environment credentials remain subject to the existing endpoint restrictions;
 editing an S3 name, endpoint or options disconnects its session login. S3 shares the name-based

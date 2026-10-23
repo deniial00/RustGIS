@@ -111,3 +111,20 @@ fn remembered_database_delete_failure_is_transactional() {
     assert_eq!(store.load(&format!("connection/{id}")).unwrap(), None);
     assert!(s.connections.find(&second).is_some());
 }
+
+#[test]
+fn remembered_database_passwordless_login_reports_cached_credentials_per_id() {
+    let store = Arc::new(MemorySecrets::new());
+    let mut seed = session(Some(store.clone()));
+    let id = add(&mut seed, "Remembered");
+    let other = add(&mut seed, "Other");
+    seed.run("connection.login", &json!({"id":id,"password":"status-sentinel","remember":true})).unwrap();
+    let mut fresh = session(Some(store));
+    fresh.connections = crate::connections::Connections::from_json(&seed.connections.to_json());
+    assert_eq!(fresh.run("connection.list", &Value::Null).unwrap()["connections"][0]["loggedIn"], false);
+    assert_eq!(fresh.run("connection.login", &json!({"id":id})).unwrap()["loggedIn"], true);
+    let listing = fresh.run("connection.list", &Value::Null).unwrap();
+    assert_eq!(listing["connections"][0]["loggedIn"], true);
+    assert_eq!(listing["connections"][1]["id"], other);
+    assert_eq!(listing["connections"][1]["loggedIn"], false);
+}

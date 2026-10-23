@@ -168,6 +168,29 @@ pub fn set_connection_password(dsn: &str, id: &str, password: Option<&str>) {
     }
 }
 
+/// Whether this driver's exact address slot is currently owned by saved connection `id`.
+/// Unlike runtime selection, this also accounts for a later explicitly typed address password.
+pub fn has_connection_password(dsn: &str, id: &str) -> bool {
+    lock().get(dsn).is_some_and(|entry| entry.connection_id.as_deref() == Some(id))
+}
+
+/// Tries an explicitly supplied password, restoring the previous address slot and its ownership
+/// only when the server refuses authentication. Other failures (including table listing) retain
+/// the new password. Never holds the cache lock during network I/O.
+pub fn try_connection_password<T>(dsn: &str, id: &str, password: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    let previous = lock().insert(dsn.to_string(), Entry { password: Secret::new(password), connection_id: Some(id.to_string()) });
+    let result = run();
+    if matches!(&result, Err(DataError::Login(_))) {
+        let mut all = lock();
+        if let Some(previous) = previous {
+            all.insert(dsn.to_string(), previous);
+        } else {
+            all.remove(dsn);
+        }
+    }
+    result
+}
+
 /// Takes away every password saved connection `id` activated.
 pub fn forget_connection_password(id: &str) {
     lock().retain(|_, e| e.connection_id.as_deref() != Some(id));
