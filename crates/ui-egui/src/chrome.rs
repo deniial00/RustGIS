@@ -1285,6 +1285,10 @@ mod tests {
     #[test]
     fn every_new_connection_entry_opens_its_form() {
         for (kind, _) in crate::connectionui::KINDS {
+            // The menu leaves database kinds out on the web, where `open_new` refuses them.
+            if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
+                continue;
+            }
             let mut app = RustGisApp::with_sample();
             app.run("ui.connection", serde_json::json!({"kind": kind})).unwrap();
             assert_eq!(app.dialogs.open, Some("newConnection"), "{kind}");
