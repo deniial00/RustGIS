@@ -140,10 +140,10 @@ column becomes a layer (`"layer"` picks one).
 PostGIS and reads its tables live. The dialog takes a saved connection or a typed one, a password,
 a table (**List Tables**, or all tables with geometry) and a coordinate system for geometry that
 doesn't say its own. RustGIS talks to the server itself (nothing else to install;
-TLS as libpq does it). `sslmode=prefer` (the default) and `require` encrypt the connection but
-don't check the server's certificate, so they don't protect against a server in the middle:
-use `verify-full` (or `verify-ca`, which here checks the host name too) on networks you don't
-trust. The certificate is checked against `sslrootcert` (a private authority's PEM file) or the
+TLS as libpq does it). `sslmode=prefer` (the default) uses TLS only when the server offers it, and otherwise connects
+without encryption, so a server in the middle can force a plaintext connection. `require` always
+uses TLS but doesn't check the server's certificate. On networks you don't trust, use
+`verify-full` or `verify-ca`; both check the host name here. The certificate is checked against `sslrootcert` (a private authority's PEM file) or the
 web's roots. `disable` turns TLS off. The connection is a libpq connection string
 (`host=localhost port=5432 dbname=gis user=postgres`) or a `postgresql://user@host/dbname`
 address; what it leaves out comes from `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE`, as with
