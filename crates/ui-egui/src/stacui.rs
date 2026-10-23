@@ -688,11 +688,15 @@ fn drop_listing(st: &mut State) {
     (st.node, st.node_title) = (String::new(), String::new());
     st.trail.clear();
     st.children.clear();
+    // What Save as Connection would keep: listed again before it is offered.
+    st.listed.clear();
     if st.waiting.as_ref().is_some_and(|(a, _)| matches!(a, Asked::Collections(_) | Asked::Search(_) | Asked::Children(_))) {
         st.waiting = None;
-        st.info = None;
     }
-    if st.walk.take().is_some() {
+    st.walk = None;
+    // The last listing's status ("Showing 10 items") isn't the new API's; an asset being signed
+    // or a link being opened keeps its own.
+    if st.waiting.is_none() {
         st.info = None;
     }
 }
@@ -838,7 +842,9 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
             keep = crate::connectionui::keep_button(ui);
         }
     });
-    if api_changed && catalog::is_static(&app.ui.stac.api) && !busy {
+    // A listing dropped by the switch no longer holds the new catalog's browsing up.
+    let busy_now = app.ui.stac.waiting.is_some() || app.ui.stac.walk.is_some();
+    if api_changed && catalog::is_static(&app.ui.stac.api) && !busy_now {
         browse(app, None);
     } else if let Some(to) = go_to {
         browse(app, Some(to));
@@ -1173,6 +1179,15 @@ mod tests {
         poll(&mut app, &ctx);
         assert!(app.ui.stac.collections.is_empty());
         assert_eq!(app.ui.stac.api, "https://two.example/stac");
+
+        // Listed, then away and back: Save as Connection waits for a listing of its own, and
+        // the last listing's status goes with it.
+        app.ui.stac.listed = "https://two.example/stac".into();
+        app.ui.stac.info = Some("Showing 10 items".into());
+        switch_api(&mut app.ui.stac, "https://one.example/stac");
+        switch_api(&mut app.ui.stac, "https://two.example/stac");
+        assert!(app.ui.stac.listed.is_empty());
+        assert_eq!(app.ui.stac.info, None);
 
         app.ui.stac.waiting = Some((Asked::Link("https://two.example/item.json".into()), Slot::default()));
         switch_api(&mut app.ui.stac, "https://three.example/stac");
