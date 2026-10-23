@@ -954,7 +954,10 @@ fn add_database(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                 app.dialogs.info = Some(crate::i18n::fmt("{n} tables with geometry", &[("n", &app.dialogs.list.len().to_string())]));
             }
             Err(e) => {
+                // What a failed listing leaves can't be tied to an address any more, so it goes too.
                 app.dialogs.listed = None;
+                app.dialogs.list.clear();
+                app.dialogs.c.clear();
                 app.dialogs.info = None;
                 app.dialogs.error = Some(e);
             }
