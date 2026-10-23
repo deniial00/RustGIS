@@ -1193,4 +1193,27 @@ mod tests {
         switch_api(&mut app.ui.stac, "https://three.example/stac");
         assert!(matches!(app.ui.stac.waiting, Some((Asked::Link(_), _))), "a link already asked for goes on");
     }
+
+    /// A static catalog picked while a listing of the last API is pending is browsed at once:
+    /// the dropped listing doesn't hold it up.
+    #[test]
+    fn a_catalog_picked_during_a_pending_listing_is_browsed() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        // Nothing listens on port 9 of the loopback address: the browse is refused, harmlessly.
+        app.run("connection.new", json!({"kind":"stac","name":"Local catalog","address":"http://127.0.0.1:9/catalog.json"})).unwrap();
+        app.ui.stac.api = "https://one.example/stac".into();
+        app.ui.stac.waiting = Some((Asked::Collections("https://one.example/stac".into()), Slot::default()));
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(|ui, app: &mut RustGisApp| dialog(app, ui), app);
+        h.step();
+        h.step();
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Other")).unwrap().click();
+        h.step();
+        h.get_by_label("Local catalog").click();
+        h.step();
+        assert_eq!(h.state().ui.stac.api, "http://127.0.0.1:9/catalog.json");
+        assert!(matches!(&h.state().ui.stac.waiting, Some((Asked::Children(url), _)) if url == "http://127.0.0.1:9/catalog.json"));
+    }
 }
