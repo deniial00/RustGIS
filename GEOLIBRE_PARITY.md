@@ -2,13 +2,14 @@
 
 _Last reviewed: 2026-10-23 (v0.3.0)._
 
-What [GeoLibre](https://github.com/opengeos/GeoLibre) v3.4.0 offers and where RustGIS stands:
+What [GeoLibre v3.4.0](https://github.com/opengeos/GeoLibre/tree/v3.4.0) offers and where RustGIS stands:
 **missing** or **partial**, or ticked when done. It moved here from [#77](https://github.com/opengeos/RustGIS/issues/77) so that anyone can keep it
 current: **tick or update an item in the pull request that lands it**. Where an item is planned,
 _Roadmap_ names its theme in [ROADMAP.md](ROADMAP.md). The GeoLibre and Whitebox geoprocessing
 suite RustGIS runs is not counted either way.
 
-Sources: GeoLibre `docs/features.md`, `docs/data-formats.md` and the other GeoLibre docs named per
+Sources: GeoLibre [v3.4.0](https://github.com/opengeos/GeoLibre/tree/v3.4.0) `docs/features.md`,
+`docs/data-formats.md` and the other GeoLibre docs named per
 section; RustGIS [ROADMAP.md](ROADMAP.md), [docs/](docs/) and the command registry
 (`crates/engine/src/cmd`). Some items may be out of scope for a pure-Rust GIS (noted inline);
 strike those through with a reason rather than leaving them open.
@@ -44,8 +45,9 @@ _GeoLibre: docs/data-formats.md, docs/features.md › Adding data, SQL and datab
   ([#120](https://github.com/opengeos/RustGIS/issues/120)), OGC API Tiles ([#144](https://github.com/opengeos/RustGIS/issues/144)), WCS and CSW ([#178](https://github.com/opengeos/RustGIS/issues/178)). Still missing: auto-refresh (_Roadmap: any
   time_).
 - [ ] **ArcGIS services**: FeatureServer, MapServer, ImageServer and VectorTileServer, with OAuth
-  and a Portal browser. Partial: the four layer types through From Service… ([#120](https://github.com/opengeos/RustGIS/issues/120)), a token in
-  the address carried. Missing: OAuth and a Portal browser (_Roadmap: data at the source_).
+  and a Portal browser. Partial: the four layer types through From Service… ([#120](https://github.com/opengeos/RustGIS/issues/120)); a token in
+  the service address is sent with its requests (saved sources drop it). Missing: OAuth and a
+  Portal browser (_Roadmap: data at the source_).
 - [ ] **STAC browser and cloud catalogs**: STAC, Planetary Computer, Earth Engine, Overture,
   Source Cooperative, NASA Earthdata, Planet and Hugging Face. Partial: STAC Search ([#128](https://github.com/opengeos/RustGIS/issues/128)),
   Planetary Computer with signed assets ([#144](https://github.com/opengeos/RustGIS/issues/144)), Overture Maps and Source Cooperative ([#158](https://github.com/opengeos/RustGIS/issues/158)), NASA
@@ -299,7 +301,7 @@ _GeoLibre: docs/features.md › Platforms and interface; docs/i18n.md_
 - Offline areas with two-way sync of edited features
 
 ## To verify
-- Whether raster export writes valid COGs with overviews
+- Whether exported COGs (written today) pass a COG validator: overviews and tile layout
 - GeoLibre's language count: [#77](https://github.com/opengeos/RustGIS/issues/77) said 20,
   `docs/comparison/geolibre.md` says 21
 - Accessibility compared with GeoLibre's axe-checked screens

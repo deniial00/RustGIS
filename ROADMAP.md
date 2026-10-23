@@ -29,7 +29,7 @@ needs another first, it says so.
 An item is underway when it has an open pull request, or someone said on its issue in the last
 week that they are working on it. Check here and the
 [open pull requests](https://github.com/opengeos/RustGIS/pulls) before starting; to take an item,
-comment on its issue and open a draft pull request early.
+comment on its issue or pull request and open a draft pull request early.
 - GPU map: vector tiles and labels on the GPU tile layer
   ([#635](https://github.com/opengeos/RustGIS/issues/635),
   [#596](https://github.com/opengeos/RustGIS/issues/596)).
@@ -45,8 +45,6 @@ comment on its issue and open a draft pull request early.
 - Zonal statistics as a built-in tool ([#718](https://github.com/opengeos/RustGIS/pull/718)).
 - A "No fill" option for polygons ([#745](https://github.com/opengeos/RustGIS/pull/745), for
   [#644](https://github.com/opengeos/RustGIS/issues/644)).
-- Editing PostGIS tables and saving the edits back
-  ([#671](https://github.com/opengeos/RustGIS/pull/671), draft).
 
 ## Next
 
@@ -99,8 +97,8 @@ And alongside it:
 - A histogram for raster stretches; raster attribute tables.
 
 ### Data at the source
-- Write edits back to GeoPackage and PostGIS (edits stay in the project today; PostGIS is
-  underway in [#671](https://github.com/opengeos/RustGIS/pull/671)). _Coordinate first._
+- Write edits back to GeoPackage and PostGIS (edits stay in the project today). _Coordinate
+  first._
 - Editor tracking fields (created/edited by and at).
 - Attribute table columns: rename, hide and reorder _(open)_.
 - Persistent attribute joins and virtual fields. _Coordinate first_ (they change `Feature`).
@@ -145,7 +143,10 @@ built-in version must justify itself on one of those.
 ## Exploratory
 Open questions rather than plans; discuss before building.
 - Layers kept in their own coordinate system rather than WGS 84.
-- Integrating [opengeos/terrio](https://github.com/opengeos/terrio), the pure-Rust raster, vector and point cloud I/O library: which of its drivers, coordinate transformations and GDAL-style operations could back or replace RustGIS's own readers, or stand in for the GDAL program, and which of them build for the web app.
+- Integrating [opengeos/terrio](https://github.com/opengeos/terrio), the pure-Rust raster, vector
+  and point cloud I/O library: which of its drivers, coordinate transformations and GDAL-style
+  operations could back or replace RustGIS's own readers, or stand in for the GDAL program, and
+  which of them build for the web app.
 - Collaboration: shared projects, review comments, accounts and a server.
 - Mobile and field work: touch layout, GPS, data collection, QFieldCloud
   ([#665](https://github.com/opengeos/RustGIS/issues/665)).
