@@ -18,12 +18,13 @@ Select a layer in Layers and open **Style › Symbology** (or the Symbology pane
   is not fully transparent. A layout legend can leave it out with **Hide other values** (see
   [Layouts](layouts.md)).
 - **Graduated Colors**: 1 to 12 classes of a numeric field by natural breaks (Jenks), equal
-  interval or quantile. If no field is chosen, a numeric field is selected automatically; if none
-  exists, the pane explains why the switch failed and keeps the current renderer. When candidate
-  fields exist, a field picker lets you try another field; the error remains visible if a retry
-  fails. Fix other reported problems, such as a definition query that keeps no features, before retrying.
-- **Proportional Symbols**: point size grows with a numeric field; the field is selected from the
-  available numeric fields.
+  interval or quantile. If no field is chosen, the current renderer's field is kept when it is
+  numeric; otherwise the first numeric field is used. If the layer has no numeric field, or the
+  switch fails for another reason, the pane shows why and keeps the current renderer. When numeric
+  fields exist, a field picker lets you try another one; the error stays visible if a retry fails.
+  A problem no field can fix, such as a definition query that keeps no features, needs fixing
+  first. Closing the pane or selecting another layer drops the retry.
+- **Proportional Symbols**: point size grows with a numeric field, chosen as for Graduated Colors.
 
 Pick a colour scheme from the pane's swatches, listed in groups: **Perceptually Uniform** (Viridis,
 Plasma, Inferno, Magma, Cividis, Batlow and Aurora: even steps in lightness, so they read in

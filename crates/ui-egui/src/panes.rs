@@ -47,6 +47,12 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     if app.ui.right != Some(RightPane::TimeSeries) && app.workflow.pick.as_ref().is_some_and(|p| p.purpose == "ts_point") {
         app.workflow.pick = None;
     }
+    // A failed renderer switch waits for a field only while the Symbology pane shows its layer.
+    if app.ui.right == Some(RightPane::Symbology) {
+        let _ = pending_symbology(app, ui.ctx());
+    } else {
+        clear_pending_symbology(ui.ctx());
+    }
     // A Zarr summary or a trend running on its thread lands whatever pane is in view (both are
     // looked at: `|`, not `||`), and the frames go on while one runs so it's taken when it ends.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3290,6 +3296,8 @@ fn ramp_swatch(ui: &mut Ui, ramp: &Ramp, w: f32, selected: bool, t: &Tokens) -> 
 
 const PENDING_SYMBOLOGY: &str = "symbology_pending_field";
 
+/// A renderer switch that failed, kept so the pane can offer a field to retry with. It belongs to
+/// one layer of one map in one project, and to the renderer the layer had when it failed.
 #[derive(Clone)]
 struct PendingSymbology {
     project: u64,
@@ -3297,53 +3305,30 @@ struct PendingSymbology {
     layer: u32,
     kind: &'static str,
     error: std::sync::Arc<str>,
+    renderer: std::sync::Arc<Renderer>,
 }
 
 fn clear_pending_symbology(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<PendingSymbology>(egui::Id::new(PENDING_SYMBOLOGY)));
 }
 
-/// Ends a pane-local retry when its project, map or active layer is no longer in view,
-/// including while the Symbology pane is closed.
-pub(crate) fn follow_symbology(app: &RustGisApp, ctx: &egui::Context) {
-    let stale = ctx.data(|data| {
-        data.get_temp::<PendingSymbology>(egui::Id::new(PENDING_SYMBOLOGY)).is_some_and(|pending| {
-            pending.project != app.session.opened
-                || pending.map != app.session.project.active_map
-                || Some(pending.layer) != app.session.active_layer
-        })
-    });
-    if stale {
+/// The pending retry, unless another project, map or layer is in view or the layer's renderer
+/// changed since the switch failed (an edit from the pane, the ribbon, an agent or undo
+/// supersedes it); a stale one is dropped.
+fn pending_symbology(app: &RustGisApp, ctx: &egui::Context) -> Option<PendingSymbology> {
+    let pending = ctx.data(|data| data.get_temp::<PendingSymbology>(egui::Id::new(PENDING_SYMBOLOGY)))?;
+    let current = pending.project == app.session.opened
+        && pending.map == app.session.project.active_map
+        && Some(pending.layer) == app.session.active_layer
+        && app.session.map().layer(pending.layer).is_some_and(|l| l.renderer == *pending.renderer);
+    if !current {
         clear_pending_symbology(ctx);
     }
-}
-
-/// A successful style edit supersedes a failed switch, including edits from the ribbon.
-pub(crate) fn symbology_command_finished(app: &RustGisApp, ctx: &egui::Context, command: &str) {
-    follow_symbology(app, ctx);
-    if matches!(
-        command,
-        "layer.symbology"
-            | "layer.ramp"
-            | "layer.classStyle"
-            | "layer.color"
-            | "layer.noFill"
-            | "layer.outline"
-            | "layer.marker"
-            | "layer.lineStrokes"
-            | "style.apply"
-            | "map.remove"
-            | "edit.undo"
-            | "edit.redo"
-    ) {
-        clear_pending_symbology(ctx);
-    }
+    current.then_some(pending)
 }
 
 /// Shows the active layer's renderer controls, including No Fill for polygon layers.
 fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
-    follow_symbology(app, ui.ctx());
-    let pending_id = egui::Id::new(PENDING_SYMBOLOGY);
     let Some(l) = app.session.active_layer.and_then(|id| app.session.map().layer(id)).cloned() else {
         ui.label(egui::RichText::new(tl!("Select a layer in the Layers pane.")).color(t.text_dim));
         return;
@@ -3413,8 +3398,9 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             layer: l.id,
                             kind: code,
                             error: error.into(),
+                            renderer: std::sync::Arc::new(l.renderer.clone()),
                         };
-                        ui.data_mut(|data| data.insert_temp(pending_id, pending));
+                        ui.data_mut(|data| data.insert_temp(egui::Id::new(PENDING_SYMBOLOGY), pending));
                     }
                     Ok(_) => clear_pending_symbology(ui.ctx()),
                 }
@@ -3430,7 +3416,7 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     let numeric: Vec<String> = l.dataset.fields.iter().filter(|f| f.ty.is_numeric()).map(|f| f.name.clone()).collect();
     let all: Vec<String> = l.dataset.fields.iter().map(|f| f.name.clone()).collect();
-    if let Some(pending) = ui.data(|data| data.get_temp::<PendingSymbology>(pending_id)) {
+    if let Some(pending) = pending_symbology(app, ui.ctx()) {
         ui.label(egui::RichText::new(pending.error.as_ref()).color(ui.visuals().error_fg_color));
         let fields = if pending.kind == "unique" { &all } else { &numeric };
         if !fields.is_empty() {
@@ -3442,9 +3428,8 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             match app.run("layer.symbology", json!({"type": pending.kind, "field": field})) {
                                 Ok(_) => clear_pending_symbology(ui.ctx()),
                                 Err(error) => {
-                                    ui.data_mut(|data| {
-                                        data.insert_temp(pending_id, PendingSymbology { error: error.into(), ..pending.clone() })
-                                    });
+                                    let pending = PendingSymbology { error: error.into(), ..pending.clone() };
+                                    ui.data_mut(|data| data.insert_temp(egui::Id::new(PENDING_SYMBOLOGY), pending));
                                 }
                             }
                         }
@@ -5140,9 +5125,10 @@ mod tests {
         assert!(matches!(h.state().session.map().layer(id).unwrap().renderer, Renderer::Single(_)));
     }
 
-    /// A closed pane must not retain a failed request through a layer or map round trip.
+    /// A failed switch is not offered again after the pane closes, or after a layer or map round
+    /// trip back to the same layer id.
     #[test]
-    fn pending_symbology_clears_across_closed_pane_context_changes() {
+    fn pending_symbology_ends_with_the_pane_or_its_layer() {
         use egui_kittest::kittest::Queryable;
         let mut h = symbology_retry_harness();
         let map = h.state().session.map().name.clone();
@@ -5160,23 +5146,32 @@ mod tests {
         h.state_mut().run("layer.select", json!({"layer": id})).unwrap();
         h.run_steps(3);
 
-        for map_change in [false, true] {
+        for change in ["close the pane", "layer round trip", "map round trip"] {
             h.get_by_label("Graduated Colors").click();
             h.run_steps(3);
             assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_some());
-            h.state_mut().ui.right = None;
-            if map_change {
-                h.state_mut().run("map.activate", json!({"name": "Other map"})).unwrap();
-                h.state_mut().run("map.activate", json!({"name": map})).unwrap();
-                h.state_mut().run("layer.select", json!({"layer": id})).unwrap();
-            } else {
-                h.state_mut().session.active_layer = Some(other);
-                h.run_steps(3);
-                h.state_mut().session.active_layer = Some(id);
+            match change {
+                "close the pane" => {
+                    h.state_mut().ui.right = None;
+                    h.run_steps(3);
+                    h.state_mut().ui.open_right(RightPane::Symbology);
+                }
+                "layer round trip" => {
+                    h.state_mut().session.active_layer = Some(other);
+                    h.run_steps(3);
+                    h.state_mut().session.active_layer = Some(id);
+                }
+                _ => {
+                    // The other map's active layer has the same id: only the map tells them apart.
+                    h.state_mut().run("map.activate", json!({"name": "Other map"})).unwrap();
+                    assert_eq!(h.state().session.active_layer, Some(id));
+                    h.run_steps(3);
+                    h.state_mut().run("map.activate", json!({"name": map})).unwrap();
+                    h.state_mut().run("layer.select", json!({"layer": id})).unwrap();
+                }
             }
-            h.state_mut().ui.open_right(RightPane::Symbology);
             h.run_steps(3);
-            assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_none());
+            assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_none(), "{change}");
             assert!(matches!(h.state().session.map().layer(id).unwrap().renderer, Renderer::Single(_)));
         }
     }
@@ -5187,18 +5182,22 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let mut h = symbology_retry_harness();
         let id = layer(h.state(), "retry");
-        for through_field_editor in [true, false] {
+        for edit in ["pane field", "ribbon", "agent"] {
             h.state_mut().run("layer.symbology", json!({"type": "unique", "field": "a_empty"})).unwrap();
             h.run_steps(3);
             h.get_by_label("Graduated Colors").click();
             h.run_steps(3);
             assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_some());
-            if through_field_editor {
-                h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("a_empty")).unwrap().click();
-                h.run_steps(3);
-                h.get_by_label("c_valid").click();
-            } else {
-                h.state_mut().run("layer.symbology", json!({"type": "unique", "field": "c_valid"})).unwrap();
+            let params = json!({"type": "unique", "field": "c_valid"});
+            match edit {
+                "pane field" => {
+                    h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("a_empty")).unwrap().click();
+                    h.run_steps(3);
+                    h.get_by_label("c_valid").click();
+                }
+                "ribbon" => drop(h.state_mut().run("layer.symbology", params).unwrap()),
+                // An attached agent's command runs on the session, not through the app.
+                _ => drop(h.state_mut().session.run("layer.symbology", &params).unwrap()),
             }
             h.run_steps(3);
             let Renderer::Unique { field, .. } = &h.state().session.map().layer(id).unwrap().renderer else {
