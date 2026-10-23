@@ -14,16 +14,22 @@ issues; feature-by-feature comparison with GeoLibre is tracked in
   it: depth in these beats a long list of first versions.
 - **Foundations before features.** Build the shared piece once (an expression engine, a secret
   store, Z coordinates) and let several features stand on it.
+- **Free and self-contained.** Pure Rust with nothing else to install; GDAL and DuckDB are
+  optional extras that add formats, not requirements.
 - **One program everywhere.** Desktop, browser, CLI, Python and AI agents share the same commands;
   nothing below `apps/` breaks the WebAssembly build.
 
 ## Contributing
 Most items below have no issue yet: propose one and open a pull request. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for which items to pick freely, which to coordinate first, and
-how to write a proposal. Releases below are focuses, not dates; an item moves when it lands,
-whatever its release.
+how to write a proposal. Themes under Next are not releases and not in order; where an item
+needs another first, it says so.
 
 ## Underway
+An item is underway when it has an open pull request, or someone said on its issue in the last
+week that they are working on it. Check here and the
+[open pull requests](https://github.com/opengeos/RustGIS/pulls) before starting; to take an item,
+comment on its issue and open a draft pull request early.
 - GPU map: vector tiles and labels on the GPU tile layer
   ([#635](https://github.com/opengeos/RustGIS/issues/635),
   [#596](https://github.com/opengeos/RustGIS/issues/596)).
@@ -37,12 +43,15 @@ whatever its release.
 - Connection manager for databases and web services
   ([#699](https://github.com/opengeos/RustGIS/issues/699)).
 - Zonal statistics as a built-in tool ([#718](https://github.com/opengeos/RustGIS/pull/718)).
+- A "No fill" option for polygons ([#745](https://github.com/opengeos/RustGIS/pull/745), for
+  [#644](https://github.com/opengeos/RustGIS/issues/644)).
+- Editing PostGIS tables and saving the edits back
+  ([#671](https://github.com/opengeos/RustGIS/pull/671), draft).
 
 ## Next
 
-### 0.4: An update soon
-The bugs users hit, the docs and a few quick wins, plus whatever from Underway lands in time;
-released soon, not held for the rest.
+### Fixes and quick wins
+The bugs users hit, the docs and a few quick wins: good first pull requests.
 - Robustness: the Windows 11 start-up failure
   ([#375](https://github.com/opengeos/RustGIS/issues/375)), Control-click menus on macOS
   ([#707](https://github.com/opengeos/RustGIS/issues/707)), Load Off-Map Data
@@ -50,14 +59,12 @@ released soon, not held for the rest.
 - A pass over the user guide, the comparison pages and the README against what the app does
   today (vertex editing, spatial join and kriging are listed as missing or undocumented; some
   pages still say 16 languages).
-- Styling: a "No fill" button for polygons
-  ([#644](https://github.com/opengeos/RustGIS/issues/644); a transparent fill works today)
-  _(open)_; standard deviation, geometric interval and manual breaks _(open)_.
+- Styling: standard deviation, geometric interval and manual breaks _(open)_.
 - Selection by polygon and lasso, and a radius tool on the map (Neighborhood Explorer already
   selects by radius) _(open)_.
 
-### 0.5: Solid ground
-Correct, robust and recoverable, with the foundations later releases stand on.
+### Solid ground
+Correct, robust and recoverable, with the foundations other themes stand on.
 - Correct coordinates: grid datum shifts (NTv2 and GeoTIFF grids) for NAD27, NAD83(HARN),
   GDA94↔GDA2020 and OSGB36, and a notice whenever a layer is read without its shift; GDA94
   ([#730](https://github.com/opengeos/RustGIS/issues/730)) is one case. _Coordinate first._
@@ -71,7 +78,7 @@ Correct, robust and recoverable, with the foundations later releases stand on.
   layers), extract vertices, points along lines, check and fix geometry _(open)_.
 - Batch runs: one tool over many layers or a folder of files.
 
-### 0.6: Expressions and cartography
+### Expressions and cartography
 One expression engine, a superset of today's SQL where clause so existing definition queries,
 label-class queries and display filters keep working. It replaces the three parsers of today
 (where clauses, Calculate Field, attribute rules) and serves Calculate Field, attribute rules,
@@ -91,18 +98,18 @@ And alongside it:
 - Style import: QGIS QML and SLD styles applied to layers.
 - A histogram for raster stretches; raster attribute tables.
 
-### 0.7: Data at the source
-- Write edits back to GeoPackage and PostGIS (edits stay in the project today). _Coordinate
-  first._
+### Data at the source
+- Write edits back to GeoPackage and PostGIS (edits stay in the project today; PostGIS is
+  underway in [#671](https://github.com/opengeos/RustGIS/pull/671)). _Coordinate first._
 - Editor tracking fields (created/edited by and at).
 - Attribute table columns: rename, hide and reorder _(open)_.
 - Persistent attribute joins and virtual fields. _Coordinate first_ (they change `Feature`).
 - Attribute forms: widgets, constraints and conditional visibility, on top of domains and
   subtypes.
 - Layer metadata, exported as STAC items.
-- ArcGIS sign-in (OAuth) and a Portal browser, on the 0.5 secret store.
+- ArcGIS sign-in (OAuth) and a Portal browser, once the secret store (Solid ground) exists.
 
-### 0.8: Analysis
+### Analysis
 - Routing: isochrones, service areas and an origin–destination matrix (today shortest path over
   a line layer).
 - Hot-spot statistics (Getis-Ord Gi\*), and emerging hot spots on the time slider.
@@ -110,7 +117,7 @@ And alongside it:
 - Reverse geocoding; a DEM downloader so viewshed works without a loaded elevation raster
   _(open)_.
 
-### 0.9: 3D scenes, first steps
+### 3D scenes, first steps
 - Phases 1–2 of [#726](https://github.com/opengeos/RustGIS/issues/726): Z coordinates kept from
   the data and written back; a scene with a free camera and each layer's elevation mode (on the
   ground, relative, absolute).

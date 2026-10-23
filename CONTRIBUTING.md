@@ -39,8 +39,11 @@ something on the roadmap (or not on it) interests you, propose it and open a pul
   code if your change
   - changes the data model (`Feature`, `Coord`, `Renderer`);
   - adds a dependency or a crate;
+  - changes the `.rgis` project format, or an existing command's id or parameters (the CLI,
+    Python, MCP and saved scripts call commands by id);
+  - changes the plugin interface;
   - falls under _Exploratory_ in the roadmap.
 
-Roadmap releases are focuses, not dates; an item moves when it lands, whatever its release. A
+Roadmap themes are not releases or an order; an item moves to Done when it lands. A
 pull request that lands a roadmap item, or an item of [GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md),
 updates that file in the same change.
