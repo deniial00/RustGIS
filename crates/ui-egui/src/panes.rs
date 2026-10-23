@@ -3288,12 +3288,62 @@ fn ramp_swatch(ui: &mut Ui, ramp: &Ramp, w: f32, selected: bool, t: &Tokens) -> 
     resp
 }
 
+const PENDING_SYMBOLOGY: &str = "symbology_pending_field";
+
+#[derive(Clone)]
+struct PendingSymbology {
+    project: u64,
+    map: usize,
+    layer: u32,
+    kind: &'static str,
+    error: std::sync::Arc<str>,
+}
+
+fn clear_pending_symbology(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<PendingSymbology>(egui::Id::new(PENDING_SYMBOLOGY)));
+}
+
+/// Ends a pane-local retry when its project, map or active layer is no longer in view,
+/// including while the Symbology pane is closed.
+pub(crate) fn follow_symbology(app: &RustGisApp, ctx: &egui::Context) {
+    let stale = ctx.data(|data| {
+        data.get_temp::<PendingSymbology>(egui::Id::new(PENDING_SYMBOLOGY)).is_some_and(|pending| {
+            pending.project != app.session.opened
+                || pending.map != app.session.project.active_map
+                || Some(pending.layer) != app.session.active_layer
+        })
+    });
+    if stale {
+        clear_pending_symbology(ctx);
+    }
+}
+
+/// A successful style edit supersedes a failed switch, including edits from the ribbon.
+pub(crate) fn symbology_command_finished(app: &RustGisApp, ctx: &egui::Context, command: &str) {
+    follow_symbology(app, ctx);
+    if matches!(
+        command,
+        "layer.symbology"
+            | "layer.ramp"
+            | "layer.classStyle"
+            | "layer.color"
+            | "layer.noFill"
+            | "layer.outline"
+            | "layer.marker"
+            | "layer.lineStrokes"
+            | "style.apply"
+            | "map.remove"
+            | "edit.undo"
+            | "edit.redo"
+    ) {
+        clear_pending_symbology(ctx);
+    }
+}
+
 /// Shows the active layer's renderer controls, including No Fill for polygon layers.
 fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
-    let pending_id = egui::Id::new("symbology_pending_field");
-    if ui.data(|data| data.get_temp::<(u32, String)>(pending_id)).is_some_and(|(layer, _)| Some(layer) != app.session.active_layer) {
-        ui.data_mut(|data| data.remove::<(u32, String)>(pending_id));
-    }
+    follow_symbology(app, ui.ctx());
+    let pending_id = egui::Id::new(PENDING_SYMBOLOGY);
     let Some(l) = app.session.active_layer.and_then(|id| app.session.map().layer(id)).cloned() else {
         ui.label(egui::RichText::new(tl!("Select a layer in the Layers pane.")).color(t.text_dim));
         return;
@@ -3355,10 +3405,18 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let short = tl!(label).split(' ').next().unwrap_or(label);
             ui.painter().text(pos2(r.center().x, r.max.y - 11.0), Align2::CENTER_CENTER, short, regular(11.0), t.text);
             if resp.on_hover_text(tl!(*label)).clicked() && !sel {
-                if app.run("layer.symbology", json!({"type": code})).is_err() {
-                    ui.data_mut(|data| data.insert_temp(egui::Id::new("symbology_pending_field"), (l.id, (*code).to_string())));
-                } else {
-                    ui.data_mut(|data| data.remove::<(u32, String)>(egui::Id::new("symbology_pending_field")));
+                match app.run("layer.symbology", json!({"type": code})) {
+                    Err(error) => {
+                        let pending = PendingSymbology {
+                            project: app.session.opened,
+                            map: app.session.project.active_map,
+                            layer: l.id,
+                            kind: code,
+                            error: error.into(),
+                        };
+                        ui.data_mut(|data| data.insert_temp(pending_id, pending));
+                    }
+                    Ok(_) => clear_pending_symbology(ui.ctx()),
                 }
             }
         }
@@ -3372,27 +3430,27 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     let numeric: Vec<String> = l.dataset.fields.iter().filter(|f| f.ty.is_numeric()).map(|f| f.name.clone()).collect();
     let all: Vec<String> = l.dataset.fields.iter().map(|f| f.name.clone()).collect();
-    let pending = ui.data(|data| data.get_temp::<(u32, String)>(pending_id)).filter(|(layer, _)| *layer == l.id);
-    if let Some((_, kind)) = pending {
-        let fields = if kind == "unique" { &all } else { &numeric };
-        ui.horizontal(|ui| {
-            ui.label(tl!("Choose a field to apply this renderer:"));
-            egui::ComboBox::from_id_salt("symbology_pending_field_choice").selected_text(tl!("Select a field")).show_ui(ui, |ui| {
-                for field in fields {
-                    if ui.selectable_label(false, field).clicked()
-                        && app.run("layer.symbology", json!({"type": kind, "field": field})).is_ok()
-                    {
-                        ui.data_mut(|data| data.remove::<(u32, String)>(pending_id));
+    if let Some(pending) = ui.data(|data| data.get_temp::<PendingSymbology>(pending_id)) {
+        ui.label(egui::RichText::new(pending.error.as_ref()).color(ui.visuals().error_fg_color));
+        let fields = if pending.kind == "unique" { &all } else { &numeric };
+        if !fields.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(tl!("Choose a field to apply this renderer:"));
+                egui::ComboBox::from_id_salt("symbology_pending_field_choice").selected_text(tl!("Select a field")).show_ui(ui, |ui| {
+                    for field in fields {
+                        if ui.selectable_label(false, field).clicked() {
+                            match app.run("layer.symbology", json!({"type": pending.kind, "field": field})) {
+                                Ok(_) => clear_pending_symbology(ui.ctx()),
+                                Err(error) => {
+                                    ui.data_mut(|data| {
+                                        data.insert_temp(pending_id, PendingSymbology { error: error.into(), ..pending.clone() })
+                                    });
+                                }
+                            }
+                        }
                     }
-                }
+                });
             });
-        });
-        if fields.is_empty() {
-            if kind == "unique" {
-                ui.label(tl!("No field is available for this symbology."));
-            } else {
-                ui.label(tl!("No numeric field is available for this symbology."));
-            }
         }
         ui.add_space(6.0);
     }
@@ -4994,12 +5052,21 @@ mod tests {
         assert_eq!((app.ui.layer_filter.as_str(), app.ui.layer_filter_hid), ("", None));
     }
 
-    /// A pending renderer choice belongs only to the layer where the switch failed.
-    #[test]
-    fn pending_symbology_choice_clears_when_active_layer_changes() {
-        let mut app = RustGisApp::with_sample();
-        let (countries, cities) = (layer(&app, "Countries"), layer(&app, "Cities"));
-        app.session.active_layer = Some(countries);
+    fn symbology_retry_harness() -> egui_kittest::Harness<'static, RustGisApp> {
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.run(
+            "layer.addDataText",
+            json!({
+                "fileName": "retry.geojson",
+                "text": r#"{"type":"FeatureCollection","features":[
+                    {"type":"Feature","properties":{"a_empty":null,"b_empty":null,"c_valid":10},"geometry":{"type":"Point","coordinates":[14,47]}},
+                    {"type":"Feature","properties":{"a_empty":null,"b_empty":null,"c_valid":20},"geometry":{"type":"Point","coordinates":[15,48]}},
+                    {"type":"Feature","properties":{"a_empty":100,"b_empty":200,"c_valid":30},"geometry":{"type":"Point","coordinates":[16,49]}}
+                ]}"#
+            }),
+        )
+        .unwrap();
+        app.run("layer.definitionQuery", json!({"where": "c_valid < 30"})).unwrap();
         app.ui.open_right(RightPane::Symbology);
         let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(64).build_ui_state(
             |ui, app: &mut RustGisApp| {
@@ -5009,14 +5076,137 @@ mod tests {
             },
             app,
         );
-        let pending_id = egui::Id::new("symbology_pending_field");
-        h.ctx.data_mut(|data| data.insert_temp(pending_id, (countries, "graduated".to_owned())));
-        h.step();
-        assert!(h.ctx.data(|data| data.get_temp::<(u32, String)>(pending_id).is_some()));
+        h.run_steps(6);
+        h
+    }
 
-        h.state_mut().session.active_layer = Some(cities);
-        h.step();
-        assert!(h.ctx.data(|data| data.get_temp::<(u32, String)>(pending_id).is_none()));
+    /// A different populated field fixes classification without changing the query or styling on failure.
+    #[test]
+    fn failed_symbology_switch_retries_another_numeric_field() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        let id = layer(h.state(), "retry");
+        let before = h.state().session.map().layer(id).unwrap().renderer.clone();
+        let undo = h.state().session.undo_depth();
+        h.get_by_label("Graduated Colors").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.map().layer(id).unwrap().renderer, before);
+        assert_eq!(h.state().session.undo_depth(), undo);
+        assert!(h.query_all_by_label("'a_empty' has no numeric values").next().is_some());
+
+        for field in ["b_empty", "c_valid"] {
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("Select a field")).unwrap().click();
+            h.run_steps(3);
+            h.get_by_label(field).click();
+            h.run_steps(3);
+            if field == "b_empty" {
+                assert_eq!(h.state().session.map().layer(id).unwrap().renderer, before);
+                assert_eq!(h.state().session.undo_depth(), undo);
+                assert!(h.query_all_by_label("'b_empty' has no numeric values").next().is_some());
+            }
+        }
+        let Renderer::Graduated { field, breaks, .. } = &h.state().session.map().layer(id).unwrap().renderer else {
+            panic!("the populated field must apply Graduated Colors");
+        };
+        assert_eq!(field, "c_valid");
+        assert_eq!(breaks.last(), Some(&20.0), "only the rows kept by the query are classified");
+        assert_eq!(h.state().session.undo_depth(), undo + 1);
+        assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_none());
+    }
+
+    /// No numeric candidates means an explanation, not an empty field selector.
+    #[test]
+    fn failed_symbology_without_numeric_fields_has_no_empty_picker() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        h.state_mut()
+            .run(
+                "layer.addDataText",
+                json!({
+                    "fileName": "text-only.geojson",
+                    "text": r#"{"type":"Feature","properties":{"name":"Liezen"},"geometry":{"type":"Point","coordinates":[14,47]}}"#
+                }),
+            )
+            .unwrap();
+        h.run_steps(3);
+        h.get_by_label("Graduated Colors").click();
+        h.run_steps(3);
+        assert!(h.query_all_by_label("no numeric field is available for this symbology").next().is_some());
+        assert!(
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).all(|n| n.value().as_deref() != Some("Select a field")),
+            "an empty picker cannot help choose a numeric field"
+        );
+        let id = layer(h.state(), "text-only");
+        assert!(matches!(h.state().session.map().layer(id).unwrap().renderer, Renderer::Single(_)));
+    }
+
+    /// A closed pane must not retain a failed request through a layer or map round trip.
+    #[test]
+    fn pending_symbology_clears_across_closed_pane_context_changes() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        let map = h.state().session.map().name.clone();
+        let id = layer(h.state(), "retry");
+        h.state_mut()
+            .run("layer.addDataText", json!({"fileName": "other.csv", "text": "x,y,name\n1,2,Other\n", "x": "x", "y": "y"}))
+            .unwrap();
+        let other = layer(h.state(), "other");
+        h.state_mut().run("map.new", json!({"name": "Other map"})).unwrap();
+        h.state_mut()
+            .run("layer.addDataText", json!({"fileName": "collision.csv", "text": "x,y,name\n1,2,Other\n", "x": "x", "y": "y"}))
+            .unwrap();
+        assert_eq!(layer(h.state(), "collision"), id, "layer ids overlap across maps");
+        h.state_mut().run("map.activate", json!({"name": map})).unwrap();
+        h.state_mut().run("layer.select", json!({"layer": id})).unwrap();
+        h.run_steps(3);
+
+        for map_change in [false, true] {
+            h.get_by_label("Graduated Colors").click();
+            h.run_steps(3);
+            assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_some());
+            h.state_mut().ui.right = None;
+            if map_change {
+                h.state_mut().run("map.activate", json!({"name": "Other map"})).unwrap();
+                h.state_mut().run("map.activate", json!({"name": map})).unwrap();
+                h.state_mut().run("layer.select", json!({"layer": id})).unwrap();
+            } else {
+                h.state_mut().session.active_layer = Some(other);
+                h.run_steps(3);
+                h.state_mut().session.active_layer = Some(id);
+            }
+            h.state_mut().ui.open_right(RightPane::Symbology);
+            h.run_steps(3);
+            assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_none());
+            assert!(matches!(h.state().session.map().layer(id).unwrap().renderer, Renderer::Single(_)));
+        }
+    }
+
+    /// Both the existing field editor and commands from outside the pane supersede a failed switch.
+    #[test]
+    fn successful_symbology_edits_supersede_a_pending_switch() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        let id = layer(h.state(), "retry");
+        for through_field_editor in [true, false] {
+            h.state_mut().run("layer.symbology", json!({"type": "unique", "field": "a_empty"})).unwrap();
+            h.run_steps(3);
+            h.get_by_label("Graduated Colors").click();
+            h.run_steps(3);
+            assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_some());
+            if through_field_editor {
+                h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some("a_empty")).unwrap().click();
+                h.run_steps(3);
+                h.get_by_label("c_valid").click();
+            } else {
+                h.state_mut().run("layer.symbology", json!({"type": "unique", "field": "c_valid"})).unwrap();
+            }
+            h.run_steps(3);
+            let Renderer::Unique { field, .. } = &h.state().session.map().layer(id).unwrap().renderer else {
+                panic!("the successful edit must keep Unique Values");
+            };
+            assert_eq!(field, "c_valid");
+            assert!(h.query_all_by_label("Choose a field to apply this renderer:").next().is_none());
+        }
     }
 
     /// The Symbology pane's Transparency slider changes the layer while it's dragged, not only

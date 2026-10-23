@@ -760,9 +760,7 @@ pub struct RustGisApp {
     /// A screen snapshot an agent attached through the relay asked for, while it is captured.
     #[cfg(not(target_arch = "wasm32"))]
     relay_shot: Option<relayshot::Shot>,
-    /// The frame's `egui::Context`, kept so `ui.mcpRelay` can hand the relay its wake callback:
-    /// a queued message asks for a repaint, or it waits for the user to move the mouse.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The frame's context, for pane-local command cleanup and the native relay's wake callback.
     frame_ctx: Option<egui::Context>,
     /// Set when `ui.mcpRelay` started the relay before the first frame, where there is no context
     /// to give its wake callback yet: `logic` installs the wake as soon as a context exists.
@@ -873,7 +871,6 @@ impl RustGisApp {
             relay_shot: None,
             #[cfg(not(target_arch = "wasm32"))]
             connect: Default::default(),
-            #[cfg(not(target_arch = "wasm32"))]
             frame_ctx: None,
             #[cfg(not(target_arch = "wasm32"))]
             relay_wake_pending: false,
@@ -1432,6 +1429,11 @@ impl RustGisApp {
         let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
         if let Err(e) = &r {
             log::info!("{id}: {e}");
+        }
+        if r.is_ok()
+            && let Some(ctx) = &self.frame_ctx
+        {
+            panes::symbology_command_finished(self, ctx, id);
         }
         // A project replacing this one hasn't been saved in the browser yet (opening a file
         // names it again).
@@ -3177,11 +3179,11 @@ impl RustGisApp {
 
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
+        self.frame_ctx = Some(ctx.clone());
         // The MCP relay: what attached agents sent runs here, on this session, before the frame
         // draws (Session lives on this thread; the listener only queues messages).
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.frame_ctx = Some(ctx.clone());
             // Agents the user turned on last time: the relay starts with the app.
             connectui::resume(self);
             if let Some(relay) = &self.relay {
@@ -3215,6 +3217,7 @@ impl RustGisApp {
         }
         // A project an agent or a script opened, before the frame draws the old one's fields.
         layoutview::follow_project(self);
+        panes::follow_symbology(self, ctx);
         // Fonts installed last frame are active now.
         self.fonts_pending = false;
         i18n::set_current(self.lang());
