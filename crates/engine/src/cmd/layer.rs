@@ -1372,15 +1372,6 @@ pub(super) fn database_tables(_s: &mut Session, p: &Value) -> CmdResult {
     }
 }
 
-/// The geometry tables of a live database server, with the schema, name, column and type of
-/// each (`connection.browse` groups them by schema).
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn database_table_details(p: &Value) -> Result<Vec<Value>, String> {
-    let db = database_param(p).ok_or("database is required")?;
-    let live = LiveDb::connect(&db).ok_or("not a database server")?.map_err(|e| format!("{}: {e}", db.short()))?;
-    Ok(live.tables().map_err(|e| format!("{}: {e}", db.short()))?.iter().map(LiveTable::detail).collect())
-}
-
 /// Adds the tables of a database (a PostgreSQL connection or a DuckDB file) that have a geometry
 /// column, or the one `layer` names.
 fn add_database(s: &mut Session, p: &Value) -> CmdResult {
@@ -1499,16 +1490,6 @@ impl LiveTable {
             LiveTable::Mysql(t) => t.label(),
             LiveTable::Sqlserver(t) => t.label(),
         }
-    }
-
-    /// The table as a browser lists it: its label for `layer.addDatabase`, and what it is made of.
-    fn detail(&self) -> Value {
-        let (schema, name, column, kind) = match self {
-            LiveTable::Postgis(t) => (&t.schema, &t.name, &t.column, &t.kind),
-            LiveTable::Mysql(t) => (&t.schema, &t.name, &t.column, &t.kind),
-            LiveTable::Sqlserver(t) => (&t.schema, &t.name, &t.column, &t.kind),
-        };
-        json!({"label": self.label(), "schema": schema, "name": name, "column": column, "kind": kind})
     }
 }
 
@@ -1909,7 +1890,11 @@ pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
         layer.name = format!("{base} ({i})");
     }
     let id = s.map_mut().add_layer(layer);
+    super::connections::clear_active();
     s.project.normalize();
+    super::connections::restore_active(s);
+    super::connections::resolve_project(s);
+    super::connections::note_waiting(s);
     s.active_layer = Some(id);
     Ok(json!({"layer": id}))
 }

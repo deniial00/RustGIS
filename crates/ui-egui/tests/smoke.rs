@@ -4,6 +4,9 @@ use egui_kittest::kittest::Queryable;
 use rustgis_ui_egui::RustGisApp;
 use serde_json::json;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod remembered_database;
+
 /// Builds a headless World Atlas UI for interaction tests.
 fn harness() -> egui_kittest::Harness<'static, RustGisApp> {
     egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_max_steps(64).build_ui_state(

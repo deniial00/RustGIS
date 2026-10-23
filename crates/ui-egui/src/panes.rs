@@ -1802,18 +1802,38 @@ fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
         let _ = app.run("ui.refreshService", json!({"layer":l.id}));
         ui.close();
     }
-    let login = l
-        .source
-        .as_ref()
-        .is_some_and(|s| s.login)
-        .then(|| app.session.connections.for_layer(l))
-        .flatten()
-        .map(|c| (c.id.clone(), c.name.clone()));
-    if let Some((id, name)) = login
-        && ui.button(crate::i18n::fmt("Log In to {name}…", &[("name", &name)])).clicked()
-    {
-        crate::connectionui::log_in(app, &id);
-        ui.close();
+    let login = l.source.as_ref().and_then(|s| {
+        let (kind, database) = rustgis_engine::connections::layer_database(s)?;
+        let connections: Vec<_> = app.session.connections.matching_database(kind, database).into_iter().cloned().collect();
+        let (_, key) = rustgis_engine::connections::database_key(database)?;
+        if !s.login && !app.session.database_logins.requests(app.session.opened).any(|r| r.kind == kind && r.key == key) {
+            return None;
+        }
+        Some((kind, key, connections))
+    });
+    if let Some((kind, key, connections)) = login {
+        if connections.len() == 1 {
+            let c = &connections[0];
+            if ui.button(crate::i18n::fmt("Log In to {name}…", &[("name", &c.name)])).clicked() {
+                crate::connectionui::log_in(app, &c.id);
+                ui.close();
+            }
+        } else if connections.len() > 1 && ui.button(tl!("Choose Connection…")).clicked() {
+            let opened = app.session.opened;
+            crate::connectionui::choose(
+                app,
+                rustgis_engine::connections::LoginRequest {
+                    reason: rustgis_engine::connections::LoginReason::Choose,
+                    kind,
+                    key,
+                    connections: connections.iter().map(|c| c.id.clone()).collect(),
+                    layers: vec![l.id],
+                    opened,
+                    prompted: true,
+                },
+            );
+            ui.close();
+        }
     }
     let items: &[(&str, &str)] = if l.is_raster() {
         &[("Zoom To Layer", "layer.zoomTo"), ("Symbology", "ui.pane.symbology")]

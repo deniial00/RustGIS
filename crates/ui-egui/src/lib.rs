@@ -894,6 +894,9 @@ impl RustGisApp {
     pub fn with_services(mut self, services: Services) -> Self {
         self.services = services;
         sourcespane::load_connections(&mut self);
+        // Saved database passwords live in the system's store, which the engine reaches through
+        // the session so the assistant and scripts see the same logins as the interface.
+        self.session.database_logins.set_store(self.services.secrets.clone());
         if let Some(lang) = self.services.load_pref.as_ref().and_then(|load| load("language")) {
             self.ui.language = lang;
         }

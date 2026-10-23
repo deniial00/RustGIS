@@ -465,6 +465,10 @@ pub struct Session {
     pub sources: sources::Sources,
     /// Saved connections (`connection.*`): kept with the app's preferences, not the project; never a secret.
     pub connections: connections::Connections,
+    /// The database logins of this run: the system's secret store (desktop app only), passwords
+    /// given and read, which saved connection each database uses, and the logins to ask for. Never
+    /// saved; see [`connections::DatabaseLogins`].
+    pub database_logins: connections::DatabaseLogins,
     /// How rasters added from now on are drawn (`raster.setDefaultStyle`; kept with the app's
     /// preferences, not the project).
     pub raster_defaults: rustgis_map::RasterDefaults,
@@ -671,6 +675,7 @@ impl Session {
             dirty: false,
             sources: sources::Sources::default(),
             connections: connections::Connections::default(),
+            database_logins: connections::DatabaseLogins::default(),
             raster_defaults: rustgis_map::RasterDefaults::default(),
             registry: Registry { commands: cmd::all() },
             revision: 1,

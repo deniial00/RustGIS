@@ -2,6 +2,14 @@ use serde_json::{Value, json};
 
 use crate::{Project, Session, sample};
 
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "tests/remembered_database.rs"]
+mod remembered_database;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "tests/remembered_database_packets.rs"]
+mod remembered_database_packets;
+
 /// Keeps tests away from the user's installed plugins.
 fn isolate_plugins() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -1327,9 +1335,10 @@ fn hostile_params_never_panic() {
         json!({"transform": "affine", "crs": 32613, "pointsCrs": 4326, "cellSize": 1e-300, "path": "/nonexistent/x.tif", "points": [[0, 0, 1, 1], [1, 0, 2, 1], [0, 1, 1, 2]]}),
         json!({"points": [[0, 0, f64::MAX, f64::MAX], [1, 0, -f64::MAX, f64::MAX], [0, 1, f64::MAX, -f64::MAX]], "compare": true}),
         // Connections: junk kinds, options and secrets; no connection exists in a fresh session.
-        json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "accessKeyId": "A", "secretAccessKey": 9}),
+        json!({"id": "c1", "kind": "s3", "address": "http://127.0.0.1:9", "name": "\u{7}", "group": 5, "options": {"credentials": "nope", "buckets": "NO_", "region": [1]}, "password": 7, "remember": [true], "accessKeyId": "A", "secretAccessKey": 9}),
         json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
         json!({"kind": "wms", "address": "http://127.0.0.1:9/wms", "probe": "x", "answer": 7}),
+        json!({"id": {"unexpected":"object"}, "remember": "true", "password": []}),
         json!({"kind": "stac", "address": "http://127.0.0.1:9/stac", "answer": "\u{0}{"}),
         json!({"id": "c1", "node": "s3:/\u{7}", "probe": true, "answer": 7, "documents": "x"}),
     ];
@@ -9789,9 +9798,9 @@ fn database_layers_wait_for_their_connection_login() {
     assert_eq!(result["failed"], 2);
     assert!(t.map().layers.iter().take(2).all(|l| l.source.as_ref().unwrap().login));
     assert_eq!(t.run("connection.list", &Value::Null).unwrap()["connections"][0]["waiting"], 2);
-    // Duplicate saved connections use list order for reporting, but either can log in.
+    // Duplicate addresses have no inferred connection identity; either can be selected explicitly.
     t.run("connection.new", &json!({"kind":"postgres","name":"Same database","address":dsn})).unwrap();
-    assert_eq!(t.connections.for_layer(&t.map().layers[0]).unwrap().name, "Production GIS");
+    assert!(t.connections.for_layer(&t.map().layers[0]).is_none());
     let result = t.run("connection.login", &json!({"id":"Same database","password":"wrong"})).unwrap();
     assert_eq!(result["failed"], 2);
 }
@@ -9898,7 +9907,7 @@ fn connections_commands() {
         assert_eq!(list["connections"][0]["loggedIn"], true);
         assert!(!s.connections.to_json().contains("pw"));
         let copy = s.run("connection.duplicate", &json!({"id":db["id"]})).unwrap();
-        assert_eq!(copy["loggedIn"], true, "the existing password store is shared by public DSN");
+        assert_eq!(copy["loggedIn"], false, "a duplicate must not inherit another saved ID's session login");
         let edited = s
             .run("connection.edit", &json!({"id":db["id"],"address":"postgres:host=127.0.0.1 port=9 dbname=connections_other user=u"}))
             .unwrap();
@@ -9906,7 +9915,7 @@ fn connections_commands() {
         s.run("connection.remove", &json!({"id":db["id"]})).unwrap();
         let list = s.run("connection.list", &json!({"kind":"postgres"})).unwrap();
         assert_eq!(list["connections"][0]["id"], copy["id"]);
-        assert_eq!(list["connections"][0]["loggedIn"], true, "removing a shortcut must not log out another connection using that DSN");
+        assert_eq!(list["connections"][0]["loggedIn"], false);
     }
     s.run("connection.new", &json!({"kind":"s3","name":"conn-test-s3","options":{"credentials":"keys","buckets":"b11"}})).unwrap();
     assert!(s.run("connection.test", &json!({"id":"conn-test-s3"})).unwrap_err().contains("log in first"));
@@ -9930,6 +9939,7 @@ fn connections_commands() {
         "connection.duplicate",
         "connection.remove",
         "connection.login",
+        "connection.forgetPassword",
         "connection.test",
         "connection.browse",
     ] {

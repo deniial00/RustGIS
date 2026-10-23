@@ -13,6 +13,14 @@ use crate::{CmdResult, CommandSpec as C, Session};
 #[path = "connection_browse.rs"]
 mod browse;
 
+#[path = "connection_logins.rs"]
+mod logins;
+#[cfg(not(target_arch = "wasm32"))]
+use logins::request_password;
+pub(crate) use logins::{clear_active, resolve_project, restore_active};
+#[path = "connection_use.rs"]
+mod connection_use;
+
 pub fn commands() -> Vec<C> {
     vec![
         C::new("connection.list", "List Connections", "Home › Add › Data Sources", list).view().params(
@@ -27,8 +35,9 @@ pub fn commands() -> Vec<C> {
         C::new("connection.duplicate", "Duplicate Connection", "Home › Add › Data Sources", duplicate).view().params(r#"{"id": "a connection's id or name", "name"?: text}"#),
         C::new("connection.remove", "Remove Connection", "Home › Add › Data Sources", remove).view().params(r#"{"id": "a connection's id or name"}"#),
         C::new("connection.login", "Log In to Connection", "Home › Add › Data Sources", login_command).view().params(
-            r#"{"id": "a connection's id or name", "password"?: "a database connection's, kept for this session only; the project's layers that read its database and couldn't be read open again", "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "an S3 connection's keys (credentials: keys), kept for this session only"}"#,
+            r#"{"id": "a connection's id or name; without password explicitly selects its existing session or remembered database password", "password"?: "database password, session-only by default", "remember"?: "boolean, default false: desktop OS-store opt-in for this password; S3 keys remain session-only", "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: text}"#,
         ),
+        C::new("connection.forgetPassword", "Forget Saved Password", "Home › Add › Data Sources", forget_password).view().params(r#"{"id": "a database connection's id or name"}"#),
         C::new("connection.test", "Test Connection", "Home › Add › Data Sources", test).view().params(
             r#"{"id"?: "a connection's id or name", "kind"?: "postgres"|"mysql"|"sqlserver"|"service"|"wms"|"wmts"|"wfs"|"wcs"|"ogcapi"|"arcgis"|"csw"|"stac"|"s3", "name"?: text, "group"?: text, "address"?: text, "options"?: "an unsaved connection, as connection.new (when no id)", "password"?: text, "accessKeyId"?: text, "secretAccessKey"?: text, "sessionToken"?: "as connection.login (logs in first)", "probe"?: "true: only the address the test reads, {fetch} (null for databases, which their driver tests)", "answer"?: "non-database kinds only: what that address returned, when the app fetched it (no network request then); databases ignore answer and test through their driver"}"#,
         ),
@@ -38,27 +47,11 @@ pub fn commands() -> Vec<C> {
     ]
 }
 
-fn shown(c: &Connection) -> Value {
+fn shown(s: &Session, c: &Connection) -> Value {
     let database = DATABASE_KINDS.contains(&c.kind.as_str());
     let available = !database || !cfg!(target_arch = "wasm32");
-    let logged_in = if c.kind == "s3" {
-        s3::connection(&c.name).is_some()
-    } else if database {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use rustgis_data::source::duckdb::{self, Database};
-            match Database::parse(&c.address) {
-                Database::Postgres(d) | Database::Mysql(d) | Database::Sqlserver(d) => duckdb::has_password(&d),
-                Database::File(_) => false,
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            false
-        }
-    } else {
-        false
-    };
+    let logged_in =
+        if c.kind == "s3" { s3::connection(&c.name).is_some() } else { database && s.database_logins.has_session_password(&c.id) };
     let add_with = "connection.browse {id}, then {id, node} for a child's node; run a dataset's add {command, params}";
     let mut out = serde_json::to_value(c).unwrap_or(Value::Null);
     out["available"] = json!(available);
@@ -66,6 +59,7 @@ fn shown(c: &Connection) -> Value {
         out["why"] = json!(DESKTOP_ONLY);
     }
     out["loggedIn"] = json!(logged_in);
+    out["remembered"] = json!(c.remembered);
     out["addWith"] = json!(add_with);
     out
 }
@@ -91,7 +85,7 @@ pub(crate) fn waiting(s: &Session) -> Vec<(Connection, usize)> {
         for layer in s.project.maps.iter().flat_map(|m| &m.layers) {
             let Some(src) = layer.source.as_ref().filter(|src| src.login) else { continue };
             let Some((kind, database)) = crate::connections::layer_database(src) else { continue };
-            if let Some(c) = s.connections.for_database(kind, database) {
+            if let [c] = s.connections.matching_database(kind, database).as_slice() {
                 *counts.entry(c.id.clone()).or_default() += 1;
             }
         }
@@ -109,6 +103,22 @@ pub(crate) fn note_waiting(s: &mut Session) {
     for (c, n) in waiting(s) {
         s.notify(format!("{n} layer(s) read the database of the connection '{}' and need its password: right-click the connection in Data Sources › Connections, or one of the layers, and choose Log In…", c.name), false);
     }
+    let mut ambiguous = BTreeMap::<Vec<String>, usize>::new();
+    for l in s.project.maps.iter().flat_map(|m| &m.layers) {
+        let Some(src) = l.source.as_ref().filter(|src| src.login) else { continue };
+        let Some((kind, database)) = crate::connections::layer_database(src) else { continue };
+        let candidates = s.connections.matching_database(kind, database);
+        if candidates.len() > 1 {
+            let labels = candidates.iter().map(|c| format!("{} ({})", c.name, c.id)).collect();
+            *ambiguous.entry(labels).or_default() += 1;
+        }
+    }
+    for (candidates, count) in ambiguous {
+        s.notify(
+            format!("{count} layer(s) need an explicit connection choice: {}. Use connection.login {{id}}.", candidates.join(", ")),
+            false,
+        );
+    }
 }
 
 fn list(s: &mut Session, p: &Value) -> CmdResult {
@@ -123,12 +133,16 @@ fn list(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"connections": s.connections.connections.iter()
         .filter(|c| kind.is_none_or(|k| c.kind == k) && group.is_none_or(|g| c.group.chars().flat_map(char::to_lowercase).eq(g.chars().flat_map(char::to_lowercase))))
         .map(|c| {
-            let mut out = shown(c);
+            let mut out = shown(s, c);
             if let Some(&n) = waiting.get(&c.id) {
                 out["waiting"] = json!(n);
             }
             out
-        }).collect::<Vec<_>>() }))
+        }).collect::<Vec<_>>(),
+        "loginRequests": s.database_logins.requests(s.opened).map(|r| json!({
+            "reason":r.reason.name(), "database":crate::connections::database_label(r.kind, &r.key),
+            "connections":r.connections, "layers":r.layers.len()
+        })).collect::<Vec<_>>() }))
 }
 
 fn new(s: &mut Session, p: &Value) -> CmdResult {
@@ -142,11 +156,12 @@ fn new(s: &mut Session, p: &Value) -> CmdResult {
     };
     let explicit = !c.name.trim().is_empty();
     let (c, stripped) = s.connections.add(c, explicit)?;
-    Ok(shown_stripped(&c, stripped))
+    resolve_project(s);
+    Ok(shown_stripped(s, &c, stripped))
 }
 
-fn shown_stripped(c: &Connection, stripped: bool) -> Value {
-    let mut out = shown(c);
+fn shown_stripped(s: &Session, c: &Connection, stripped: bool) -> Value {
+    let mut out = shown(s, c);
     if stripped {
         out["stripped"] = json!(true);
     }
@@ -169,14 +184,24 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(v) = p.get("options") {
         c.options = options(v)?;
     }
-    let (c, stripped) = s.connections.update(&old.id, c)?;
+    let mut proposed = s.connections.clone();
+    let (c, stripped) = proposed.update(&old.id, c)?;
+    if DATABASE_KINDS.contains(&old.kind.as_str()) && old.address != c.address {
+        delete_account(s, &old)?;
+        clear_identity(s, &old.id);
+    }
+    s.connections = proposed;
+    if old.address != c.address {
+        s.database_logins.clear_requests();
+        resolve_project(s);
+    }
     if c.kind == "s3" && (old.name != c.name || old.address != c.address || old.options != c.options) {
         s3::disconnect(&old.name);
         if old.name != c.name {
             s3::disconnect(&c.name);
         }
     }
-    Ok(shown_stripped(&c, stripped))
+    Ok(shown_stripped(s, &c, stripped))
 }
 
 fn duplicate(s: &mut Session, p: &Value) -> CmdResult {
@@ -187,46 +212,136 @@ fn duplicate(s: &mut Session, p: &Value) -> CmdResult {
         c.name = name.into();
     }
     let (c, _) = s.connections.add(c, explicit)?;
-    Ok(shown(&c))
+    s.database_logins.clear_requests();
+    resolve_project(s);
+    Ok(shown(s, &c))
 }
 
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let c = found(s, p)?.clone();
-    s.connections.remove(&c.id);
+    let mut proposed = s.connections.clone();
+    proposed.remove(&c.id);
+    if DATABASE_KINDS.contains(&c.kind.as_str()) {
+        delete_account(s, &c)?;
+        clear_identity(s, &c.id);
+    }
+    s.connections = proposed;
+    s.database_logins.clear_requests();
+    resolve_project(s);
     if c.kind == "s3" {
         s3::disconnect(&c.name);
     }
     Ok(json!({"removed": c.id}))
 }
 
+fn delete_account(s: &mut Session, c: &Connection) -> Result<(), String> {
+    if s.database_logins.has_store() {
+        s.database_logins
+            .delete(&c.id)
+            .map_err(|_| "The saved password couldn't be deleted. The connection was left unchanged.".to_string())
+    } else if c.remembered {
+        Err("The saved password couldn't be deleted. The connection was left unchanged.".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn clear_identity(s: &mut Session, id: &str) {
+    s.database_logins.forget_connection(id);
+    #[cfg(not(target_arch = "wasm32"))]
+    rustgis_data::source::duckdb::forget_connection_password(id);
+}
+
+fn forget_password(s: &mut Session, p: &Value) -> CmdResult {
+    let c = found(s, p)?.clone();
+    if !DATABASE_KINDS.contains(&c.kind.as_str()) {
+        return Err("only database connections have saved passwords".into());
+    }
+    delete_account(s, &c)?;
+    s.connections.set_remembered(&c.id, false);
+    s.database_logins.forget_saved(&c.id);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        rustgis_data::source::duckdb::forget_connection_password(&c.id);
+        if let Some(pw) = s.database_logins.session_password(&c.id)
+            && let Some((_, key)) = crate::connections::database_key(&c.address)
+        {
+            rustgis_data::source::duckdb::set_connection_password(&key, &c.id, Some(pw.expose()));
+        }
+    }
+    let mut c = c;
+    c.remembered = false;
+    Ok(shown(s, &c))
+}
+
 #[derive(Default)]
 struct Reopened {
     opened: usize,
     failed: usize,
+    /// The server refused this attempt's password: desktop database reopen only.
+    #[cfg(not(target_arch = "wasm32"))]
+    refused: bool,
+    password_saved: Option<bool>,
+    /// A store save was asked for and failed: the fixed warning belongs to this case only.
+    save_failed: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn reopen(s: &mut Session, c: &Connection, password: &str) -> Reopened {
+fn reopen(s: &mut Session, c: &Connection, saved: bool, all_unopened: bool) -> Reopened {
     let Some(key) = crate::connections::database_key(&c.address) else { return Reopened::default() };
     let mut result = Reopened::default();
     let mut first_error = None;
     for layer in s.project.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
-        let Some(src) = layer.source.as_mut().filter(|src| src.login) else { continue };
+        let Some(src) = layer.source.as_mut().filter(|src| src.login || all_unopened && !src.is_open()) else { continue };
         let Some((kind, database)) = crate::connections::layer_database(src) else { continue };
         if kind != key.0 || crate::connections::database_key(&crate::sources::redact(database)).as_ref() != Some(&key) {
             continue;
         }
-        if let Some(password_key) = crate::connections::database_key(database) {
-            rustgis_data::source::duckdb::remember_password(&password_key.1, password);
+        if saved && result.refused {
+            src.login = true;
+            src.error = first_error.clone();
+            result.failed += 1;
+            continue;
         }
         src.error = None;
         match src.open() {
             Ok(()) => result.opened += 1,
             Err(e) => {
                 result.failed += 1;
+                result.refused |= src.login;
                 first_error.get_or_insert(e);
             }
         }
+    }
+    if result.refused {
+        use crate::connections::{LoginReason, LoginRequest};
+        if saved {
+            s.database_logins.reject(&c.id);
+            rustgis_data::source::duckdb::forget_connection_password(&c.id);
+            s.database_logins.drop_activation(&key.1);
+        }
+        let layers = s
+            .project
+            .maps
+            .iter()
+            .flat_map(|m| &m.layers)
+            .filter_map(|l| {
+                let src = l.source.as_ref().filter(|src| src.login)?;
+                let (_, db) = crate::connections::layer_database(src)?;
+                (crate::connections::database_key(&crate::sources::redact(db)).as_ref() == Some(&key)).then_some(l.id)
+            })
+            .collect();
+        s.database_logins.request(LoginRequest {
+            reason: LoginReason::Password,
+            kind: key.0,
+            key: key.1.clone(),
+            connections: vec![c.id.clone()],
+            layers,
+            opened: s.opened,
+            prompted: false,
+        });
+    } else {
+        s.database_logins.clear_requests_for(key.0, &key.1);
     }
     if result.opened > 0 {
         s.notify(format!("{} layer(s) from the connection '{}' opened again", result.opened, c.name), false);
@@ -246,6 +361,10 @@ fn reopen(s: &mut Session, c: &Connection, password: &str) -> Reopened {
 }
 
 fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String> {
+    let remember = p.get("remember").map(|v| v.as_bool().ok_or("remember is a boolean")).transpose()?.unwrap_or(false);
+    if remember && !DATABASE_KINDS.contains(&c.kind.as_str()) {
+        return Err("only database connections can remember a password".into());
+    }
     if DATABASE_KINDS.contains(&c.kind.as_str()) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -253,9 +372,39 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String>
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let pw = ps(p, "password").filter(|t| !t.is_empty()).ok_or("password is required")?;
-            super::layer::database_param(&json!({"database": c.address, "password": pw}));
-            return Ok(reopen(s, c, pw));
+            let key = crate::connections::database_key(&c.address).ok_or("not a database connection")?;
+            rustgis_data::source::duckdb::set_connection_password(&key.1, &c.id, None);
+            s.database_logins.drop_activation(&key.1);
+            s.database_logins.retry_saved(&c.id);
+            let typed = ps(p, "password").filter(|t| !t.is_empty());
+            // A password typed for this address wins over any saved one (explicit input first).
+            let address_typed = typed.is_none() && rustgis_data::source::duckdb::has_explicit_password(&key.1);
+            let (password, saved) = match typed {
+                Some(pw) => {
+                    s.database_logins.set_session_password(&c.id, pw);
+                    (Some(rustgis_data::secrets::Secret::new(pw)), false)
+                }
+                None if address_typed => (None, false),
+                None => {
+                    let (pw, saved) = credential(s, c)?.ok_or("password is required")?;
+                    (Some(pw), saved)
+                }
+            };
+            let all_unopened = s.database_logins.requests(s.opened).any(|r| r.kind == key.0 && r.key == key.1);
+            s.database_logins.select(key.0, &key.1, &c.id);
+            if let Some(password) = &password {
+                activate(s, c, password.expose());
+            }
+            let mut result = reopen(s, c, saved, all_unopened);
+            if remember {
+                let stored = !result.refused && typed.is_some_and(|pw| s.database_logins.save(c, pw));
+                if stored {
+                    s.connections.set_remembered(&c.id, true);
+                }
+                result.save_failed = !stored && typed.is_some() && !result.refused;
+                result.password_saved = Some(stored);
+            }
+            return Ok(result);
         }
     }
     if c.kind != "s3" {
@@ -292,12 +441,49 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String>
 fn login_command(s: &mut Session, p: &Value) -> CmdResult {
     let c = found(s, p)?.clone();
     let result = login(s, &c, p)?;
-    let mut out = shown(&c);
+    let mut c = c;
+    c.remembered = s.connections.find(&c.id).is_some_and(|c| c.remembered);
+    let mut out = shown(s, &c);
+    if let Some(saved) = result.password_saved {
+        out["passwordSaved"] = json!(saved);
+        // A refused password, or one nothing was typed for, isn't "available for this session":
+        // the fixed warning belongs to a store that couldn't keep a usable password.
+        if result.save_failed {
+            out["warning"] = json!("The password is available for this session, but wasn't remembered on this computer.");
+        }
+    }
     if result.opened + result.failed > 0 {
         out["reopened"] = json!(result.opened);
         out["failed"] = json!(result.failed);
     }
     Ok(out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn activate(s: &mut Session, c: &Connection, password: &str) {
+    if let Some((_, key)) = crate::connections::database_key(&c.address) {
+        rustgis_data::source::duckdb::set_connection_password(&key, &c.id, Some(password));
+        s.database_logins.note_activation(&key, &c.id);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn credential(s: &mut Session, c: &Connection) -> Result<Option<(rustgis_data::secrets::Secret, bool)>, String> {
+    if let Some(pw) = s.database_logins.session_password(&c.id) {
+        return Ok(Some((pw.clone(), false)));
+    }
+    if !c.remembered || s.database_logins.is_rejected(&c.id) {
+        return Ok(None);
+    }
+    match s.database_logins.load(c) {
+        crate::connections::SavedPassword::Found(pw) => Ok(Some((pw, true))),
+        crate::connections::SavedPassword::Absent => {
+            s.connections.set_remembered(&c.id, false);
+            s.notify("The saved password is missing or doesn't match this connection.", true);
+            Ok(None)
+        }
+        crate::connections::SavedPassword::Unusable => Err("The saved password couldn't be used on this computer.".into()),
+    }
 }
 
 fn tested(s: &Session, p: &Value) -> Result<Connection, String> {
@@ -367,9 +553,22 @@ fn answered(s: &mut Session, c: &Connection, text: &str) -> CmdResult {
 
 fn test(s: &mut Session, p: &Value) -> CmdResult {
     let c = tested(s, p)?;
+    if DATABASE_KINDS.contains(&c.kind.as_str()) && b(p, "probe").unwrap_or(false) {
+        return Ok(json!({"connection":c.id, "fetch":null}));
+    }
     let secrets = ["password", "accessKeyId", "secretAccessKey", "sessionToken"].iter().any(|k| ps(p, k).is_some_and(|v| !v.is_empty()));
-    if secrets {
-        login(s, &c, p)?;
+    if DATABASE_KINDS.contains(&c.kind.as_str()) {
+        if let Some(pw) = ps(p, "password").filter(|p| !p.is_empty())
+            && !c.id.is_empty()
+        {
+            s.database_logins.set_session_password(&c.id, pw);
+        }
+    } else if secrets {
+        let mut input = p.clone();
+        if let Some(o) = input.as_object_mut() {
+            o.remove("remember");
+        }
+        login(s, &c, &input)?;
     }
     if c.kind == "s3" && !secrets && c.options.get("credentials").is_none_or(|v| v != "keys") {
         login(s, &c, &Value::Null)?;
@@ -390,10 +589,18 @@ fn test(s: &mut Session, p: &Value) -> CmdResult {
     }
     let result = match c.kind.as_str() {
         "postgres" | "mysql" | "sqlserver" => {
-            if cfg!(target_arch = "wasm32") {
-                return Err(DESKTOP_ONLY.into());
+            #[cfg(target_arch = "wasm32")]
+            return Err(DESKTOP_ONLY.into());
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if c.id.is_empty() {
+                    super::layer::database_tables(s, &json!({"database":c.address,"password":ps(p,"password")}))?
+                } else {
+                    let tables = connection_use::tables(s, &c)?;
+                    let layers: Vec<_> = tables.iter().filter_map(|v| v["label"].as_str()).collect();
+                    json!({"count":layers.len(),"layers":layers})
+                }
             }
-            super::layer::database_tables(s, &json!({"database": c.address}))?
         }
         "service" => super::service::layers(s, &json!({"url": c.address}))?,
         "wms" | "wmts" | "wfs" | "wcs" | "ogcapi" | "arcgis" => super::service::layers(s, &json!({"url": c.address, "type": c.kind}))?,

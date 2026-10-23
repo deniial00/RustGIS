@@ -73,6 +73,7 @@ impl Dialogs {
             "addUrl" => "addUrl",
             "addService" => "addService",
             "addDatabase" => "addDatabase",
+            "chooseConnection" => "chooseConnection",
             "s3" => "s3",
             "zarr" => "zarr",
             "exportLayer" => "exportLayer",
@@ -158,6 +159,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "addDatabase" => "Add From Database",
         "newConnection" => "New Connection",
         "editConnection" => "Edit Connection",
+        "chooseConnection" => "Choose Connection",
         "s3" => "S3 Buckets",
         "zarr" => "Add Zarr Variable",
         "exportLayer" => "Export Features",
@@ -183,7 +185,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         ui.set_width(match which {
             "coordinateSystem" | "zarr" => 660.0,
             "addTiles" | "addUrl" | "addService" | "s3" => 560.0,
-            "newConnection" | "editConnection" => 520.0,
+            "newConnection" | "editConnection" | "chooseConnection" => 520.0,
             _ => 440.0,
         });
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -250,6 +252,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             "addService" => close = add_service(app, ui),
             "addDatabase" => close = add_database(app, ui),
             "newConnection" | "editConnection" => close = crate::connectionui::dialog(app, ui),
+            "chooseConnection" => close = crate::connectionui::chooser(app, ui),
             "s3" => crate::s3ui::dialog(app, ui),
             "zarr" => close = crate::zarrui::dialog(app, ui),
             "exportLayer" => close = export_layer(app, ui),
