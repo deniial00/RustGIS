@@ -675,13 +675,26 @@ pub fn title(app: &RustGisApp) -> &'static str {
 
 fn switch_api(st: &mut State, url: &str) {
     st.api = url.to_string();
+    drop_listing(st);
+}
+
+/// Forgets what was listed for the last API or catalog, and what is still on its way from it: a
+/// late answer would otherwise land under the new one. An asset being signed or a link being
+/// opened was asked for already and goes on.
+fn drop_listing(st: &mut State) {
     st.collections.clear();
     st.items.clear();
     st.collection.clear();
-    // Nothing of the last catalog's browsing is kept.
     (st.node, st.node_title) = (String::new(), String::new());
     st.trail.clear();
     st.children.clear();
+    if st.waiting.as_ref().is_some_and(|(a, _)| matches!(a, Asked::Collections(_) | Asked::Search(_) | Asked::Children(_))) {
+        st.waiting = None;
+        st.info = None;
+    }
+    if st.walk.take().is_some() {
+        st.info = None;
+    }
 }
 
 /// The dialog.
@@ -727,13 +740,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 });
             // A catalog typed in is browsed with Browse, from its top.
             if ui.add(egui::TextEdit::singleline(&mut st.api).desired_width(ui.available_width().max(80.0))).changed() {
-                // Collections and items belong to the address they came from.
-                (st.node, st.node_title) = (String::new(), String::new());
-                st.trail.clear();
-                st.children.clear();
-                st.collections.clear();
-                st.items.clear();
-                st.collection.clear();
+                drop_listing(st);
             }
         });
         ui.end_row();
@@ -1149,5 +1156,26 @@ mod tests {
         app.ui.stac.from = "soon".into();
         find_items(&mut app);
         assert!(app.ui.stac.walk.is_none() && app.ui.stac.error.is_some());
+    }
+
+    /// An answer asked of one API that lands after another was picked isn't shown under it; a
+    /// link being opened goes on.
+    #[test]
+    fn a_late_answer_from_the_previous_api_is_dropped() {
+        let mut app = RustGisApp::with_sample();
+        let ctx = egui::Context::default();
+        let late: Answer = Slot::default();
+        app.ui.stac.api = "https://one.example/stac".into();
+        app.ui.stac.waiting = Some((Asked::Collections("https://one.example/stac".into()), late.clone()));
+        switch_api(&mut app.ui.stac, "https://two.example/stac");
+        assert!(app.ui.stac.waiting.is_none());
+        *late.lock().unwrap() = Some(Ok(br#"{"collections":[{"id":"old","title":"Old"}]}"#.to_vec()));
+        poll(&mut app, &ctx);
+        assert!(app.ui.stac.collections.is_empty());
+        assert_eq!(app.ui.stac.api, "https://two.example/stac");
+
+        app.ui.stac.waiting = Some((Asked::Link("https://two.example/item.json".into()), Slot::default()));
+        switch_api(&mut app.ui.stac, "https://three.example/stac");
+        assert!(matches!(app.ui.stac.waiting, Some((Asked::Link(_), _))), "a link already asked for goes on");
     }
 }
