@@ -675,3 +675,57 @@ fn remembered_database_cached_session_listing_failure_keeps_password() {
         assert!(s.database_logins.requests(s.opened).next().is_none(), "{command}");
     }
 }
+
+#[test]
+fn remembered_database_session_refusal_suppresses_only_matching_saved_value() {
+    if isolated("remembered_database_session_refusal_suppresses_only_matching_saved_value") {
+        return;
+    }
+    use rustgis_data::source::duckdb;
+    let server = Server::new();
+    for same in [true, false] {
+        for command in ["connection.login", "connection.test", "connection.browse", "project.openText"] {
+            let store = Arc::new(MemorySecrets::new());
+            let mut s = app(store.clone(), "{}");
+            let id = remember(&mut s, "Remembered", &server.address, "stored-value");
+            let attempted = if same { "stored-value" } else { "session-other" };
+            if !same {
+                s.run("connection.login", &json!({"id":id,"password":attempted})).unwrap();
+            }
+            let saved = store.load(&format!("connection/{id}")).unwrap();
+            let text = project(&server.address);
+            s.project = serde_json::from_str(&text).unwrap();
+            for layer in s.map_mut().layers.iter_mut().take(2) {
+                layer.source.as_mut().unwrap().login = true;
+            }
+            // Passwordless login invalidates the saved cache before using the session value;
+            // the other entry points exercise the already-cached saved copy.
+            let params = if command == "project.openText" { json!({"text":text}) } else { json!({"id":id}) };
+            let result = s.run(command, &params);
+            match command {
+                "connection.login" => assert_eq!(result.unwrap()["failed"], 2),
+                "project.openText" => assert!(result.is_ok()),
+                _ => assert!(!result.unwrap_err().contains(attempted)),
+            }
+            let mut packet = attempted.as_bytes().to_vec();
+            packet.push(0);
+            assert_eq!(server.take(), packet, "{command}, same={same}");
+            server.empty();
+            let (_, key) = crate::connections::database_key(&server.address).unwrap();
+            assert!(!s.database_logins.has_session_password(&id));
+            assert!(!duckdb::has_password(&key));
+            assert_eq!(s.database_logins.is_rejected(&id), same, "{command}");
+            assert!(s.connections.find(&id).unwrap().remembered);
+            assert_eq!(store.load(&format!("connection/{id}")).unwrap(), saved);
+            // Automatic resolution must not retry the same refused bytes via the saved copy.
+            s.run("project.openText", &json!({"text":text})).unwrap();
+            if !same {
+                // A different saved value was not refused by the first attempt and remains eligible.
+                assert_eq!(server.take(), b"stored-value\0", "{command}");
+            }
+            server.empty();
+            assert_eq!(s.run("connection.list", &Value::Null).unwrap()["loginRequests"][0]["reason"], "password");
+            assert_eq!(store.load(&format!("connection/{id}")).unwrap(), saved);
+        }
+    }
+}

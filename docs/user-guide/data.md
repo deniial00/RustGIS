@@ -507,8 +507,9 @@ saving replaces it. A password the server refuses is not kept as this session's,
 to the database's other layers. A refused typed login restores the previous active password,
 selection and activation; with no previous password, the attempted value is removed.
 If a password reused from this ID's session cache is refused, that cached value, its owned
-driver entry and activation are cleared, and a password is requested. This does not reject
-or delete the ID's OS-store password.
+driver entry and activation are cleared, and a password is requested. An identical saved value
+is also suppressed for this session; a different saved value is not marked refused by this
+attempt. The OS-store entry is retained in either case.
 A transport error or missing table is not a wrong-password prompt. Use Forget to delete a
 previously saved password.
 

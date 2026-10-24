@@ -79,7 +79,7 @@ pub(super) fn tables(s: &mut Session, c: &Connection, typed: Option<&str>) -> Re
                     if saved {
                         s.database_logins.reject(&c.id);
                     } else if session {
-                        s.database_logins.forget_session_password(&c.id);
+                        s.database_logins.reject_session_password(c);
                     }
                     if saved || session {
                         duckdb::forget_connection_password(&c.id);

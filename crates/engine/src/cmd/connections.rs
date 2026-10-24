@@ -342,7 +342,7 @@ fn reopen(s: &mut Session, c: &Connection, saved: bool, session: bool, all_unope
         if saved {
             s.database_logins.reject(&c.id);
         } else if session {
-            s.database_logins.forget_session_password(&c.id);
+            s.database_logins.reject_session_password(c);
         }
         if saved || session {
             rustgis_data::source::duckdb::forget_connection_password(&c.id);

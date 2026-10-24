@@ -526,10 +526,22 @@ impl DatabaseLogins {
         self.session.insert(id.to_string(), Secret::new(password));
     }
 
-    /// Drops only this ID's session password after the server refused that cached credential.
+    /// Drops a refused session credential and suppresses an equivalent saved value for this run.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn forget_session_password(&mut self, id: &str) {
-        self.session.remove(id);
+    pub(crate) fn reject_session_password(&mut self, c: &Connection) {
+        let Some(refused) = self.session.remove(&c.id) else { return };
+        if !c.remembered || self.is_rejected(&c.id) {
+            return;
+        }
+        let same = match self.saved.get(&c.id) {
+            Some(saved) => saved == &refused,
+            // Explicit login/Refresh may have invalidated the lazy cache. Validate the bound
+            // account through the existing lookup before deciding whether it is the same value.
+            None => matches!(self.load(c), SavedPassword::Found(saved) if saved == refused),
+        };
+        if same {
+            self.reject(&c.id);
+        }
     }
 
     /// Reads the password saved for a definition (once: later calls use what was read).
