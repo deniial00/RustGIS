@@ -1147,7 +1147,8 @@ fn s3_saved_favourites_keep_provenance_overhead_without_relaxing_destination_lim
     let mut sources = crate::sources::Sources::default();
     sources.keep("favourites", source.clone()).unwrap();
     let restored = crate::sources::Sources::from_json(&sources.to_json());
-    assert_eq!(restored.favourites[0].address, address);
+    let provenance = rustgis_data::s3_address::parse(&restored.favourites[0].address).unwrap().unwrap();
+    assert_eq!((provenance.endpoint, provenance.url, provenance.binding), (endpoint, inner.as_str(), ""));
     let oversized = format!("{inner}{}", "v".repeat(2049 - inner.len()));
     let too_long = rustgis_data::s3_address::bind("0123456789abcdef", endpoint, &oversized).unwrap();
     assert!(sources.keep("favourites", crate::sources::Source { address: too_long, ..source }).is_err());

@@ -61,6 +61,10 @@ impl Sources {
         s.favourites.truncate(MAX_KEPT);
         s.saved.truncate(MAX_KEPT);
         s.recent.truncate(MAX_RECENT);
+        // Preferences carry provenance, never authority from an earlier process's login.
+        crate::s3_connections::clear_bindings(
+            s.favourites.iter_mut().chain(&mut s.recent).chain(&mut s.saved).map(|source| &mut source.address),
+        );
         s
     }
 
@@ -516,6 +520,20 @@ fn build_library() -> Vec<(&'static str, Source)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_sources_never_reuse_a_previous_process_login_binding() {
+        let address = rustgis_data::s3_address::bind("0123456789abcdef", "https://s3.example.org", "s3://data/a.fgb").unwrap();
+        let source = Source { kind: "url".into(), name: "Saved".into(), address, extra: Value::Null };
+        let text = serde_json::json!({"favourites": [source.clone()], "saved": [source.clone()], "recent": [source]}).to_string();
+        let restored = Sources::from_json(&text);
+        for source in restored.favourites.iter().chain(&restored.saved).chain(&restored.recent) {
+            let bound = rustgis_data::s3_address::parse(&source.address).unwrap().unwrap();
+            assert_eq!(bound.binding, "");
+            assert_eq!(bound.endpoint, "https://s3.example.org");
+            assert_eq!(bound.url, "s3://data/a.fgb");
+        }
+    }
 
     #[test]
     fn a_saved_archive_still_bounds_its_template_head() {
