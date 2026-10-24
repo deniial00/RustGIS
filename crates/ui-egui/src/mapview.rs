@@ -4,8 +4,13 @@
 
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::Tool;
+use rustgis_engine::analysis::{
+    network::{radius_boundary_point, radius_distance_m},
+    selection::MAX_POINTS,
+};
 use rustgis_engine::geom::{Coord, Extent, geodesic_length_m, geodesic_ring_area_m2};
 use rustgis_engine::map::layout::TextAlign;
+use rustgis_engine::map::projection::Flat;
 use rustgis_engine::map::{Camera, Globe, Projection};
 use rustgis_engine::render::rustgis_tiles::Unfinished;
 use rustgis_engine::render::{PlacedLabel, Rendered, View};
@@ -35,6 +40,8 @@ enum DragKind {
     Box,
     /// Drawing a graphic by dragging (rectangle, circle, ellipse, freehand, lasso, picture).
     Sketch,
+    SelectLasso,
+    SelectRadius,
     /// Moving or inserting a vertex with the Edit Vertices tool.
     Vertex,
     /// Moving the selected text graphic, grabbed by its text (#516): its layer id and row, and
@@ -79,6 +86,15 @@ pub struct Toast {
     pub id: u64,
 }
 
+/// A selection outline belongs to one unchanged view, not just to a tool code.
+struct SelectionGesture {
+    tool: Tool,
+    map: usize,
+    camera: Camera,
+    projection: Projection,
+    rect: Rect,
+}
+
 pub struct MapView {
     texture: Option<egui::TextureHandle>,
     key: Option<Key>,
@@ -119,6 +135,8 @@ pub struct MapView {
     resized_at: f64,
     drag: Option<(Pos2, DragKind)>,
     sketch: Vec<Coord>,
+    selection_gesture: Option<SelectionGesture>,
+    radius_preview: Option<(Coord, f64, Vec<Option<Pos2>>)>,
     /// A finished measurement stays on screen until the next click.
     sketch_done: bool,
     /// The next click splits the selected lines there (Editing pane › Split).
@@ -215,6 +233,8 @@ impl Default for MapView {
             resized_at: -10.0,
             drag: None,
             sketch: Vec::new(),
+            selection_gesture: None,
+            radius_preview: None,
             sketch_done: false,
             split_mode: false,
             vertex: None,
@@ -321,6 +341,11 @@ impl MapView {
     pub fn cancel_sketch(&mut self) {
         self.sketch.clear();
         self.sketch_done = false;
+        if self.drag.is_some_and(|(_, kind)| matches!(kind, DragKind::SelectLasso | DragKind::SelectRadius)) {
+            self.drag = None;
+        }
+        self.selection_gesture = None;
+        self.radius_preview = None;
         self.vertex = None;
         self.vertex_drag = None;
     }
@@ -1399,12 +1424,377 @@ fn zoom(app: &mut RustGisApp, factor: f64, x: f64, y: f64, w: f64, h: f64) {
     }
 }
 
+fn selection_tool(tool: Tool) -> bool {
+    matches!(tool, Tool::SelectPolygon | Tool::SelectLasso | Tool::SelectRadius)
+}
+
+fn cancel_changed_selection(app: &mut RustGisApp, rect: Rect) {
+    if app.map.selection_gesture.as_ref().is_some_and(|g| {
+        let map = app.session.map();
+        g.tool != app.session.tool
+            || g.map != app.session.project.active_map
+            || g.camera != map.camera
+            || g.projection != map.projection
+            || g.rect != rect
+    }) {
+        app.map.cancel_sketch();
+    }
+}
+
+fn begin_selection(app: &mut RustGisApp, rect: Rect) {
+    if app.map.selection_gesture.is_none() {
+        let map = app.session.map();
+        app.map.selection_gesture = Some(SelectionGesture {
+            tool: app.session.tool,
+            map: app.session.project.active_map,
+            camera: map.camera,
+            projection: map.projection.clone(),
+            rect,
+        });
+    }
+}
+
+fn selection_error(app: &mut RustGisApp, error: String) {
+    app.map.cancel_sketch();
+    app.session.notify(error, true);
+}
+
+fn invalid_selection() -> String {
+    tl!("Selection outline is outside the supported map surface; draw a smaller area.").to_string()
+}
+
+fn selection_limit() -> String {
+    tl!("Selection outline is too complex; draw a simpler area.").to_string()
+}
+
+fn selection_coord(app: &RustGisApp, rect: Rect, point: Pos2, flat: &Flat) -> Result<Coord, String> {
+    if !rect.contains(point) {
+        return Err(invalid_selection());
+    }
+    let coord = screen_to_lonlat(app, rect, point).ok_or_else(invalid_selection)?;
+    flat.validate_selection_path(&[coord]).map_err(|_| invalid_selection())?;
+    Ok(coord)
+}
+
+/// A globe's screen edges must be sampled before converting to the command's planar space.
+fn append_selection_point(app: &RustGisApp, rect: Rect, points: &mut Vec<Coord>, end: Pos2) -> Result<(), String> {
+    let flat = Flat::of(&app.session.map().projection);
+    let start = points.last().and_then(|c| lonlat_to_screen(app, rect, *c));
+    let samples = if app.session.map().projection == Projection::Globe {
+        start.map_or(1, |p| ((end - p).length() / 3.0).ceil().max(1.0) as usize)
+    } else {
+        1
+    };
+    if samples > MAX_POINTS.saturating_sub(points.len()) {
+        return Err(selection_limit());
+    }
+    for i in 1..=samples {
+        let at = start.map_or(end, |p| p.lerp(end, i as f32 / samples as f32));
+        let coord = selection_coord(app, rect, at, &flat)?;
+        if let Some(last) = points.last() {
+            flat.validate_selection_path(&[*last, coord]).map_err(|_| invalid_selection())?;
+        }
+        if let Some(first) = points.first() {
+            flat.validate_selection_path(&[coord, *first]).map_err(|_| invalid_selection())?;
+        }
+        if points.last() != Some(&coord) {
+            points.push(coord);
+        }
+    }
+    Ok(())
+}
+
+fn add_selection_point(app: &mut RustGisApp, rect: Rect, point: Pos2, force: bool) -> Result<(), String> {
+    let near = app.map.sketch.last().and_then(|c| lonlat_to_screen(app, rect, *c)).is_some_and(|p| (p - point).length() < 3.0);
+    if near && !force {
+        return selection_coord(app, rect, point, &Flat::of(&app.session.map().projection)).map(|_| ());
+    }
+    let mut points = std::mem::take(&mut app.map.sketch);
+    let result = append_selection_point(app, rect, &mut points, point);
+    app.map.sketch = points;
+    result
+}
+
+fn selection_mode(ui: &Ui) -> &'static str {
+    ui.input(|i| {
+        if i.modifiers.shift {
+            "add"
+        } else if i.modifiers.ctrl || i.modifiers.command {
+            "remove"
+        } else {
+            "new"
+        }
+    })
+}
+
+fn finish_area_selection(app: &mut RustGisApp, ui: &Ui, rect: Rect) {
+    let mut points = std::mem::take(&mut app.map.sketch);
+    let result = (|| {
+        if let Some(first) = points.first().and_then(|c| lonlat_to_screen(app, rect, *c)) {
+            append_selection_point(app, rect, &mut points, first)?;
+        }
+        Flat::of(&app.session.map().projection).validate_selection_path(&points).map_err(|_| invalid_selection())?;
+        let coords: Vec<[f64; 2]> = points.iter().map(|c| [c.x, c.y]).collect();
+        app.run("select.byPolygon", json!({"points": coords, "mode": selection_mode(ui)})).map(|_| ())
+    })();
+    app.map.cancel_sketch();
+    if let Err(error) = result {
+        app.session.notify(error, true);
+    }
+}
+
+fn selection_interact(app: &mut RustGisApp, ui: &Ui, resp: &egui::Response, rect: Rect) {
+    let tool = app.session.tool;
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.map.cancel_sketch();
+        return;
+    }
+    if tool == Tool::SelectPolygon {
+        if (resp.clicked() || resp.double_clicked())
+            && let Some(point) = resp.interact_pointer_pos()
+        {
+            begin_selection(app, rect);
+            let closes = app.map.sketch.len() >= 3
+                && app.map.sketch.first().and_then(|c| lonlat_to_screen(app, rect, *c)).is_some_and(|first| (first - point).length() < 3.0);
+            if closes {
+                finish_area_selection(app, ui, rect);
+            } else if let Err(error) = add_selection_point(app, rect, point, false) {
+                selection_error(app, error);
+            } else if resp.double_clicked() {
+                finish_area_selection(app, ui, rect);
+            }
+        }
+        return;
+    }
+    // Both drag tools consume ordinary clicks and double-clicks without identifying or zooming.
+    if resp.double_clicked() {
+        app.map.cancel_sketch();
+        return;
+    }
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        let origin = ui.input(|i| i.pointer.press_origin());
+        app.map.cancel_sketch();
+        if let Some(origin) = origin {
+            begin_selection(app, rect);
+            if let Err(error) = add_selection_point(app, rect, origin, true) {
+                selection_error(app, error);
+                return;
+            }
+            let kind = if tool == Tool::SelectLasso { DragKind::SelectLasso } else { DragKind::SelectRadius };
+            app.map.drag = Some((origin, kind));
+        }
+    }
+    if !app.map.drag.is_some_and(|(_, k)| matches!(k, DragKind::SelectLasso | DragKind::SelectRadius)) {
+        return;
+    }
+    let end = resp.interact_pointer_pos().or_else(|| ui.input(|i| i.pointer.latest_pos()));
+    if let Some(end) = end {
+        let result = if tool == Tool::SelectLasso {
+            add_selection_point(app, rect, end, resp.drag_stopped())
+        } else {
+            selection_coord(app, rect, end, &Flat::of(&app.session.map().projection)).map(|coord| {
+                app.map.sketch.truncate(1);
+                app.map.sketch.push(coord);
+            })
+        };
+        if let Err(error) = result {
+            selection_error(app, error);
+            return;
+        }
+    }
+    if resp.drag_stopped() {
+        if tool == Tool::SelectLasso {
+            finish_area_selection(app, ui, rect);
+        } else {
+            let ends = app.map.sketch.first().copied().zip(app.map.sketch.get(1).copied());
+            if let Some((center, end)) = ends
+                && let Some(radius) = radius_distance_m(center, end).filter(|r| *r > 0.0)
+            {
+                let valid = match &app.map.radius_preview {
+                    Some((at, r, outline)) if *at == center && *r == radius => !outline.is_empty(),
+                    _ => radius_outline(app, rect, center, radius).is_ok(),
+                };
+                if valid {
+                    let _ =
+                        app.run("select.byRadius", json!({"lon": center.x, "lat": center.y, "radius": radius, "mode": selection_mode(ui)}));
+                } else {
+                    app.session.notify(invalid_selection(), true);
+                }
+            }
+            if let Some((center, end)) = ends
+                && center != end
+                && radius_distance_m(center, end).is_none()
+            {
+                app.session.notify(invalid_selection(), true);
+            }
+            app.map.cancel_sketch();
+        }
+    }
+}
+
+fn validate_radius(app: &RustGisApp, center: Coord, radius: f64) -> Result<(), String> {
+    if !radius.is_finite() || radius <= 0.0 || radius > 5_000_000.0 {
+        return Err(invalid_selection());
+    }
+    let mut extrema = [center; 4];
+    for (i, point) in extrema.iter_mut().enumerate() {
+        *point = radius_boundary_point(center, radius, i as f64 * std::f64::consts::FRAC_PI_2).ok_or_else(invalid_selection)?;
+    }
+    Flat::of(&app.session.map().projection).validate_selection_path(&extrema).map_err(|_| invalid_selection())
+}
+
+/// Subdivision is bounded to 64 * 2^8 intervals, independently of zoom or hostile input.
+fn radius_outline(app: &RustGisApp, rect: Rect, center: Coord, radius: f64) -> Result<Vec<Option<Pos2>>, String> {
+    validate_radius(app, center, radius)?;
+    let flat = Flat::of(&app.session.map().projection);
+    let point = |angle| -> Result<(Coord, Option<Pos2>), String> {
+        let coord = radius_boundary_point(center, radius, angle).ok_or_else(invalid_selection)?;
+        flat.validate_selection_path(&[coord]).map_err(|_| invalid_selection())?;
+        let screen = lonlat_to_screen(app, rect, coord).filter(|p| p.x.is_finite() && p.y.is_finite() && rect.contains(*p));
+        Ok((coord, screen))
+    };
+    fn interval(
+        point: &impl Fn(f64) -> Result<(Coord, Option<Pos2>), String>,
+        flat: &Flat,
+        a: f64,
+        b: f64,
+        ends: [(Coord, Option<Pos2>); 2],
+        depth: u8,
+        out: &mut Vec<Option<Pos2>>,
+    ) -> Result<(), String> {
+        let mid = point((a + b) / 2.0)?;
+        let refine = match (ends[0].1, mid.1, ends[1].1) {
+            (Some(p), Some(m), Some(q)) => (m - p.lerp(q, 0.5)).length() > 0.75,
+            (None, None, None) => false,
+            _ => true,
+        };
+        if refine && depth < 8 {
+            interval(point, flat, a, (a + b) / 2.0, [ends[0], mid], depth + 1, out)?;
+            interval(point, flat, (a + b) / 2.0, b, [mid, ends[1]], depth + 1, out)?;
+        } else {
+            flat.validate_selection_path(&[ends[0].0, mid.0, ends[1].0]).map_err(|_| invalid_selection())?;
+            if out.len() >= MAX_POINTS {
+                return Err(selection_limit());
+            }
+            // Never bridge an unresolved horizon/viewport break at the subdivision limit.
+            out.push(if mid.1.is_some() { ends[1].1 } else { None });
+        }
+        Ok(())
+    }
+    let mut out = Vec::with_capacity(65);
+    let mut start = point(0.0)?;
+    out.push(start.1);
+    for i in 0..64 {
+        let a = i as f64 * std::f64::consts::TAU / 64.0;
+        let b = (i + 1) as f64 * std::f64::consts::TAU / 64.0;
+        let end = point(b)?;
+        interval(&point, &flat, a, b, [start, end], 0, &mut out)?;
+        start = end;
+    }
+    Ok(out)
+}
+
+fn selection_readout(p: &egui::Painter, rect: Rect, t: &Tokens, text: String) {
+    let galley = p.layout_no_wrap(text, semibold(12.5), t.text);
+    let bg = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 22.0), galley.size() + vec2(24.0, 12.0));
+    p.rect_filled(bg, CornerRadius::same(14), t.menu);
+    p.rect_stroke(bg, CornerRadius::same(14), Stroke::new(1.0, t.border_strong), egui::StrokeKind::Inside);
+    p.galley(bg.center() - galley.size() / 2.0, galley, t.text);
+}
+
+fn selection_preview(app: &mut RustGisApp, p: &egui::Painter, rect: Rect, t: &Tokens) {
+    let stroke = Stroke::new(2.0, t.accent);
+    if app.session.tool == Tool::SelectRadius {
+        if let Some((center, end)) = app.map.sketch.first().copied().zip(app.map.sketch.get(1).copied()) {
+            if let Some(radius) = radius_distance_m(center, end).filter(|r| *r > 0.0) {
+                if app.map.radius_preview.as_ref().is_none_or(|(at, r, _)| *at != center || *r != radius) {
+                    let outline = radius_outline(app, rect, center, radius).unwrap_or_default();
+                    app.map.radius_preview = Some((center, radius, outline));
+                }
+                if let Some((_, _, outline)) = &app.map.radius_preview {
+                    for run in outline.split(|p| p.is_none()) {
+                        let run: Vec<Pos2> = run.iter().flatten().copied().collect();
+                        if run.len() >= 2 {
+                            p.add(egui::Shape::line(run, stroke));
+                        }
+                    }
+                    let text = if outline.is_empty() {
+                        tl!("Invalid selection outline · draw a smaller radius").to_string()
+                    } else {
+                        crate::i18n::fmt(
+                            "Radius {distance} (approximate)",
+                            &[("distance", &crate::measure_units::distance(radius, app.ui.measurement_imperial))],
+                        )
+                    };
+                    selection_readout(p, rect, t, text);
+                }
+            } else if center != end {
+                selection_readout(p, rect, t, tl!("Invalid selection outline · draw a smaller radius").to_string());
+            }
+            if let (Some(a), Some(b)) = (lonlat_to_screen(app, rect, center), lonlat_to_screen(app, rect, end)) {
+                p.line_segment([a, b], stroke);
+                p.circle_filled(a, 3.5, t.accent);
+            }
+        }
+        return;
+    }
+    // Only polygon has a live endpoint. The lasso already retained the pointer this frame,
+    // so adding it again would create a duplicate release-to-first segment.
+    let live =
+        (app.session.tool == Tool::SelectPolygon).then_some(app.map.pointer_lonlat).flatten().filter(|c| app.map.sketch.last() != Some(c));
+    let flat = Flat::of(&app.session.map().projection);
+    let last = live.or_else(|| app.map.sketch.last().copied());
+    let mut valid = true;
+    if let (Some(first), Some(last)) = (app.map.sketch.first(), last) {
+        valid = flat.validate_selection_path(&[last, *first]).is_ok();
+        if let Some(live) = live {
+            valid &= app.map.sketch.last().is_none_or(|last| flat.validate_selection_path(&[*last, live]).is_ok());
+        }
+        // The closing screen edge (and polygon's live edge) obey the same globe guard as commit.
+        if app.session.map().projection == Projection::Globe {
+            for (a, b) in app.map.sketch.last().copied().zip(live).into_iter().chain(Some((last, *first))) {
+                let mut edge = vec![a];
+                valid &= lonlat_to_screen(app, rect, b).is_some_and(|end| {
+                    append_selection_point(app, rect, &mut edge, end).is_ok()
+                        && edge.len().saturating_sub(1) <= MAX_POINTS.saturating_sub(app.map.sketch.len())
+                });
+            }
+        }
+    }
+    let placed = app.map.sketch.iter().copied().chain(live).map(|c| lonlat_to_screen(app, rect, c).filter(|p| rect.contains(*p)));
+    let mut first = None;
+    let mut previous = None;
+    for at in placed {
+        if let Some(at) = at {
+            if first.is_none() {
+                first = Some(at);
+            }
+            if let Some(previous) = previous {
+                p.line_segment([previous, at], stroke);
+            }
+            if app.session.tool == Tool::SelectPolygon {
+                p.circle_filled(at, 3.5, Color32::WHITE);
+                p.circle_stroke(at, 3.5, stroke);
+            }
+        }
+        previous = at;
+    }
+    if valid {
+        if let (Some(first), Some(last)) = (first, previous) {
+            p.line_segment([last, first], stroke);
+        }
+    } else {
+        selection_readout(p, rect, t, tl!("Invalid selection outline · draw a smaller area").to_string());
+    }
+}
+
 fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect) {
     let (w, h) = (rect.width() as f64, rect.height() as f64);
     let time = now(ui);
     let hover = resp.hover_pos();
     app.map.pointer_lonlat = hover.and_then(|p| screen_to_lonlat(app, rect, p));
     let tool = app.session.tool;
+    cancel_changed_selection(app, rect);
 
     // A map tool aims with a crosshair, only over the map: the ribbon and panes keep their cursor.
     // A finished measurement keeps its points on show but waits for a new one.
@@ -1528,6 +1918,12 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             app.map.camera_moved = true;
             app.map.last_interaction = time;
         }
+        cancel_changed_selection(app, rect);
+        return;
+    }
+    cancel_changed_selection(app, rect);
+    if selection_tool(tool) && !middle && !app.map.drag.is_some_and(|(_, k)| matches!(k, DragKind::Pan | DragKind::Turn)) {
+        selection_interact(app, ui, resp, rect);
         return;
     }
     // Drag start.
@@ -1653,6 +2049,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
     }
+    cancel_changed_selection(app, rect);
     if resp.drag_stopped()
         && let Some((_, DragKind::Sketch)) = app.map.drag
     {
@@ -1811,6 +2208,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                 });
                 let _ = app.run("select.atPoint", json!({"lon": c.x, "lat": c.y, "tolerancePx": 5, "mode": mode}));
             }
+            Tool::SelectPolygon | Tool::SelectLasso | Tool::SelectRadius => {}
             Tool::ZoomIn => {
                 zoom(app, 2.0, (p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64, w, h);
                 app.map.last_interaction = time;
@@ -2061,6 +2459,10 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     // A dragged rectangle, circle or ellipse previews as its outline.
     let tool = app.session.tool;
     let mut previewed = false;
+    if selection_tool(tool) && !app.map.sketch.is_empty() {
+        selection_preview(app, p, rect, t);
+        previewed = true;
+    }
     if !app.map.sketch.is_empty()
         && let Some(shape) = drag_shape(tool).filter(|s| !matches!(*s, "freehand" | "lasso"))
     {
@@ -2164,6 +2566,11 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
         Tool::CreateLine => Some("Click to add vertices · double-click to finish the line"),
         Tool::CreatePolygon => Some("Click to add vertices · double-click to close the polygon"),
         Tool::Select => Some("Click or drag a box · Shift adds · Ctrl removes"),
+        Tool::SelectPolygon => {
+            Some("Click vertices · click the start or double-click to select · Shift adds · Ctrl/Cmd removes · Esc cancels")
+        }
+        Tool::SelectLasso => Some("Drag an area · release to select · Shift adds · Ctrl/Cmd removes · Esc cancels"),
+        Tool::SelectRadius => Some("Drag from the centre · release to select · Shift adds · Ctrl/Cmd removes · Esc cancels"),
         Tool::EditVertices if app.map.vertex.is_some() => {
             Some("Drag a vertex to move it · click an edge to add one · Delete removes the chosen vertex")
         }
@@ -3000,6 +3407,183 @@ mod picture_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn selection_harness() -> egui_kittest::Harness<'static, RustGisApp> {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("layer.template", json!({"template": "points", "name": "Points"})).unwrap();
+        for point in [[0.5, 0.5], [2.0, 2.0], [2.5, 0.5], [4.0, 4.0]] {
+            app.run("edit.addFeature", json!({"layer": "Points", "geometry": {"type": "Point", "coordinates": point}})).unwrap();
+        }
+        app.run("select.clear", Value::Null).unwrap();
+        let mut h =
+            egui_kittest::Harness::builder().with_size(vec2(1400.0, 860.0)).with_step_dt(0.016).with_max_steps(10_000).build_ui_state(
+                |ui, app: &mut RustGisApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                    app.ui(ui);
+                },
+                app,
+            );
+        h.step();
+        h.state_mut().run("map.zoomToExtent", json!({"extent": [-1, -1, 5, 5]})).unwrap();
+        for _ in 0..5 {
+            h.step();
+        }
+        assert!(h.state().map.view_rect.is_some());
+        h
+    }
+
+    fn selection_screen(h: &egui_kittest::Harness<'_, RustGisApp>, point: [f64; 2]) -> Pos2 {
+        lonlat_to_screen(h.state(), h.state().map.view_rect.unwrap().0, Coord::new(point[0], point[1])).unwrap()
+    }
+
+    fn selection_pointer(h: &mut egui_kittest::Harness<'_, RustGisApp>, at: Pos2, pressed: Option<bool>, modifiers: egui::Modifiers) {
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        h.event(egui::Event::PointerMoved(at));
+        if let Some(pressed) = pressed {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers });
+        }
+        h.step();
+    }
+
+    fn selection_click(h: &mut egui_kittest::Harness<'_, RustGisApp>, point: [f64; 2]) {
+        let at = selection_screen(h, point);
+        selection_pointer(h, at, Some(true), egui::Modifiers::NONE);
+        selection_pointer(h, at, Some(false), egui::Modifiers::NONE);
+    }
+
+    fn selection_rows(h: &egui_kittest::Harness<'_, RustGisApp>) -> Vec<usize> {
+        h.state().session.map().layer_by_name("Points").unwrap().selection.clone()
+    }
+
+    #[test]
+    fn selection_tools_polygon_menu_repeat_and_fixed_default() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = selection_harness();
+        h.get_by_label("Select options").click();
+        h.run();
+        h.get_by_label("Select by Polygon").click();
+        h.run();
+        assert_eq!(h.state().session.tool, Tool::SelectPolygon);
+        let camera = h.state().session.map().camera;
+        let layers = h.state().session.map().layers.len();
+        for _ in 0..2 {
+            for point in [[0., 0.], [3., 0.], [3., 1.], [1., 1.], [1., 3.], [0., 3.]] {
+                selection_click(&mut h, point);
+            }
+            selection_click(&mut h, [0., 0.]);
+            assert_eq!(selection_rows(&h), vec![0, 2]);
+            assert_eq!(h.state().session.tool, Tool::SelectPolygon);
+            assert!(h.state().map.sketch.is_empty());
+            assert!(h.state().map.selection_gesture.is_none());
+            assert_eq!(h.state().session.map().camera, camera);
+            assert_eq!(h.state().session.map().layers.len(), layers);
+            assert_eq!(h.state().session.map().layer_by_name("Points").unwrap().dataset.features.len(), 4);
+        }
+        h.get_by_label("Select").click();
+        h.run();
+        assert_eq!(h.state().session.tool, Tool::Select);
+        selection_click(&mut h, [2., 2.]);
+        assert_eq!(selection_rows(&h), vec![1]);
+    }
+
+    #[test]
+    fn selection_tools_lasso_release_and_modifiers() {
+        let mut h = selection_harness();
+        h.state_mut().run("tool.set", json!({"tool": "selectLasso"})).unwrap();
+        let points = [[0., 0.], [3., 0.], [3., 1.], [1., 1.], [1., 3.], [0., 3.]];
+        for modifiers in [
+            egui::Modifiers::NONE,
+            egui::Modifiers { shift: true, ..egui::Modifiers::NONE },
+            egui::Modifiers { ctrl: true, command: true, ..egui::Modifiers::NONE },
+        ] {
+            let at = selection_screen(&h, points[0]);
+            selection_pointer(&mut h, at, Some(true), modifiers);
+            for point in &points[1..5] {
+                let at = selection_screen(&h, *point);
+                selection_pointer(&mut h, at, None, modifiers);
+            }
+            // The final corner appears only in the release frame.
+            let at = selection_screen(&h, points[5]);
+            selection_pointer(&mut h, at, Some(false), modifiers);
+            assert_eq!(selection_rows(&h), if modifiers.ctrl { vec![] } else { vec![0, 2] });
+            assert!(h.state().map.sketch.is_empty());
+            assert!(h.state().map.drag.is_none());
+            assert_eq!(h.state().session.tool, Tool::SelectLasso);
+        }
+    }
+
+    #[test]
+    fn selection_tools_radius_release_metric_and_plain_clicks() {
+        let mut h = selection_harness();
+        h.state_mut().run("tool.set", json!({"tool": "selectRadius"})).unwrap();
+        let camera = h.state().session.map().camera;
+        for _ in 0..2 {
+            let center = selection_screen(&h, [0.5, 0.5]);
+            selection_pointer(&mut h, center, Some(true), egui::Modifiers::NONE);
+            let intermediate = selection_screen(&h, [3., 0.5]);
+            selection_pointer(&mut h, intermediate, None, egui::Modifiers::NONE);
+            let preview = h.state().map.radius_preview.as_ref().expect("live radius outline");
+            assert!(!preview.2.is_empty());
+            let sketch = &h.state().map.sketch;
+            let expected = radius_distance_m(sketch[0], sketch[1]).unwrap();
+            assert!((preview.1 - expected).abs() < 0.01);
+            let end = selection_screen(&h, [1.5, 0.5]);
+            selection_pointer(&mut h, end, Some(false), egui::Modifiers::NONE);
+            assert_eq!(selection_rows(&h), vec![0]);
+            assert_eq!(h.state().session.tool, Tool::SelectRadius);
+            assert!(h.state().map.radius_preview.is_none());
+        }
+        for tool in ["selectLasso", "selectRadius"] {
+            h.state_mut().run("tool.set", json!({"tool": tool})).unwrap();
+            selection_click(&mut h, [2., 2.]);
+            selection_click(&mut h, [2., 2.]);
+            assert_eq!(selection_rows(&h), vec![0]);
+            assert_eq!(h.state().session.map().camera, camera);
+        }
+    }
+
+    #[test]
+    fn selection_tools_cancelled_drag_cannot_commit_on_release() {
+        let mut h = selection_harness();
+        h.state_mut().run("select.rows", json!({"layer": "Points", "rows": [3]})).unwrap();
+        for tool in ["selectLasso", "selectRadius"] {
+            for cancel in ["same", "direct", "camera", "projection", "escape"] {
+                h.state_mut().run("tool.set", json!({"tool": tool})).unwrap();
+                let start = selection_screen(&h, [0., 0.]);
+                let end = selection_screen(&h, [3., 3.]);
+                selection_pointer(&mut h, start, Some(true), egui::Modifiers::NONE);
+                selection_pointer(&mut h, end, None, egui::Modifiers::NONE);
+                assert!(h.state().map.selection_gesture.is_some());
+                assert!(h.state_mut().run("tool.set", json!({"tool": "not-a-tool"})).is_err());
+                assert!(h.state().map.selection_gesture.is_some());
+                match cancel {
+                    "same" => {
+                        h.state_mut().run("tool.set", json!({"tool": tool})).unwrap();
+                    }
+                    "direct" => h.state_mut().session.tool = Tool::Select,
+                    "camera" => h.state_mut().session.map_mut().camera.center.x += 1.0,
+                    "projection" => {
+                        h.state_mut().run("map.projection", json!({"type": "robinson"})).unwrap();
+                    }
+                    _ => h.event(egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }),
+                }
+                h.step();
+                selection_pointer(&mut h, end, Some(false), egui::Modifiers::NONE);
+                assert_eq!(selection_rows(&h), vec![3], "{tool}: {cancel}");
+                assert!(h.state().map.selection_gesture.is_none());
+                assert!(h.state().map.drag.is_none());
+                h.state_mut().run("map.projection", json!({"type": "mercator"})).unwrap();
+                h.step();
+            }
+        }
+    }
 
     #[test]
     fn a_globe_visibility_preview_drops_the_old_labels() {

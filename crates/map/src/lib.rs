@@ -1591,15 +1591,17 @@ impl Map {
         out
     }
 
+    /// Layers eligible for map selection, including the visibility and scale of their groups.
+    pub fn selectable_layers(&mut self, scale: f64) -> impl Iterator<Item = &mut Layer> + '_ {
+        let held = self.held_by_group(scale);
+        self.layers.iter_mut().filter(move |l| l.visible && l.selectable && l.in_scale_range(scale) && !held.contains(&l.id))
+    }
+
     /// Rows of each selectable, visible layer inside a rectangle in the camera's coordinates.
     pub fn hits_in(&mut self, e: &Extent, scale: f64) -> Vec<(u32, Vec<usize>)> {
         let (flat, key) = (self.flat(), self.projection.code());
         let mut out = Vec::new();
-        let held = self.held_by_group(scale);
-        for l in &mut self.layers {
-            if !l.visible || !l.selectable || !l.in_scale_range(scale) || held.contains(&l.id) {
-                continue;
-            }
+        for l in self.selectable_layers(scale) {
             // Only features drawn: the definition query and the display filters let them through.
             let rows = l.drawn_rows(scale);
             let id = l.id;

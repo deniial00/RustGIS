@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{
-    CONTENT_H, Dragged, LABEL_H, big, big_form_menu, big_menu, col, group, menu_item, small, small_form_menu, small_menu, submenu_row,
-    text_w,
+    CONTENT_H, Dragged, LABEL_H, big, big_form_menu, big_menu, big_split_menu, col, group, menu_item, small, small_form_menu, small_menu,
+    submenu_row, text_w,
 };
 use crate::{RightPane, RustGisApp, icons};
 
@@ -477,7 +477,39 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         big_menu(ui, app, "web_data", "Web\nData", "Add data from public web services and catalogs.", web_data_menu);
     });
     group(ui, "Selection", |ui| {
-        tool_btn(ui, app, "select", "Select", "Click or drag a box to select features. Shift adds, Ctrl removes.", Tool::Select);
+        let checked = app.session.tool == Tool::Select;
+        let (primary, _) = big_split_menu(
+            ui,
+            app,
+            "select",
+            "Select",
+            "Click or drag a box to select features. Shift adds, Ctrl removes.",
+            "tool.set",
+            json!({"tool": "select"}),
+            checked,
+            "Select options",
+            "Choose polygon, lasso, or radius selection.",
+            true,
+            |ui, app| {
+                for tool in [Tool::SelectPolygon, Tool::SelectLasso, Tool::SelectRadius] {
+                    let row = ui.add(egui::Button::selectable(app.session.tool == tool, tl!(tool.label())));
+                    let row = if tool == Tool::SelectRadius {
+                        row.on_hover_text(tl!(
+                            "Approximate local-distance selection. The retained geographic prefilter can exclude features near the outline."
+                        ))
+                    } else {
+                        row
+                    };
+                    if row.clicked() && app.run("tool.set", json!({"tool": tool.code()})).is_ok() {
+                        app.map.cancel_sketch();
+                        ui.close();
+                    }
+                }
+            },
+        );
+        if primary.clicked() {
+            app.map.cancel_sketch();
+        }
         big(
             ui,
             app,

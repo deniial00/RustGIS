@@ -1530,6 +1530,9 @@ impl RustGisApp {
         let open_layout = |app: &Self| (app.session.active_layout, app.session.project.layouts.len());
         let layout_before = open_layout(self);
         let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
+        if r.is_ok() && id == "tool.set" {
+            self.map.cancel_sketch();
+        }
         if let Err(e) = &r {
             log::info!("{id}: {e}");
         }

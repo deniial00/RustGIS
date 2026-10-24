@@ -2,11 +2,18 @@
 
 ## Selection and queries
 
-**Home › Select** picks features by clicking or dragging a box (Shift adds, Ctrl removes). It
-takes only features that are drawn, in selectable layers: a definition query or a display filter
-hiding a feature keeps it out, and a click picks the feature drawn on top among the selectable
-layers. **Select By Attributes** takes a SQL clause and checks it as you type; **Select By Location**
-picks features that touch another layer's features or lie within a search distance of them (or,
+**Home › Select** picks features by clicking or dragging a box. Open **Select options** to choose
+**Select by Polygon** (click vertices; click the first vertex or double-click to finish), **Select by
+Lasso** (drag a freehand outline), or **Select by Radius** (drag from the centre to set a distance). Shift adds to the
+selection; Ctrl/Cmd removes; Esc cancels an unfinished outline. Area tools use even-odd fill, so a
+self-crossing outline selects its alternating filled regions. Radius uses the Neighborhood Explorer's
+local Mercator distance and retained geographic prefilter; its outline and readout are approximate
+and some features near the outline may be excluded. The main Select button remains click/rectangle
+selection.
+All selection tools take only features that are drawn, in selectable layers: a definition query or
+a display filter hiding a feature keeps it out, and a click picks the feature drawn on top among the
+selectable layers. **Select By Attributes** takes a SQL clause and checks it as you type; **Select By
+Location** picks features that touch another layer's features or lie within a search distance of them (or,
 inverted, those that don't). Selected features draw in
 cyan and are highlighted in the attribute table, and the selection is synced both ways. Switch,
 clear or zoom to the selection, or make a new layer from it (**Make Layer From Selected

@@ -18,6 +18,7 @@ pub mod kriging;
 pub mod network;
 pub mod neural;
 pub mod rasterops;
+pub mod selection;
 pub mod tissot;
 mod tools;
 pub mod topology;

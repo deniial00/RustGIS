@@ -277,6 +277,9 @@ pub enum Tool {
     #[default]
     Explore,
     Select,
+    SelectPolygon,
+    SelectLasso,
+    SelectRadius,
     ZoomIn,
     Measure,
     MeasureArea,
@@ -309,6 +312,9 @@ impl Tool {
         match self {
             Tool::Explore => "explore",
             Tool::Select => "select",
+            Tool::SelectPolygon => "selectPolygon",
+            Tool::SelectLasso => "selectLasso",
+            Tool::SelectRadius => "selectRadius",
             Tool::ZoomIn => "zoomIn",
             Tool::Measure => "measure",
             Tool::MeasureArea => "measureArea",
@@ -326,6 +332,9 @@ impl Tool {
         [
             Tool::Explore,
             Tool::Select,
+            Tool::SelectPolygon,
+            Tool::SelectLasso,
+            Tool::SelectRadius,
             Tool::ZoomIn,
             Tool::Measure,
             Tool::MeasureArea,
@@ -341,6 +350,9 @@ impl Tool {
         match self {
             Tool::Explore => "Explore",
             Tool::Select => "Select",
+            Tool::SelectPolygon => "Select by Polygon",
+            Tool::SelectLasso => "Select by Lasso",
+            Tool::SelectRadius => "Select by Radius",
             Tool::ZoomIn => "Zoom In",
             Tool::Measure => "Measure Distance",
             Tool::MeasureArea => "Measure Area",

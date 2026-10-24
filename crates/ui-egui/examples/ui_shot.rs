@@ -12,6 +12,8 @@
 //! it (shots then catch the map mid-drag; `{"release": true}` lets go; `"button": "secondary"`; `"ctrl": true` holds Ctrl
 //! drags with the right button),
 //! `{"rclick": [x, y]}` right-clicks at (x, y) (the map's menu),
+//! `{"pointer":[x,y],"pressed":true|false,"shift":bool,"ctrl":bool}` moves the primary
+//! pointer and optionally presses/releases it, stepping one frame; omit `pressed` for motion.
 //! `{"scroll": [x, y, dy]}` turns the mouse wheel by `dy` points over (x, y) (negative zooms
 //! out) and runs one frame (shots then catch the map mid-zoom),
 //! `{"plugin": path}` loads a `.rgplugin` or a plugin folder for the run (as `rustgis-cli run
@@ -262,6 +264,31 @@ fn main() {
             for _ in 0..3 {
                 harness.step();
             }
+        } else if let Some(d) = l.get("pointer").and_then(Value::as_array) {
+            let Some((x, y)) = d.first().and_then(Value::as_f64).zip(d.get(1).and_then(Value::as_f64)) else {
+                eprintln!("pointer takes [x, y]");
+                continue;
+            };
+            let pos = egui::pos2(x as f32, y as f32);
+            if held != egui::PointerButton::Primary
+                && let Some(previous) = harness.ctx.input(|i| i.pointer.latest_pos())
+            {
+                harness.event(egui::Event::PointerButton { pos: previous, button: held, pressed: false, modifiers: held_mods });
+            }
+            held = egui::PointerButton::Primary;
+            let ctrl = l.get("ctrl").and_then(Value::as_bool).unwrap_or(false);
+            held_mods = egui::Modifiers {
+                shift: l.get("shift").and_then(Value::as_bool).unwrap_or(false),
+                ctrl,
+                command: ctrl,
+                ..egui::Modifiers::NONE
+            };
+            harness.event(egui::Event::ModifiersChanged(held_mods));
+            harness.event(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = l.get("pressed").and_then(Value::as_bool) {
+                harness.event(egui::Event::PointerButton { pos, button: held, pressed, modifiers: held_mods });
+            }
+            harness.step();
         } else if let Some(d) = l.get("drag").and_then(|v| v.as_array()) {
             let n: Vec<f32> = d.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect();
             let [x, y, dx, dy] = n[..] else {

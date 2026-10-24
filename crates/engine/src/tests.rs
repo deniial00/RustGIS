@@ -2167,6 +2167,497 @@ fn select_takes_only_drawn_features_of_selectable_layers() {
     assert_eq!(selected(&s, "Countries").len(), 1);
 }
 
+fn map_area_selection_add(
+    s: &mut Session,
+    name: &str,
+    kind: rustgis_data::GeometryType,
+    geometries: &[Option<rustgis_data::Geometry>],
+) -> u32 {
+    use rustgis_data::{Dataset, Field, FieldType, Value as V};
+    let mut dataset = Dataset::new(name, kind, vec![Field::new("n", FieldType::Integer)]);
+    for (row, geometry) in geometries.iter().enumerate() {
+        dataset.push(geometry.clone(), vec![V::Int(row as i64)]);
+    }
+    s.map_mut().add_dataset(dataset)
+}
+
+fn map_area_selection_fixture() -> (Session, u32, u32) {
+    use rustgis_data::{Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    let mut s = Session::new(Project::default());
+    let geometries: Vec<_> =
+        [(0.5, 0.5), (2.0, 2.0), (3.0, 0.5), (4.0, 4.0)].into_iter().map(|(x, y)| Some(Geometry::Point(Coord::new(x, y)))).collect();
+    let first = map_area_selection_add(&mut s, "Points", GeometryType::Point, &geometries);
+    let second = map_area_selection_add(&mut s, "Other points", GeometryType::Point, &geometries);
+    s.map_mut().layer_mut(second).unwrap().selectable = false;
+    (s, first, second)
+}
+
+fn map_area_selection_rows(s: &Session, id: u32) -> Vec<usize> {
+    s.map().layer(id).unwrap().selection.clone()
+}
+
+fn map_area_selection_snapshot(s: &Session) -> Vec<(u32, Vec<usize>)> {
+    s.map().layers.iter().map(|layer| (layer.id, layer.selection.clone())).collect()
+}
+
+#[test]
+fn map_area_selection_command_modes_count_hits_across_layers() {
+    let operations = [
+        (
+            "select.byPolygon",
+            json!({"points": [[0,0],[3,0],[3,1],[1,1],[1,3],[0,3]]}),
+            json!({"points": [[10,10],[11,10],[11,11],[10,11]]}),
+        ),
+        ("select.byRadius", json!({"lon": 1.75, "lat": 0.5, "radius": 145000}), json!({"lon": 10, "lat": 10, "radius": 1})),
+    ];
+    for (command, query, disjoint) in operations {
+        for second_selectable in [false, true] {
+            for mode in [None, Some("NeW"), Some("ADD"), Some("ReMoVe")] {
+                let (mut s, first, second) = map_area_selection_fixture();
+                s.map_mut().layer_mut(second).unwrap().selectable = second_selectable;
+                s.map_mut().layer_mut(first).unwrap().selection = vec![0, 1];
+                s.map_mut().layer_mut(second).unwrap().selection = vec![0, 3];
+                let mut params = query.clone();
+                if let Some(mode) = mode {
+                    params["mode"] = json!(mode);
+                }
+                let result = s.run(command, &params).unwrap();
+                assert_eq!(result, json!({"selected": if second_selectable { 4 } else { 2 }}), "{command}: {mode:?}");
+                let (first_expected, second_expected) = match mode {
+                    Some("ADD") => (vec![0, 1, 2], if second_selectable { vec![0, 2, 3] } else { vec![0, 3] }),
+                    Some("ReMoVe") => (vec![1], if second_selectable { vec![3] } else { vec![0, 3] }),
+                    _ => (vec![0, 2], if second_selectable { vec![0, 2] } else { vec![] }),
+                };
+                assert_eq!(map_area_selection_rows(&s, first), first_expected, "{command}: {mode:?}");
+                assert_eq!(map_area_selection_rows(&s, second), second_expected, "{command}: {mode:?}");
+                let before = map_area_selection_snapshot(&s);
+                let mut empty = disjoint.clone();
+                if let Some(mode) = mode {
+                    empty["mode"] = json!(mode);
+                }
+                assert_eq!(s.run(command, &empty).unwrap(), json!({"selected": 0}));
+                if matches!(mode, Some("ADD" | "ReMoVe")) {
+                    assert_eq!(map_area_selection_snapshot(&s), before, "{command}: {mode:?}");
+                } else {
+                    assert!(s.map().layers.iter().all(|layer| layer.selection.is_empty()));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn map_area_selection_ring_forms_and_even_odd_lasso_are_command_visible() {
+    let (mut s, first, _) = map_area_selection_fixture();
+    for points in [
+        json!([[0, 0], [3, 0], [3, 1], [1, 1], [1, 3], [0, 3]]),
+        json!([[0, 0], [3, 0], [3, 1], [1, 1], [1, 3], [0, 3], [0, 0]]),
+        json!([[0, 0], [0, 0], [3, 0], [3, 0], [3, 1], [1, 1], [1, 3], [0, 3], [0, 0]]),
+    ] {
+        assert_eq!(s.run("select.byPolygon", &json!({"points": points})).unwrap(), json!({"selected": 2}));
+        assert_eq!(map_area_selection_rows(&s, first), [0, 2]);
+    }
+
+    use rustgis_data::{Geometry, GeometryType};
+    use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
+    // Construct the bow-tie in the command's planar space, then invert it. Its crossing really
+    // is (2,2), rather than the slightly different intersection of four Mercator-projected degrees.
+    let origin = lonlat_to_merc(Coord::new(0.0, 0.0));
+    let at = |x, y| merc_to_lonlat(Coord::new(origin.x + x * 10000.0, origin.y + y * 10000.0));
+    let mut s = Session::new(Project::default());
+    let geometries: Vec<_> =
+        [(2.0, 0.5), (2.0, 3.5), (0.5, 2.0), (2.0, 2.0), (4.5, 4.5)].into_iter().map(|(x, y)| Some(Geometry::Point(at(x, y)))).collect();
+    let id = map_area_selection_add(&mut s, "Lasso lobes", GeometryType::Point, &geometries);
+    let points: Vec<_> = [(0.0, 0.0), (4.0, 4.0), (0.0, 4.0), (4.0, 0.0)]
+        .into_iter()
+        .map(|(x, y)| {
+            let p = at(x, y);
+            [p.x, p.y]
+        })
+        .collect();
+    assert_eq!(s.run("select.byPolygon", &json!({"points": points})).unwrap(), json!({"selected": 3}));
+    assert_eq!(map_area_selection_rows(&s, id), [0, 1, 3]);
+}
+
+#[test]
+fn map_area_selection_rejected_inputs_preserve_exact_layer_selections() {
+    let (mut s, first, second) = map_area_selection_fixture();
+    s.map_mut().layer_mut(first).unwrap().selection = vec![1, 3];
+    s.map_mut().layer_mut(second).unwrap().selection = vec![0, 2];
+    let before = map_area_selection_snapshot(&s);
+    let mut invalid = vec![
+        ("select.byPolygon", Value::Null),
+        ("select.byPolygon", json!({"points": []})),
+        ("select.byPolygon", json!({"points": [[0,0],[1,1]]})),
+        ("select.byPolygon", json!({"points": [[0,0],[0,0],[0,0],[0,0]]})),
+        ("select.byPolygon", json!({"points": [[0,0],[1,0],[2,0]]})),
+        ("select.byPolygon", json!({"points": [[0,0],[1,null],[1,1]]})),
+        ("select.byPolygon", json!({"points": [[0,0],[1,0,2],[1,1]]})),
+        ("select.byPolygon", json!({"points": [[0,0],[181,0],[1,1]]})),
+        ("select.byPolygon", json!({"points": [[0,0],[1,-91],[1,1]]})),
+        ("select.byPolygon", json!({"points": [[179,0],[-179,0],[-179,1],[179,1]]})),
+        // Only the closing edge crosses the Mercator seam.
+        ("select.byPolygon", json!({"points": [[-170,0],[-10,1],[10,1],[170,0]]})),
+        ("select.byPolygon", json!({"points": [[0,86],[1,86],[1,87]]})),
+        ("select.byPolygon", json!({"points": vec![[0.0,0.0]; rustgis_analysis::selection::MAX_POINTS + 1]})),
+        ("select.byRadius", json!({"lon": 0, "lat": 0})),
+        ("select.byRadius", json!({"lon": null, "lat": 0, "radius": 1})),
+        ("select.byRadius", json!({"lon": 181, "lat": 0, "radius": 1})),
+        ("select.byRadius", json!({"lon": 0, "lat": 86, "radius": 1})),
+        ("select.byRadius", json!({"lon": 179.99, "lat": 0, "radius": 100000})),
+        ("select.byRadius", json!({"lon": 0, "lat": 85, "radius": 100000})),
+    ];
+    for radius in [json!(0), json!(-1), json!(5000001), json!("not a number"), Value::Null] {
+        invalid.push(("select.byRadius", json!({"lon": 0, "lat": 0, "radius": radius})));
+    }
+    for mode in [json!("subset"), json!("bogus"), json!(false), json!(1), json!([]), Value::Null] {
+        invalid.push(("select.byPolygon", json!({"points": [[0,0],[3,0],[3,3],[0,3]], "mode": mode})));
+        invalid.push(("select.byRadius", json!({"lon": 0, "lat": 0, "radius": 1000, "mode": mode})));
+    }
+    for (command, params) in invalid {
+        assert!(s.run(command, &params).is_err(), "{command}: {params}");
+        assert_eq!(map_area_selection_snapshot(&s), before, "{command}: {params}");
+    }
+    // Many proper crossings, but well below the vertex cap: refusal must come from the
+    // normalization work guard, not an arbitrary reduction in supported lasso detail.
+    let star: Vec<_> = (0..601)
+        .map(|i| {
+            let angle = (i * 300 % 601) as f64 * std::f64::consts::TAU / 601.0;
+            [angle.cos(), angle.sin()]
+        })
+        .collect();
+    let error = s.run("select.byPolygon", &json!({"points": star})).unwrap_err();
+    assert!(error.contains("too complex"), "{error}");
+    assert_eq!(map_area_selection_snapshot(&s), before);
+    s.run("map.projection", &json!({"type": "robinson", "lon_0": 150})).unwrap();
+    for (command, params) in [
+        ("select.byPolygon", json!({"points": [[-35,5],[-25,5],[-25,15],[-35,15]]})),
+        ("select.byRadius", json!({"lon": -30, "lat": 10, "radius": 100000})),
+    ] {
+        assert!(s.run(command, &params).is_err(), "{command}: {params}");
+        assert_eq!(map_area_selection_snapshot(&s), before);
+    }
+}
+
+#[test]
+fn map_area_selection_detailed_low_crossing_outline_is_not_truncated() {
+    let (mut s, first, _) = map_area_selection_fixture();
+    let count = 12000;
+    assert!(count < rustgis_analysis::selection::MAX_POINTS);
+    let points: Vec<_> = (0..count)
+        .map(|i| {
+            let angle = i as f64 * std::f64::consts::TAU / count as f64;
+            [0.5 + 0.25 * angle.cos(), 0.5 + 0.25 * angle.sin()]
+        })
+        .collect();
+    assert_eq!(s.run("select.byPolygon", &json!({"points": points})).unwrap(), json!({"selected": 1}));
+    assert_eq!(map_area_selection_rows(&s, first), [0]);
+}
+
+#[test]
+fn map_area_selection_drawn_row_policy_matches_rectangle_for_every_filter() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let operations = [
+        ("select.byRect", json!({"minLon": -1, "minLat": -1, "maxLon": 1, "maxLat": 1})),
+        ("select.byPolygon", json!({"points": [[-1,-1],[1,-1],[1,1],[-1,1]]})),
+        ("select.byRadius", json!({"lon": 0, "lat": 0, "radius": 100000})),
+    ];
+    for restriction in [
+        "none",
+        "invisible",
+        "unselectable",
+        "layer_min",
+        "layer_max",
+        "hidden_group",
+        "group_min",
+        "group_max",
+        "overlapping_groups",
+        "definition",
+        "display",
+        "time",
+        "combined",
+        "inactive_display",
+    ] {
+        let mut s = Session::new(Project::default());
+        let mut dataset =
+            Dataset::new("Events", GeometryType::Point, vec![Field::new("n", FieldType::Integer), Field::new("when", FieldType::Text)]);
+        for (row, date) in ["2025-01-15", "2025-02-15", "2025-03-15", "2025-02-20"].into_iter().enumerate() {
+            let geometry = (row != 3).then(|| Geometry::Point(Coord::new(0.1 * (row + 1) as f64, 0.1)));
+            dataset.push(geometry, vec![V::Int(row as i64), V::Text(date.into())]);
+        }
+        let id = s.map_mut().add_dataset(dataset);
+        s.active_layer = Some(id);
+        s.run("map.goToXY", &json!({"lon": 0, "lat": 0, "scale": 1000000})).unwrap();
+        let scale = s.scale();
+        match restriction {
+            "invisible" => {
+                s.run("layer.visibility", &json!({"layer": id, "visible": false})).unwrap();
+            }
+            "unselectable" => {
+                s.run("layer.selectable", &json!({"layer": id, "on": false})).unwrap();
+            }
+            "layer_min" => {
+                s.run("layer.scaleRange", &json!({"layer": id, "min": scale * 0.5})).unwrap();
+            }
+            "layer_max" => {
+                s.run("layer.scaleRange", &json!({"layer": id, "max": scale * 2.0})).unwrap();
+            }
+            "hidden_group" | "group_min" | "group_max" | "overlapping_groups" => {
+                let group = s.run("group.add", &json!({"name": "Limited", "layers": [id]})).unwrap()["group"].clone();
+                match restriction {
+                    "group_min" => {
+                        s.run("group.scaleRange", &json!({"group": group, "min": scale * 0.5})).unwrap();
+                    }
+                    "group_max" => {
+                        s.run("group.scaleRange", &json!({"group": group, "max": scale * 2.0})).unwrap();
+                    }
+                    _ => {
+                        s.run("group.set", &json!({"group": group, "visible": false})).unwrap();
+                    }
+                }
+                if restriction == "overlapping_groups" {
+                    // held_by_group must win even when a second, visible membership exists.
+                    let mut visible = rustgis_map::LayerGroup::new("Also visible");
+                    visible.id = 1000000;
+                    visible.children.push(id);
+                    s.map_mut().groups.push(visible);
+                }
+            }
+            _ => {}
+        }
+        if matches!(restriction, "definition" | "combined") {
+            s.run("layer.definitionQuery", &json!({"layer": id, "where": "n <> 0"})).unwrap();
+        }
+        if matches!(restriction, "display" | "combined" | "inactive_display") {
+            let filters = if restriction == "inactive_display" {
+                json!([{"name": "Inactive", "where": "n = -1", "minScale": scale * 0.5}])
+            } else {
+                json!([{"name": "Not March", "where": "n <> 2"}])
+            };
+            s.run("layer.displayFilters", &json!({"layer": id, "filters": filters})).unwrap();
+        }
+        if matches!(restriction, "time" | "combined") {
+            s.run("time.bind", &json!({"layer": id, "field": "when"})).unwrap();
+            s.run("time.set", &json!({"date": "2025-02-15", "unit": "month", "show": "step"})).unwrap();
+        }
+        let expected = match restriction {
+            "none" | "inactive_display" => vec![0, 1, 2],
+            "definition" => vec![1, 2],
+            "display" => vec![0, 1],
+            "time" | "combined" => vec![1],
+            _ => vec![],
+        };
+        let mut rectangle = None;
+        for (command, params) in &operations {
+            // A new query clears even a previously selected geometry-less/filtered-out row.
+            s.map_mut().layer_mut(id).unwrap().selection = vec![0, 1, 2, 3];
+            assert_eq!(s.run(command, params).unwrap(), json!({"selected": expected.len()}), "{restriction}: {command}");
+            let actual = map_area_selection_rows(&s, id);
+            assert_eq!(actual, expected, "{restriction}: {command}");
+            if let Some(rectangle) = &rectangle {
+                assert_eq!(&actual, rectangle, "{restriction}: {command} differs from rectangle");
+            } else {
+                rectangle = Some(actual);
+            }
+        }
+    }
+}
+
+#[test]
+fn map_area_selection_radius_typed_geometries_match_network_at_zero_and_sixty() {
+    use rustgis_analysis::network::{radius_boundary_point, radius_distance_m, within};
+    use rustgis_data::{Geometry, GeometryType};
+    use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
+    for latitude in [0.0_f64, 60.0] {
+        let center = Coord::new(3.0, latitude);
+        let origin = lonlat_to_merc(center);
+        let k = 1.0 / latitude.to_radians().cos().max(0.01);
+        let at = |x: f64, y: f64| Coord::new(origin.x + x * k, origin.y + y * k);
+        let ring =
+            |radius: f64| vec![at(-radius, -radius), at(radius, -radius), at(radius, radius), at(-radius, radius), at(-radius, -radius)];
+        let boundary = merc_to_lonlat(at(600.0, 800.0));
+        // Round-trip arithmetic at an exact boundary is part of within's contract. Derive the
+        // query threshold with its shared metric, not an epsilon-expanded independent distance.
+        let radius = radius_distance_m(center, boundary).unwrap();
+        assert!((radius - 1000.0).abs() < 1e-6, "{latitude}: {radius}");
+        assert!((radius_distance_m(center, merc_to_lonlat(at(300.0, 400.0))).unwrap() - 500.0).abs() < 1e-6);
+        assert!(radius_distance_m(center, merc_to_lonlat(at(606.0, 808.0))).unwrap() > radius);
+        let preview_boundary = radius_boundary_point(center, radius, 800.0_f64.atan2(600.0)).unwrap();
+        assert!((radius_distance_m(center, preview_boundary).unwrap() - radius).abs() < 1e-6);
+        if latitude == 60.0 {
+            let east = merc_to_lonlat(Coord::new(origin.x + 2000.0, origin.y));
+            assert!((radius_distance_m(center, east).unwrap() - 1000.0).abs() < 1e-6);
+        }
+        let fixtures = [
+            (
+                "Points",
+                GeometryType::Point,
+                vec![
+                    Some(Geometry::Point(at(0.0, 0.0))),
+                    Some(Geometry::Point(at(300.0, 400.0))),
+                    Some(Geometry::Point(at(600.0, 800.0))),
+                    Some(Geometry::Point(at(606.0, 808.0))),
+                    Some(Geometry::MultiPoint(vec![at(2000.0, 2000.0), at(300.0, 400.0)])),
+                    None,
+                ],
+                vec![0, 1, 2, 4],
+            ),
+            (
+                "Lines",
+                GeometryType::Polyline,
+                vec![
+                    Some(Geometry::Line(vec![vec![at(-2000.0, 0.0), at(2000.0, 0.0)]])),
+                    Some(Geometry::Line(vec![vec![at(600.0, 800.0), at(1200.0, 1600.0)]])),
+                    Some(Geometry::Line(vec![vec![at(2000.0, -2000.0), at(2000.0, 2000.0)]])),
+                ],
+                vec![0, 1],
+            ),
+            (
+                "Polygons",
+                GeometryType::Polygon,
+                vec![
+                    Some(Geometry::Polygon(vec![vec![ring(2000.0)]])),
+                    Some(Geometry::Polygon(vec![vec![ring(3000.0), ring(2000.0)]])),
+                    Some(Geometry::Polygon(vec![vec![vec![at(600.0, 800.0), at(1600.0, 800.0), at(600.0, 1800.0), at(600.0, 800.0)]]])),
+                    Some(Geometry::Polygon(vec![vec![vec![
+                        at(400.0, 400.0),
+                        at(500.0, 400.0),
+                        at(500.0, 500.0),
+                        at(400.0, 500.0),
+                        at(400.0, 400.0),
+                    ]]])),
+                    Some(Geometry::Polygon(vec![vec![vec![
+                        at(2000.0, 2000.0),
+                        at(3000.0, 2000.0),
+                        at(3000.0, 3000.0),
+                        at(2000.0, 2000.0),
+                    ]]])),
+                ],
+                vec![0, 2, 3],
+            ),
+        ];
+        let mut s = Session::new(Project::default());
+        let mut expected_layers = Vec::new();
+        for (name, kind, geometries, expected) in fixtures {
+            let geometries: Vec<_> = geometries.into_iter().map(|g| g.map(|g| g.map_coords(&merc_to_lonlat))).collect();
+            let id = map_area_selection_add(&mut s, name, kind, &geometries);
+            let dataset = &s.map().layer(id).unwrap().dataset;
+            let rows: Vec<_> = (0..dataset.features.len()).collect();
+            let mut direct: Vec<_> = within(dataset, &rows, center, radius).into_iter().map(|(row, _)| row).collect();
+            direct.sort_unstable();
+            assert_eq!(direct, expected, "{latitude}: {name} numerical fixture");
+            expected_layers.push((id, direct));
+        }
+        // Radius hit testing must remain in its original dataset/metric space when the active
+        // flat projection changes, including the regional grid used by the polygon fixture.
+        for projection in ["mercator", "robinson", "EPSG:32631"] {
+            s.run("map.projection", &json!({"type": projection})).unwrap();
+            let total: usize = expected_layers.iter().map(|(_, rows)| rows.len()).sum();
+            assert_eq!(
+                s.run("select.byRadius", &json!({"lon": center.x, "lat": center.y, "radius": radius})).unwrap(),
+                json!({"selected": total}),
+                "{latitude}: {projection}"
+            );
+            for (id, expected) in &expected_layers {
+                assert_eq!(&map_area_selection_rows(&s, *id), expected, "{latitude}: {projection}: {id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn map_area_selection_radius_retains_legacy_geographic_prefilter() {
+    use rustgis_analysis::network::{radius_distance_m, within};
+    use rustgis_data::{Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    let center = Coord::new(0.0, 60.0);
+    let point = Coord::new(0.0, 59.1);
+    let distance = radius_distance_m(center, point).unwrap();
+    assert!(distance > 98000.0 && distance < 100000.0, "{distance}");
+    let mut s = Session::new(Project::default());
+    let id = map_area_selection_add(&mut s, "Legacy boundary", GeometryType::Point, &[Some(Geometry::Point(point))]);
+    assert!(within(&s.map().layer(id).unwrap().dataset, &[0], center, 100000.0).is_empty());
+    for mode in ["add", "remove", "new"] {
+        s.map_mut().layer_mut(id).unwrap().selection = vec![0];
+        assert_eq!(
+            s.run("select.byRadius", &json!({"lon": 0, "lat": 60, "radius": 100000, "mode": mode})).unwrap(),
+            json!({"selected": 0})
+        );
+        assert_eq!(map_area_selection_rows(&s, id), if mode == "new" { vec![] } else { vec![0] }, "{mode}");
+    }
+}
+
+#[test]
+fn map_area_selection_polygon_uses_projected_crossings_holes_and_multipart_features() {
+    use rustgis_data::{Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    for projection in ["mercator", "robinson", "EPSG:32631"] {
+        let mut s = Session::new(Project::default());
+        s.run("map.projection", &json!({"type": projection})).unwrap();
+        let flat = s.map().flat();
+        let origin = flat.forward_checked(Coord::new(3.0, 50.0)).unwrap();
+        let at = |x: f64, y: f64| Coord::new(origin.x + x * 10000.0, origin.y + y * 10000.0);
+        let ring = |a: f64, b: f64| vec![at(a, a), at(b, a), at(b, b), at(a, b), at(a, a)];
+        let fixtures = [
+            (
+                "Projected points",
+                GeometryType::Point,
+                vec![
+                    Some(Geometry::Point(at(0.5, 0.5))),
+                    Some(Geometry::Point(at(2.0, 2.0))),
+                    Some(Geometry::Point(at(2.5, 0.5))),
+                    Some(Geometry::Point(at(4.0, 4.0))),
+                    Some(Geometry::MultiPoint(vec![at(2.0, 2.0), at(0.5, 2.0)])),
+                    None,
+                ],
+                vec![0, 2, 4],
+            ),
+            (
+                "Projected lines",
+                GeometryType::Polyline,
+                vec![
+                    // Neither endpoint is inside the L, but the segment traverses it.
+                    Some(Geometry::Line(vec![vec![at(-1.0, 0.5), at(4.0, 0.5)]])),
+                    Some(Geometry::Line(vec![vec![at(1.5, 2.0), at(2.5, 2.0)]])),
+                    Some(Geometry::Line(vec![vec![at(4.0, 4.0), at(5.0, 5.0)], vec![at(0.2, 0.2), at(0.8, 0.8)]])),
+                ],
+                vec![0, 2],
+            ),
+            (
+                "Projected polygons",
+                GeometryType::Polygon,
+                vec![
+                    // The mask lies entirely inside this exterior, with no boundary crossings.
+                    Some(Geometry::Polygon(vec![vec![ring(-1.0, 5.0)]])),
+                    Some(Geometry::Polygon(vec![vec![ring(-1.0, 5.0), ring(-0.5, 3.5)]])),
+                    Some(Geometry::Polygon(vec![vec![ring(1.5, 2.5)]])),
+                    Some(Geometry::Polygon(vec![vec![ring(1.5, 2.5)], vec![ring(0.2, 0.8)]])),
+                ],
+                vec![0, 3],
+            ),
+        ];
+        let mut expected_layers = Vec::new();
+        for (name, kind, geometries, expected) in fixtures {
+            let geometries: Vec<_> = geometries.into_iter().map(|g| g.map(|g| g.map_coords(&|p| flat.inverse(p).unwrap()))).collect();
+            let id = map_area_selection_add(&mut s, name, kind, &geometries);
+            expected_layers.push((id, expected));
+        }
+        let points: Vec<_> = [(0.0, 0.0), (3.0, 0.0), (3.0, 1.0), (1.0, 1.0), (1.0, 3.0), (0.0, 3.0)]
+            .into_iter()
+            .map(|(x, y)| {
+                let p = flat.inverse(at(x, y)).unwrap();
+                [p.x, p.y]
+            })
+            .collect();
+        assert_eq!(s.run("select.byPolygon", &json!({"points": points})).unwrap(), json!({"selected": 7}), "{projection}");
+        for (id, expected) in expected_layers {
+            assert_eq!(map_area_selection_rows(&s, id), expected, "{projection}: {id}");
+        }
+    }
+}
+
 #[test]
 fn zooms_to_a_layer_follow_its_definition_query() {
     let mut s = world();

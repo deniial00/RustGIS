@@ -57,8 +57,6 @@ The bugs users hit, the docs and a few quick wins: good first pull requests.
 - A pass over the user guide, the comparison pages and the README against what the app does
   today (vertex editing, spatial join and kriging are listed as missing or undocumented; some
   pages still say 16 languages).
-- Selection by polygon and lasso, and a radius tool on the map (Neighborhood Explorer already
-  selects by radius) _(open)_.
 
 ### Solid ground
 Correct, robust and recoverable, with the foundations other themes stand on.
@@ -193,10 +191,10 @@ Open questions rather than plans; discuss before building.
   and GMT palette files); masking, display filters, blend modes, aggregation, extrusion; graphics.
 - Editing: create, move, rotate, scale, merge, split, explode, vertex editing; snapping, templates, elevation,
   topology; domains, subtypes, attribute rules, contingent values, relationships, archiving.
-- Analysis: selection by attributes and location; overlay (clip, erase), proximity (buffer) and summary tools, spatial
-  join, A5 grids, kriging; guided workflows (viewshed, line of sight, IDW, shortest path,
-  suitability); ModelBuilder and scripts, and history copied as code; the GeoLibre and Whitebox
-  suite (1,000+ tools) natively and in the browser.
+- Analysis: selection by attributes and location; polygon, lasso and radius on the map; overlay
+  (clip, erase), proximity (buffer) and summary tools, spatial join, A5 grids, kriging; guided
+  workflows (viewshed, line of sight, IDW, shortest path, suitability); ModelBuilder and scripts,
+  and history copied as code; the GeoLibre and Whitebox suite (1,000+ tools) natively and in the browser.
 - Layouts (map frames, surrounds, map series, publication sheets and figures in one command, PDF),
   reports, presentations and notebooks; the web app embeddable in a page (`?embed`).
 - Sharing as open formats (web maps, OGC API Features collections, MapLibre styles, glTF
