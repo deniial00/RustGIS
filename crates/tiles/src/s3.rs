@@ -8,7 +8,7 @@
 //! for (a signed request that is redirected is not followed). The fetchers ([`crate::cache`] and
 //! the web app's) call [`prepare`] for every web request.
 
-use std::sync::Mutex;
+use std::{borrow::Cow, sync::Mutex};
 
 use sha2::{Digest, Sha256};
 
@@ -454,19 +454,22 @@ fn bound_target(address: &str) -> Result<(String, Connection), String> {
         return Err(UNRESOLVED.into());
     }
     let wanted = canonical(b.endpoint).map_err(|_| MISMATCH.to_string())?;
-    let reg = lock();
-    let saved = reg.saved.iter().find(|s| s.binding == b.binding).ok_or(UNRESOLVED)?;
-    let c = reg.connections.iter().find(|c| c.name == saved.name).ok_or(UNRESOLVED)?;
-    if c.endpoint != wanted {
-        return Err(MISMATCH.into());
-    }
-    let serves = |bucket: &str| c.buckets.iter().any(|x| x == bucket) || saved.grants.iter().any(|x| x == bucket);
+    // Snapshot only the selected login and this request's explicit grant. No URL parsing,
+    // origin validation or signing runs under the registry lock, and the grant list isn't copied.
+    let snapshot = |bucket: Option<&str>| -> Result<(Connection, bool), String> {
+        let reg = lock();
+        let saved = reg.saved.iter().find(|s| s.binding == b.binding).ok_or(UNRESOLVED)?;
+        let c = reg.connections.iter().find(|c| c.name == saved.name).ok_or(UNRESOLVED)?;
+        let granted = bucket.is_some_and(|bucket| saved.grants.iter().any(|g| g == bucket));
+        Ok((c.clone(), granted))
+    };
     if is_s3(b.url) {
         let (bucket, key) = parse(b.url).map_err(|_| MISMATCH.to_string())?;
-        if !serves(&bucket) {
+        let (c, granted) = snapshot(Some(&bucket))?;
+        if c.endpoint != wanted || !(c.buckets.iter().any(|b| b == &bucket) || granted) {
             return Err(MISMATCH.into());
         }
-        return Ok((object_url(&bucket, &key, Some(c)), c.clone()));
+        return Ok((object_url(&bucket, &key, Some(&c)), c));
     }
     // Only the origin is case-insensitive. Bucket paths retain their exact spelling.
     let (scheme, rest) = b.url.split_once("://").ok_or(MISMATCH)?;
@@ -476,32 +479,30 @@ fn bound_target(address: &str) -> Result<(String, Connection), String> {
         return Err(MISMATCH.into());
     }
     let here = origin(scheme, authority);
-    let allowed = match c.endpoint.as_deref() {
-        // The connection's own endpoint, path-style: the path's first part is the bucket (none: the
-        // account's bucket list).
-        Some(ep) => {
-            let path = rest.get(authority.len()..).unwrap_or("");
-            let first = path.trim_start_matches('/').split(['/', '?', '#']).next().unwrap_or("");
-            here == ep
-                && (first.is_empty() && path.split(['?', '#']).next().unwrap_or("").trim_start_matches('/').is_empty() || serves(first))
-        }
-        None => {
-            let host = here.strip_prefix("https://").unwrap_or("").split(':').next().unwrap_or("");
-            aws_host(scheme, &here, host)
-                && match aws_bucket(host, rest) {
-                    Some(bucket) => serves(&bucket),
-                    None => {
-                        let path = rest.split_once('/').map(|(_, p)| p).unwrap_or("");
-                        host.strip_prefix("s3.").and_then(|r| r.strip_suffix(".amazonaws.com")) == Some(c.region.as_str())
-                            && path.split(['?', '#']).next().unwrap_or("").is_empty()
-                    }
-                }
-        }
+    let host = here.strip_prefix("https://").unwrap_or("").split(':').next().unwrap_or("");
+    let path = rest.get(authority.len()..).unwrap_or("");
+    let first = path.trim_start_matches('/').split(['/', '?', '#']).next().unwrap_or("");
+    let bucket: Option<Cow<'_, str>> =
+        if wanted.is_some() { (!first.is_empty()).then_some(Cow::Borrowed(first)) } else { aws_bucket(host, rest).map(Cow::Owned) };
+    let origin_allowed = match wanted.as_deref() {
+        Some(endpoint) => here == endpoint,
+        None => aws_host(scheme, &here, host),
     };
-    if !allowed {
+    let root_path = if wanted.is_some() {
+        path.split(['?', '#']).next().unwrap_or("").trim_start_matches('/').is_empty()
+    } else {
+        rest.split_once('/').map(|(_, p)| p).unwrap_or("").split(['?', '#']).next().unwrap_or("").is_empty()
+    };
+    let root_region = host.strip_prefix("s3.").and_then(|r| r.strip_suffix(".amazonaws.com"));
+    let (c, granted) = snapshot(bucket.as_deref())?;
+    let allowed = match bucket.as_deref() {
+        Some(bucket) => c.buckets.iter().any(|b| b == bucket) || granted,
+        None => root_path && (wanted.is_some() || root_region == Some(c.region.as_str())),
+    };
+    if c.endpoint != wanted || !origin_allowed || !allowed {
         return Err(MISMATCH.into());
     }
-    Ok((b.url.to_string(), c.clone()))
+    Ok((b.url.to_string(), c))
 }
 
 /// A request ready to send: its web address, the headers to add, and whether it is signed (a

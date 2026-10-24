@@ -59,6 +59,10 @@ browser and the CLI, where callers keep a secret for the session only, as before
 - **Blocking.** A call can wait on an OS prompt or D-Bus. Make it on a user action or a worker
   thread, never every frame, and keep the value in memory for the session. Don't access one
   account from two threads at once.
+- **S3 request snapshots.** The registry lock protects selection of the exact live login and
+  the requested bucket's explicit-grant status. Copy only that login and grant boolean, not
+  the grant list; parse and validate addresses and prepare signatures outside the lock.
+  Keychain calls and network I/O never run under the registry lock.
 - **macOS.** The system asks again for access when the app's code signature changes, which
   happens with unsigned or re-signed builds.
 - **Tests.** Use `MemorySecrets`, and `MemorySecrets::failing(..)` for error paths. The desktop
