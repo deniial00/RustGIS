@@ -76,7 +76,7 @@ pub fn why_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
 pub fn tooltip(app: &RustGisApp, resp: Response, title: &str, desc: &str, id: &str, params: &Value) -> Response {
     let sc = crate::keymap::shortcut_text(&resp.ctx, app, id, params);
     let why = why_disabled(app, id);
-    resp.on_hover_ui(|ui| {
+    let contents = |ui: &mut Ui| {
         ui.set_max_width(280.0);
         // Callers pass text that is already translated.
         let head = if sc.is_empty() { title.to_string() } else { format!("{title}  ({sc})") };
@@ -87,7 +87,8 @@ pub fn tooltip(app: &RustGisApp, resp: Response, title: &str, desc: &str, id: &s
         if let Some(w) = why {
             ui.label(egui::RichText::new(crate::i18n::fmt("Unavailable: {reason}", &[("reason", tl_raw!(w))])).size(11.0).italics().weak());
         }
-    })
+    };
+    if resp.enabled() { resp.on_hover_ui(contents) } else { resp.on_disabled_hover_ui(contents) }
 }
 
 fn bg(ui: &Ui, r: Rect, resp: &Response, checked: bool, t: &Tokens) {

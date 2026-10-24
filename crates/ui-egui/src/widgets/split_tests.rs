@@ -192,6 +192,9 @@ fn disabled_primary_still_allows_enabled_menu_actions() {
     let resolution = h.state().session.map().camera.res;
     h.get_by_label("Zoom To").click();
     h.run();
+    h.get_by_label("Zoom To").hover();
+    h.run();
+    assert!(h.query_all_by_label_contains("Unavailable").next().is_some(), "disabled primary still explains why it is unavailable");
     assert_eq!(h.state().session.map().camera.res, resolution);
     assert_eq!(h.state().session.tool, Tool::Measure);
     assert_menu(&h, false);
