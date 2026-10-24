@@ -319,7 +319,9 @@ fn reopen(s: &mut Session, c: &Connection, saved: bool, all_unopened: bool) -> R
         if kind != key.0 || crate::connections::database_key(&crate::sources::redact(database)).as_ref() != Some(&key) {
             continue;
         }
-        if saved && result.refused {
+        if result.refused {
+            // The server has already refused this attempt's password: the group's other layers
+            // must not send it again (one attempt per database, typed or saved).
             src.login = true;
             src.error = first_error.clone();
             result.failed += 1;

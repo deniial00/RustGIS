@@ -225,8 +225,9 @@ fn remembered_database_unique_packet_refusal_and_replacement() {
     s.run("project.openText", &json!({"text":text})).unwrap();
     server.empty();
     s.run("connection.login", &json!({"id":id,"password":"unchecked-new"})).unwrap();
+    // One attempt per database: the refused password is not sent to the group's other layers.
     assert_eq!(server.take(), b"unchecked-new\0");
-    assert_eq!(server.take(), b"unchecked-new\0");
+    server.empty();
     assert_eq!(store.load(&format!("connection/{id}")).unwrap(), saved);
     assert!(s.database_logins.is_rejected(&id));
     // A refused password is not "available for this session", and the store keeps the old value.
@@ -234,7 +235,7 @@ fn remembered_database_unique_packet_refusal_and_replacement() {
     assert_eq!(refused["passwordSaved"], false, "{refused}");
     assert!(refused.get("warning").is_none(), "a refused password must not be called available: {refused}");
     assert_eq!(server.take(), b"refused-with-remember\0");
-    assert_eq!(server.take(), b"refused-with-remember\0");
+    server.empty();
     assert_eq!(store.load(&format!("connection/{id}")).unwrap(), saved);
     assert!(s.database_logins.is_rejected(&id));
     s.run("project.new", &Value::Null).unwrap();
@@ -305,7 +306,6 @@ fn remembered_database_exact_address_and_explicit_precedence_packets() {
     // An explicit login without a password must not replace the address's own password with the
     // saved one either: the address's wins, as it does when the project opens.
     explicit.run("connection.login", &json!({"id":id})).unwrap();
-    assert_eq!(server.take(), b"explicit-sentinel\0");
     assert_eq!(server.take(), b"explicit-sentinel\0");
     server.empty();
 }
