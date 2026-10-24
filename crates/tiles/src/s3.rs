@@ -166,12 +166,18 @@ pub fn connect(c: Connection) -> Result<(), String> {
 /// digits, never zero, never given twice in this process (two sessions' saved ids are often the
 /// same, `c1`; their logins mustn't be).
 pub fn new_binding() -> Result<String, String> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT
-        .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| n.checked_add(1))
-        .map_err(|_| "S3 connection tokens are used up".to_string())?
-        .wrapping_add(1);
-    Ok(format!("{n:016x}"))
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // A compare-and-swap loop, not `fetch_update`/`try_update`: the old name is deprecated on the
+    // current stable and the new one does not exist on the oldest toolchain this crate builds on.
+    let mut current = NEXT.load(Ordering::SeqCst);
+    loop {
+        let next = current.checked_add(1).ok_or_else(|| "S3 connection tokens are used up".to_string())?;
+        match NEXT.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Ok(format!("{next:016x}")),
+            Err(seen) => current = seen,
+        }
+    }
 }
 
 /// Makes the login of the saved connection `id` live for the session under `binding`: checked as
