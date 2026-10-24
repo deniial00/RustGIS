@@ -1893,7 +1893,9 @@ pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
     super::connections::clear_active();
     s.project.normalize();
     super::connections::restore_active(s);
-    super::connections::resolve_project(s);
+    // Only the database the added layer reads can change here.
+    let keys: Vec<_> = s.map().layer(id).and_then(|l| l.source.as_ref()).map(super::connections::layer_keys).unwrap_or_default();
+    super::connections::resolve_keys(s, &keys);
     super::connections::note_waiting(s);
     s.active_layer = Some(id);
     Ok(json!({"layer": id}))

@@ -127,6 +127,7 @@ impl Server {
             worker: Some(worker),
         }
     }
+
     #[track_caller]
     fn take(&self) -> Vec<u8> {
         self.packets.recv_timeout(std::time::Duration::from_secs(3)).unwrap()
@@ -150,8 +151,13 @@ fn app(store: Arc<MemorySecrets>, prefs: &str) -> Session {
     s
 }
 fn project(address: &str) -> String {
+    project_layers(address, 2)
+}
+
+/// A project whose first `n` layers read `address`.
+fn project_layers(address: &str, n: usize) -> String {
     let mut p = world().project;
-    for layer in p.map_mut().layers.iter_mut().take(2) {
+    for layer in p.map_mut().layers.iter_mut().take(n) {
         layer.source = Some(serde_json::from_value(json!({"postgis":{"database":address,"table":"roads","family":"Lines"}})).unwrap());
     }
     serde_json::to_string(&p).unwrap()
@@ -449,4 +455,36 @@ fn remembered_database_test_listing_failure_keeps_authenticated_session() {
     assert_eq!(envelope["password"], "prior-a");
     assert_eq!(s.database_logins.session_password(&b).unwrap().expose(), "prior-b");
     server.empty();
+}
+
+#[test]
+fn remembered_database_incremental_change_resolves_only_its_database() {
+    if isolated("remembered_database_incremental_change_resolves_only_its_database") {
+        return;
+    }
+    let server = Server::start(true);
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = app(store, "{}");
+    let id = remember(&mut s, "Waiting", &server.address, "waiting-sentinel");
+    // One layer waits for this database. Opening the project connects once, and the catalogue
+    // read fails (not a refusal), so the group stays unopened for a later resolution.
+    s.run("project.openText", &json!({"text":project_layers(&server.address, 1)})).unwrap();
+    assert_eq!(server.take(), b"waiting-sentinel\0");
+    // A change to another connection must not connect to this database again.
+    s.run(
+        "connection.new",
+        &json!({"kind":"postgres","name":"Far","address":"postgres:host=127.0.0.1 port=1 user=far dbname=gis sslmode=disable"}),
+    )
+    .unwrap();
+    server.empty();
+    // A change to this database's own definition still resolves its layers.
+    let same = s.run("connection.new", &json!({"kind":"postgres","name":"Same","address":server.address})).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(server.take(), b"waiting-sentinel\0");
+    s.run("connection.remove", &json!({"id":same})).unwrap();
+    assert_eq!(server.take(), b"waiting-sentinel\0");
+    server.empty();
+    assert!(s.connections.find(&id).is_some());
 }

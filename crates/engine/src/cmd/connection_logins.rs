@@ -47,11 +47,31 @@ pub(super) fn request_password(s: &mut Session, c: &Connection) {
     }
 }
 
+/// Resolves every unopened database of the project: a project was opened or imported.
 pub(crate) fn resolve_project(s: &mut Session) {
     #[cfg(target_arch = "wasm32")]
     let _ = s;
     #[cfg(not(target_arch = "wasm32"))]
+    resolve(s, None);
+}
+
+/// Resolves only the databases `keys` names: a saved definition or a single layer change can only
+/// affect those, so an unrelated database that is down is not connected to again on every edit.
+pub(crate) fn resolve_keys(s: &mut Session, keys: &[(&'static str, String)]) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = (s, keys);
+    #[cfg(not(target_arch = "wasm32"))]
+    resolve(s, Some(keys));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve(s: &mut Session, only: Option<&[(&'static str, String)]>) {
     for ((kind, key), layers) in groups(s) {
+        if let Some(only) = only
+            && !only.iter().any(|(k, database)| *k == kind && *database == key)
+        {
+            continue;
+        }
         use rustgis_data::source::duckdb;
         if duckdb::has_explicit_password(&key) {
             s.database_logins.clear_requests_for(kind, &key);

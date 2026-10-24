@@ -17,7 +17,7 @@ mod browse;
 mod logins;
 #[cfg(not(target_arch = "wasm32"))]
 use logins::request_password;
-pub(crate) use logins::{clear_active, resolve_project, restore_active};
+pub(crate) use logins::{clear_active, resolve_keys, resolve_project, restore_active};
 #[path = "connection_use.rs"]
 mod connection_use;
 
@@ -156,7 +156,7 @@ fn new(s: &mut Session, p: &Value) -> CmdResult {
     };
     let explicit = !c.name.trim().is_empty();
     let (c, stripped) = s.connections.add(c, explicit)?;
-    resolve_project(s);
+    resolve_keys(s, &address_keys(&c.address));
     Ok(shown_stripped(s, &c, stripped))
 }
 
@@ -192,8 +192,11 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
     }
     s.connections = proposed;
     if old.address != c.address {
-        s.database_logins.clear_requests();
-        resolve_project(s);
+        // Only the two databases this definition names can change: another database's layers
+        // waiting for a login keep their request, and an unrelated down server is not retried.
+        let mut keys = address_keys(&old.address);
+        keys.extend(address_keys(&c.address));
+        resolve_keys(s, &keys);
     }
     if c.kind == "s3" && (old.name != c.name || old.address != c.address || old.options != c.options) {
         s3::disconnect(&old.name);
@@ -212,8 +215,7 @@ fn duplicate(s: &mut Session, p: &Value) -> CmdResult {
         c.name = name.into();
     }
     let (c, _) = s.connections.add(c, explicit)?;
-    s.database_logins.clear_requests();
-    resolve_project(s);
+    resolve_keys(s, &address_keys(&c.address));
     Ok(shown(s, &c))
 }
 
@@ -226,8 +228,9 @@ fn remove(s: &mut Session, p: &Value) -> CmdResult {
         clear_identity(s, &c.id);
     }
     s.connections = proposed;
-    s.database_logins.clear_requests();
-    resolve_project(s);
+    // The removed definition named one database: only its layers can change. The requests naming
+    // it went with `clear_identity`.
+    resolve_keys(s, &address_keys(&c.address));
     if c.kind == "s3" {
         s3::disconnect(&c.name);
     }
@@ -250,6 +253,17 @@ fn clear_identity(s: &mut Session, id: &str) {
     s.database_logins.forget_connection(id);
     #[cfg(not(target_arch = "wasm32"))]
     rustgis_data::source::duckdb::forget_connection_password(id);
+}
+
+/// The databases an address names (empty for kinds that read no database).
+fn address_keys(address: &str) -> Vec<(&'static str, String)> {
+    crate::connections::database_key(address).into_iter().collect()
+}
+
+/// The database a layer reads, as its driver names it (the same key `resolve_project` groups by).
+pub(crate) fn layer_keys(src: &rustgis_map::source::SourceLayer) -> Vec<(&'static str, String)> {
+    let Some((_, database)) = crate::connections::layer_database(src) else { return Vec::new() };
+    crate::connections::database_key(&crate::sources::redact(database)).into_iter().collect()
 }
 
 fn forget_password(s: &mut Session, p: &Value) -> CmdResult {

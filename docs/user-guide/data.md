@@ -508,7 +508,9 @@ prompt. Use Forget to delete a previously saved password.
 
 A database login reopens waiting layers at the same password-free address;
 `connection.list` reports them as `waiting`, and `connection.login` returns `reopened` and
-`failed` counts. `connection.test` never persists a password. For a named connection, if the
+`failed` counts. Adding, editing or removing a saved connection, or adding a layer, resolves
+only the databases that change: an unrelated database that is down is not connected to again.
+`connection.test` never persists a password. For a named connection, if the
 server positively refuses a password typed for that Test, the previous per-ID session credential,
 selection and active address password are restored (or the attempted credential is removed if
 none existed).
