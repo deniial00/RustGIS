@@ -5,8 +5,9 @@
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     /// A file (`ogr`, `gdal`, `spatialite`): its path, the layer or table in it, and the filter
-    /// QGIS's subset string sets (as QGIS has it).
-    File { path: String, layer: Option<String>, subset: Option<String> },
+    /// QGIS's subset string sets (as QGIS has it), and the source's options RustGIS doesn't read
+    /// (`layerid=2`, `geometrytype=Point`), for the import to note.
+    File { path: String, layer: Option<String>, subset: Option<String>, ignored: Vec<String> },
     /// A delimited text file (`delimitedtext`): its path, and the fields its points (or WKT
     /// geometry) are in.
     Csv { path: String, x: Option<String>, y: Option<String>, wkt: Option<String>, crs: Option<String> },
@@ -27,9 +28,21 @@ pub fn read(provider: &str, datasource: &str, dir: &str) -> Source {
     match provider {
         "ogr" | "gdal" => file(datasource, dir),
         "spatialite" => {
-            let kv = conninfo(datasource);
-            match (kv.iter().find(|(k, _)| k == "dbname"), table_of(datasource)) {
-                (Some((_, db)), Some(t)) => Source::File { path: absolute(db, dir), layer: Some(t), subset: None },
+            // `dbname='…' key='id' srid=4326 type=Point table="t" (geom) sql=…`: the filter, if
+            // any, runs to the end.
+            let (head, sql) = datasource.rsplit_once(" sql=").unwrap_or((datasource, ""));
+            let subset = Some(sql.trim().to_string()).filter(|q| !q.is_empty());
+            let kv = conninfo(head);
+            // What QGIS always writes and RustGIS reads or needn't.
+            const READ_OR_HARMLESS: [&str; 7] = ["dbname", "table", "key", "srid", "type", "estimatedmetadata", "checkPrimaryKeyUnicity"];
+            let ignored = kv
+                .iter()
+                .filter(|(k, _)| !READ_OR_HARMLESS.iter().any(|r| r.eq_ignore_ascii_case(k)))
+                .take(32)
+                .map(|(k, v)| noted_option(&format!("{k}={v}")))
+                .collect();
+            match (kv.iter().find(|(k, _)| k == "dbname"), table_of(head)) {
+                (Some((_, db)), Some(t)) => Source::File { path: absolute(db, dir), layer: Some(t), subset, ignored },
                 _ => Source::Other { provider: provider.into() },
             }
         }
@@ -77,20 +90,41 @@ fn file(datasource: &str, dir: &str) -> Source {
     if let Some(rest) = datasource.strip_prefix("GPKG:") {
         // GPKG:path:table, the path itself possibly with a drive letter's colon.
         if let Some((path, table)) = rest.rsplit_once(':') {
-            return Source::File { path: absolute(path, dir), layer: Some(table.to_string()), subset: None };
+            return Source::File { path: absolute(path, dir), layer: Some(table.to_string()), subset: None, ignored: Vec::new() };
         }
     }
     let mut parts = datasource.split('|');
     let path = parts.next().unwrap_or_default().trim();
-    let (mut layer, mut subset) = (None, None);
+    let (mut layer, mut subset, mut ignored) = (None, None, Vec::new());
+    // Every part is read for the layer and the filter; at most 32 others are kept for the note.
     for p in parts {
         if let Some(v) = p.strip_prefix("layername=") {
             layer = Some(v.to_string());
         } else if let Some(v) = p.strip_prefix("subset=") {
             subset = Some(v.to_string()).filter(|s| !s.trim().is_empty());
+        } else if !p.trim().is_empty() && p.trim() != "layerid=0" && ignored.len() < 32 {
+            // (layerid=0 is the first layer, which is what opens.)
+            ignored.push(noted_option(p.trim()));
         }
     }
-    Source::File { path: absolute(path, dir), layer, subset }
+    // A layer named as well as numbered: the name is what's read.
+    if layer.is_some() {
+        ignored.retain(|o: &String| !o.starts_with("layerid="));
+    }
+    Source::File { path: absolute(path, dir), layer, subset, ignored }
+}
+
+/// A source option as the import notes it: with its value only for the options known to carry
+/// nothing private (`layerid=2`, `geometrytype=Point`), else by its name alone, since a value can
+/// be a key, a token or a password under any name.
+fn noted_option(option: &str) -> String {
+    const SHOWN: [&str; 3] = ["layerid", "geometrytype", "uniquegeometrytype"];
+    match option.split_once('=') {
+        Some((key, _)) if !SHOWN.iter().any(|k| k.eq_ignore_ascii_case(key.trim())) => {
+            format!("{}=…", key.trim().chars().take(100).collect::<String>())
+        }
+        _ => option.chars().take(100).collect(),
+    }
 }
 
 /// A `delimitedtext` source: `file:///path.csv?type=csv&xField=…&yField=…&crs=…`.
@@ -197,14 +231,55 @@ mod tests {
             Source::File {
                 path: "/data/project/roads.gpkg".into(),
                 layer: Some("roads".into()),
-                subset: Some("\"type\" = 'motorway'".into())
+                subset: Some("\"type\" = 'motorway'".into()),
+                ignored: Vec::new()
             }
         );
-        assert_eq!(read("ogr", "/abs/rivers.shp", dir), Source::File { path: "/abs/rivers.shp".into(), layer: None, subset: None });
-        assert_eq!(read("gdal", "C:/maps/dem.tif", dir), Source::File { path: "C:/maps/dem.tif".into(), layer: None, subset: None });
+        assert_eq!(
+            read("ogr", "/abs/rivers.shp", dir),
+            Source::File { path: "/abs/rivers.shp".into(), layer: None, subset: None, ignored: Vec::new() }
+        );
+        assert_eq!(
+            read("gdal", "C:/maps/dem.tif", dir),
+            Source::File { path: "C:/maps/dem.tif".into(), layer: None, subset: None, ignored: Vec::new() }
+        );
+        // Options RustGIS doesn't read are kept for a note; the first layer's number isn't one.
+        let Source::File { ignored, .. } = read("ogr", "./multi.gpkg|layerid=2|geometrytype=Point", dir) else { panic!() };
+        assert_eq!(ignored, ["layerid=2", "geometrytype=Point"]);
+        let Source::File { ignored, .. } = read("ogr", "./one.gpkg|layerid=0", dir) else { panic!() };
+        assert!(ignored.is_empty());
+        let Source::File { ignored, .. } = read("ogr", "./multi.gpkg|layername=roads|layerid=3", dir) else { panic!() };
+        assert!(ignored.is_empty(), "the name is read: {ignored:?}");
+        // An option that may carry a secret is noted by its name only.
+        let Source::File { ignored, .. } = read("ogr", "/vsis3/b/x.gpkg|credential:AWS_SECRET_ACCESS_KEY=hunter2|token=abc", dir) else {
+            panic!()
+        };
+        assert_eq!(ignored, ["credential:AWS_SECRET_ACCESS_KEY=…", "token=…"]);
+        let Source::File { ignored, .. } = read("ogr", "./x.gpkg|header=Bearer abc|layerid=4", dir) else { panic!() };
+        assert_eq!(ignored, ["header=…", "layerid=4"], "values only for options known to be harmless");
+        // SpatiaLite: the table, its filter, and the options that matter noted.
+        let Source::File { path, layer, subset, ignored } =
+            read("spatialite", r#"dbname='./db.sqlite' key='id' srid=4326 type=Point table="towns" (geom) sql="pop" > 1000"#, dir)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (path.as_str(), layer.as_deref(), subset.as_deref()),
+            ("/data/project/db.sqlite", Some("towns"), Some(r#""pop" > 1000"#))
+        );
+        assert!(ignored.is_empty(), "{ignored:?}");
+        let Source::File { subset, ignored, .. } = read("spatialite", r#"dbname='/a.sqlite' password='s3cret' table="t" (geom) sql="#, dir)
+        else {
+            panic!()
+        };
+        assert_eq!((subset, ignored), (None, vec!["password=…".to_string()]));
+        // The layer and the filter are read past the options kept for the note.
+        let many = format!("./m.gpkg|{}|layername=late|subset=a = 1", vec!["x=1"; 40].join("|"));
+        let Source::File { layer, subset, ignored, .. } = read("ogr", &many, dir) else { panic!() };
+        assert_eq!((layer.as_deref(), subset.as_deref(), ignored.len()), (Some("late"), Some("a = 1"), 32));
         assert_eq!(
             read("gdal", "GPKG:./m.gpkg:relief", dir),
-            Source::File { path: "/data/project/m.gpkg".into(), layer: Some("relief".into()), subset: None }
+            Source::File { path: "/data/project/m.gpkg".into(), layer: Some("relief".into()), subset: None, ignored: Vec::new() }
         );
         assert_eq!(
             read("delimitedtext", "file:///data/pts%20a.csv?type=csv&xField=lon&yField=lat&crs=EPSG:4326", dir),

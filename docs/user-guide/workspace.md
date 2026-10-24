@@ -42,14 +42,16 @@ Each layer keeps its look:
   reference scale.
 - **Labels**: simple and rule-based, each rule a label class whose SQL clause is its filter and
   its parents' (an else rule's: none of its siblings'), with the text's field, size, colour,
-  bold and italic, its buffer as a halo, its placement (Parallel and Curved along lines,
+  bold and italic, its font family (drawn in it where it is installed, else in RustGIS's label
+  font), its buffer as a halo, its placement (Parallel and Curved along lines,
   around and over points) and its scale range.
 
 QGIS expressions carry over where they are SQL: fields compared with values, `LIKE`, `IN`,
 `IS NULL`, joined by `AND`, `OR` and `NOT`. What RustGIS doesn't draw as QGIS does is drawn as
 near as it can, or left out, and said: the import's notes list, layer by layer, what was
 approximated (pattern fills drawn as a tint of their colour, font and SVG markers as circles,
-dashed lines solid, fonts other than RustGIS's label font) and what was skipped (marker lines,
+dashed lines solid, values outside a graduated renderer's ranges in its first or last class,
+file options such as `layerid` that RustGIS doesn't read) and what was skipped (marker lines,
 data-defined settings, labels from expressions, raster colouring, PostGIS, WFS and other sources
 RustGIS doesn't read). A database password in a project never reaches the notes.
 
@@ -181,7 +183,7 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
 - **Plugins**: **Plugins › Plugin Manager** installs, updates and removes [plugins](../plugins.md)
   from the registry at [plugins.rustgis.app](https://plugins.rustgis.app) or from a file.
 - **Language**: **Settings › Language** switches the interface among
-  [17 languages](../i18n.md) and chooses the [worldview](maps.md#worldview) of the built-in
+  [18 languages](../i18n.md) and chooses the [worldview](maps.md#worldview) of the built-in
   borders.
 - **Start-up**: **Settings › Start-up** sets what RustGIS opens with: **Start With** the World Atlas
   sample or a blank map, or, in the desktop app, **Last Project** (the `.rgis` project last opened

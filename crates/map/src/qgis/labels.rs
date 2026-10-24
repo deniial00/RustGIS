@@ -24,6 +24,10 @@ pub(super) fn read(l: Node, layer: &str, report: &mut Report) -> Option<Labeling
             }
             for (i, r) in rules.iter().enumerate() {
                 let Some(settings) = child(r.node, "settings") else { continue };
+                // Switched off: never drawn, so nothing about it is noted.
+                if r.node.attribute("active") == Some("0") {
+                    continue;
+                }
                 let name = r
                     .node
                     .attribute("description")
@@ -53,9 +57,6 @@ pub(super) fn read(l: Node, layer: &str, report: &mut Report) -> Option<Labeling
                     );
                     continue;
                 };
-                if r.node.attribute("active") == Some("0") {
-                    continue;
-                }
                 classes.extend(class(settings, &name, where_, r.scales, layer, report));
             }
         }
@@ -108,9 +109,10 @@ fn flatten<'a, 'i>(
         return;
     }
     let rules: Vec<Node> = node.children().filter(|c| c.has_tag_name("rule")).collect();
-    // The filters an else rule here is the rest of.
+    // The filters an else rule here is the rest of: its switched-on siblings', as QGIS has it.
     let siblings: Vec<String> = rules
         .iter()
+        .filter(|r| r.attribute("active") != Some("0"))
         .filter_map(|r| r.attribute("filter").map(str::trim))
         .filter(|f| !f.is_empty() && !is_else(f))
         .map(str::to_string)
@@ -183,9 +185,8 @@ fn class(
         || weight >= 63.0
         || text.attribute("fontBold") == Some("1");
     let italic = style.contains("italic") || style.contains("oblique") || text.attribute("fontItalic") == Some("1");
-    if let Some(family) = text.attribute("fontFamily").filter(|f| !f.is_empty()) {
-        report.approximated(layer, format!("labels in {family}, drawn in RustGIS's label font"));
-    }
+    // QGIS's font family: drawn in it where it is installed, else in RustGIS's label font.
+    let font = text.attribute("fontFamily").and_then(crate::symbology::font_name);
     if num(text, "fontLetterSpacing").is_some_and(|s| s != 0.0) {
         report.approximated(layer, "label letter spacing, left out");
     }
@@ -219,7 +220,7 @@ fn class(
         farthest: None,
         placement,
         italic,
-        font: None,
+        font,
     })
 }
 
