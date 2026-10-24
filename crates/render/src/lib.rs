@@ -6019,13 +6019,14 @@ mod tests {
     #[test]
     fn a_curved_labels_halos_go_under_all_its_letters() {
         // Two letters close together along a line, with a halo: the second one's halo does not
-        // cover the first one's strokes, so the letters are as dark as drawn without halos.
+        // cover the first one's strokes, so the letters are as dark as drawn without halos. Large
+        // enough that even a thin system font's strokes (Segoe UI, SF) have solid middles.
         let glyph = |dx: f32| LabelGlyph { text: "l".into(), dx, dy: 0.0, angle: 0.0 };
-        let label = |halo: Option<Rgba>| PlacedLabel {
+        let label = |halo: Option<Rgba>, glyphs: Vec<LabelGlyph>| PlacedLabel {
             text: "ll".into(),
-            x: 20.0,
-            y: 20.0,
-            size: 12.0,
+            x: 30.0,
+            y: 40.0,
+            size: 30.0,
             color: Rgba::rgb(0, 0, 0),
             halo,
             bold: false,
@@ -6037,15 +6038,20 @@ mod tests {
             line_align: TextAlign::Left,
             angle: None,
             collide: Default::default(),
-            glyphs: vec![glyph(-0.75), glyph(0.75)],
+            glyphs,
         };
-        let drawn = |halo| {
-            let mut pm = Pixmap::new(40, 40).unwrap();
+        let drawn = |halo, glyphs| {
+            let mut pm = Pixmap::new(60, 80).unwrap();
             pm.fill(tiny_skia::Color::from_rgba8(128, 128, 128, 255));
-            text::draw(&mut pm, &label(halo), 1.0);
+            text::draw(&mut pm, &label(halo, glyphs), 1.0);
             pm
         };
-        let (plain, haloed) = (drawn(None), drawn(Some(Rgba::rgb(255, 255, 255))));
+        let pair = || vec![glyph(-1.0), glyph(1.0)];
+        let (plain, haloed) = (drawn(None, pair()), drawn(Some(Rgba::rgb(255, 255, 255)), pair()));
+        // Both letters are drawn: the pair's ink is wider than one letter's.
+        let inked = |pm: &Pixmap| (0..60).filter(|&x| (0..80).any(|y| pm.pixel(x, y).is_some_and(|p| p.red() < 40))).count();
+        let one = drawn(None, vec![glyph(-1.0)]);
+        assert!(inked(&plain) > inked(&one), "two letters, not one: {} vs {}", inked(&plain), inked(&one));
         let mut letters = 0;
         for (a, b) in plain.pixels().iter().zip(haloed.pixels()) {
             if a.red() < 40 {

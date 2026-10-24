@@ -229,14 +229,18 @@ fn settle(s: &mut Session, g: &Group) -> Option<PendingS3> {
             let binding = if g.endpoint.is_none() { s3_address::LEGACY } else { "" };
             block(s, g);
             let source = rewrite(s, g, &endpoint, binding).into_iter().next()?;
-            s.notify(
-                format!(
+            let notice = match many {
+                [only] => format!(
+                    "The saved S3 connection '{}' could read the bucket '{}'{at}, but it does not list that bucket: confirm it under Data Sources › Choose S3 connection…; nothing is read until you do",
+                    only.name, g.bucket
+                ),
+                _ => format!(
                     "{} saved S3 connections could read the bucket '{}'{at}: choose which one reads this project's sources (Data Sources › Choose S3 connection…); nothing is read until you do",
                     many.len(),
                     g.bucket
                 ),
-                false,
-            );
+            };
+            s.notify(notice, false);
             Some(PendingS3 {
                 source,
                 endpoint: g.endpoint.clone(),

@@ -378,6 +378,8 @@ keys because the endpoint or bucket is the same. Opening a project (or importing
 finds each bucket its S3 sources read. A single matching connection whose bucket list explicitly
 includes that bucket logs in and opens the sources when its credentials are available.
 Connections with an empty bucket list require an explicit choice, even when only one matches.
+When only one such connection matches, the notice names it and asks you to confirm it in
+**Choose S3 connection…**; it is not automatically authorized to read an unlisted bucket.
 Missing or unavailable keys leave the sources blocked until you log in.
 If several connections fit, **Choose S3 connection…** (`connection.resolveS3`) asks which one,
 with no connection selected initially; nothing is read until you choose, and **Cancel** leaves
