@@ -488,3 +488,52 @@ fn remembered_database_incremental_change_resolves_only_its_database() {
     server.empty();
     assert!(s.connections.find(&id).is_some());
 }
+
+#[test]
+fn remembered_database_refused_login_does_not_keep_the_typed_password() {
+    if isolated("remembered_database_refused_login_does_not_keep_the_typed_password") {
+        return;
+    }
+    let server = Server::new();
+    let store = Arc::new(MemorySecrets::new());
+    let mut seed = app(store.clone(), "{}");
+    let id = remember(&mut seed, "Refused", &server.address, "saved-a");
+    let mut s = app(store.clone(), &seed.connections.to_json());
+    // The saved password is refused, so the layer waits and the login below reaches the server.
+    s.run("project.openText", &json!({"text":project_layers(&server.address, 1)})).unwrap();
+    assert_eq!(server.take(), b"saved-a\0");
+    assert!(s.database_logins.is_rejected(&id));
+    // A password typed for the login is sent, but a refusal does not make it this session's.
+    let result = s.run("connection.login", &json!({"id":id,"password":"typed-wrong"})).unwrap();
+    assert_eq!(result["failed"], 1, "{result}");
+    assert_eq!(server.take(), b"typed-wrong\0");
+    assert!(!s.database_logins.has_session_password(&id));
+    assert!(store.load(&format!("connection/{id}")).unwrap().is_some());
+    server.empty();
+}
+
+#[test]
+fn remembered_database_passwordless_login_keeps_another_connection_active() {
+    if isolated("remembered_database_passwordless_login_keeps_another_connection_active") {
+        return;
+    }
+    use rustgis_data::source::duckdb;
+    let server = Server::new();
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = app(store, "{}");
+    let a = remember(&mut s, "A", &server.address, "owner-a");
+    let b = s.run("connection.new", &json!({"kind":"postgres","name":"B","address":server.address})).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    s.run("connection.login", &json!({"id":a})).unwrap();
+    assert!(duckdb::has_connection_password(&key, &a));
+    // A login for a connection with no password of its own fails without taking the address's
+    // activation away from the connection that is using it.
+    let error = s.run("connection.login", &json!({"id":b})).unwrap_err();
+    assert!(error.contains("password is required"), "{error}");
+    assert!(duckdb::has_connection_password(&key, &a));
+    assert!(s.database_logins.activations().contains(&(key.clone(), a.clone())));
+    server.empty();
+}

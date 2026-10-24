@@ -501,10 +501,11 @@ takes precedence over existing ambient fallbacks on explicitly initiated connect
 Opening a project never newly authorizes environment/password-file credentials or Windows
 identity. A positively refused saved password is not retried for the rest of the session,
 and no other saved password is tried automatically. Its old OS-store value is retained.
-The fresh login form has an empty password and Remember unchecked: an unchecked replacement
-is session-only and does not overwrite or delete the old value; checking Remember and
-successfully saving replaces it. A transport error or missing table is not a wrong-password
-prompt. Use Forget to delete a previously saved password.
+The fresh login form has an empty password and Remember unchecked: an unchecked replacement is
+session-only and does not overwrite or delete the old value; checking Remember and successfully
+saving replaces it. A password the server refuses is not kept as this session's. A transport
+error or missing table is not a wrong-password prompt. Use Forget to delete a previously saved
+password.
 
 A database login reopens waiting layers at the same password-free address;
 `connection.list` reports them as `waiting`, and `connection.login` returns `reopened` and
