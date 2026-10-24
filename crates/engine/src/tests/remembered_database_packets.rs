@@ -503,11 +503,17 @@ fn remembered_database_refused_login_does_not_keep_the_typed_password() {
     s.run("project.openText", &json!({"text":project_layers(&server.address, 1)})).unwrap();
     assert_eq!(server.take(), b"saved-a\0");
     assert!(s.database_logins.is_rejected(&id));
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    let selection = s.database_logins.selection("postgres", &key).map(str::to_string);
+    let activations = s.database_logins.activations();
     // A password typed for the login is sent, but a refusal does not make it this session's.
     let result = s.run("connection.login", &json!({"id":id,"password":"typed-wrong"})).unwrap();
     assert_eq!(result["failed"], 1, "{result}");
     assert_eq!(server.take(), b"typed-wrong\0");
     assert!(!s.database_logins.has_session_password(&id));
+    assert!(!rustgis_data::source::duckdb::has_password(&key));
+    assert_eq!(s.database_logins.selection("postgres", &key), selection.as_deref());
+    assert_eq!(s.database_logins.activations(), activations);
     assert!(store.load(&format!("connection/{id}")).unwrap().is_some());
     server.empty();
 }
@@ -535,5 +541,57 @@ fn remembered_database_passwordless_login_keeps_another_connection_active() {
     assert!(error.contains("password is required"), "{error}");
     assert!(duckdb::has_connection_password(&key, &a));
     assert!(s.database_logins.activations().contains(&(key.clone(), a.clone())));
+    server.empty();
+}
+
+#[test]
+fn remembered_database_refused_login_restores_previous_driver_owner() {
+    if isolated("remembered_database_refused_login_restores_previous_driver_owner") {
+        return;
+    }
+    use rustgis_data::source::{duckdb, postgis};
+    let server = Server::new();
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = app(store.clone(), "{}");
+    let a = remember(&mut s, "A", &server.address, "prior-a");
+    let b = remember(&mut s, "B", &server.address, "prior-b");
+    // Stage two waiting layers without letting a project open change the active credential.
+    s.project = serde_json::from_str(&project(&server.address)).unwrap();
+    for layer in s.map_mut().layers.iter_mut().take(2) {
+        layer.source.as_mut().unwrap().login = true;
+    }
+    let (_, key) = crate::connections::database_key(&server.address).unwrap();
+    let saved = store.load(&format!("connection/{a}")).unwrap();
+    for (owner, expected) in [(Some(b.as_str()), "prior-b"), (Some(a.as_str()), "prior-a"), (None, "prior-address")] {
+        if let Some(owner) = owner {
+            duckdb::set_connection_password(&key, owner, Some(expected));
+            s.database_logins.select("postgres", &key, owner);
+            s.database_logins.note_activation(&key, owner);
+        } else {
+            duckdb::remember_password(&key, expected);
+        }
+        let selection = s.database_logins.selection("postgres", &key).map(str::to_string);
+        let activations = s.database_logins.activations();
+        let result = s.run("connection.login", &json!({"id":a,"password":"login-refused","remember":true})).unwrap();
+        assert_eq!(result["failed"], 2);
+        assert_eq!(result["passwordSaved"], false);
+        assert_eq!(server.take(), b"login-refused\0");
+        server.empty();
+        assert_eq!(s.database_logins.session_password(&a).unwrap().expose(), "prior-a");
+        assert_eq!(s.database_logins.selection("postgres", &key), selection.as_deref());
+        assert_eq!(s.database_logins.activations(), activations);
+        assert_eq!(duckdb::has_explicit_password(&key), owner.is_none());
+        if let Some(owner) = owner {
+            assert!(duckdb::has_connection_password(&key, owner));
+        }
+        let listing = s.run("connection.list", &Value::Null).unwrap();
+        assert_eq!(listing["loginRequests"][0]["reason"], "password");
+        assert_eq!(listing["loginRequests"][0]["connections"], json!([a]));
+        assert!(postgis::connect(&key, false).is_err());
+        let mut packet = expected.as_bytes().to_vec();
+        packet.push(0);
+        assert_eq!(server.take(), packet);
+        assert_eq!(store.load(&format!("connection/{a}")).unwrap(), saved);
+    }
     server.empty();
 }

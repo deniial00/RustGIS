@@ -175,12 +175,12 @@ pub fn has_connection_password(dsn: &str, id: &str) -> bool {
 }
 
 /// Tries an explicitly supplied password, restoring the previous address slot and its ownership
-/// only when the server refuses authentication. Other failures (including table listing) retain
+/// when `refused` classifies the outcome as an authentication refusal. Other failures retain
 /// the new password. Never holds the cache lock during network I/O.
-pub fn try_connection_password<T>(dsn: &str, id: &str, password: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
+pub fn try_connection_password<T>(dsn: &str, id: &str, password: &str, run: impl FnOnce() -> T, refused: impl FnOnce(&T) -> bool) -> T {
     let previous = lock().insert(dsn.to_string(), Entry { password: Secret::new(password), connection_id: Some(id.to_string()) });
     let result = run();
-    if matches!(&result, Err(DataError::Login(_))) {
+    if refused(&result) {
         let mut all = lock();
         if let Some(previous) = previous {
             all.insert(dsn.to_string(), previous);

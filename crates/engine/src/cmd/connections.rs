@@ -397,12 +397,14 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String>
         #[cfg(not(target_arch = "wasm32"))]
         {
             let key = crate::connections::database_key(&c.address).ok_or("not a database connection")?;
-            s.database_logins.retry_saved(&c.id);
             let typed = ps(p, "password").filter(|t| !t.is_empty());
+            if typed.is_none() {
+                s.database_logins.retry_saved(&c.id);
+            }
             // A password typed for this address wins over any saved one (explicit input first).
             let address_typed = typed.is_none() && rustgis_data::source::duckdb::has_explicit_password(&key.1);
             let (password, saved) = match typed {
-                Some(pw) => (Some(rustgis_data::secrets::Secret::new(pw)), false),
+                Some(_) => (None, false),
                 None if address_typed => (None, false),
                 None => {
                     // Resolved before this connection takes the address over: a login that turns
@@ -411,22 +413,35 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String>
                     (Some(pw), saved)
                 }
             };
-            // Another saved ID's activation is not authority to read this connection; a password
-            // typed for the address itself stays.
-            rustgis_data::source::duckdb::set_connection_password(&key.1, &c.id, None);
-            s.database_logins.drop_activation(&key.1);
             let all_unopened = s.database_logins.requests(s.opened).any(|r| r.kind == key.0 && r.key == key.1);
-            s.database_logins.select(key.0, &key.1, &c.id);
-            if let Some(password) = &password {
-                activate(s, c, password.expose());
-            }
-            let mut result = reopen(s, c, saved, all_unopened);
+            let mut result = if let Some(pw) = typed {
+                // Keep selection and activation unchanged until this attempt is accepted.
+                rustgis_data::source::duckdb::try_connection_password(
+                    &key.1,
+                    &c.id,
+                    pw,
+                    || reopen(s, c, false, all_unopened),
+                    |result| result.refused,
+                )
+            } else {
+                // Another saved ID's activation is not authority to read this connection;
+                // a password typed for the address itself stays.
+                rustgis_data::source::duckdb::set_connection_password(&key.1, &c.id, None);
+                s.database_logins.drop_activation(&key.1);
+                s.database_logins.select(key.0, &key.1, &c.id);
+                if let Some(password) = &password {
+                    activate(s, c, password.expose());
+                }
+                reopen(s, c, saved, all_unopened)
+            };
             if let Some(pw) = &typed
                 && !result.refused
             {
                 // A refused password is not this session's credential: it was sent, and the user
                 // is asked for another one.
                 s.database_logins.set_session_password(&c.id, pw);
+                s.database_logins.select(key.0, &key.1, &c.id);
+                s.database_logins.note_activation(&key.1, &c.id);
             }
             if remember {
                 let stored = !result.refused && typed.is_some_and(|pw| s.database_logins.save(c, pw));

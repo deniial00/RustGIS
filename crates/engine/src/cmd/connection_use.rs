@@ -54,7 +54,7 @@ pub(super) fn tables(s: &mut Session, c: &Connection, typed: Option<&str>) -> Re
             s.database_logins.select(kind, key, &c.id);
         }
         let result = if let Some(pw) = typed {
-            duckdb::try_connection_password(key, &c.id, pw, || read_tables(&database))
+            duckdb::try_connection_password(key, &c.id, pw, || read_tables(&database), |result| matches!(result, Err(DataError::Login(_))))
         } else {
             read_tables(&database)
         };
