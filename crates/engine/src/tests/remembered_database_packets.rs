@@ -595,3 +595,83 @@ fn remembered_database_refused_login_restores_previous_driver_owner() {
     }
     server.empty();
 }
+
+#[test]
+fn remembered_database_cached_session_refusal_evicts_reused_password() {
+    if isolated("remembered_database_cached_session_refusal_evicts_reused_password") {
+        return;
+    }
+    use rustgis_data::source::duckdb;
+    let server = Server::new();
+    for command in ["connection.login", "connection.test", "connection.browse", "project.openText"] {
+        let store = Arc::new(MemorySecrets::new());
+        let mut s = app(store.clone(), "{}");
+        let id = s.run("connection.new", &json!({"kind":"postgres","name":"Session","address":server.address})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.run("connection.login", &json!({"id":id,"password":"cached-refused"})).unwrap();
+        let text = project(&server.address);
+        s.project = serde_json::from_str(&text).unwrap();
+        for layer in s.map_mut().layers.iter_mut().take(2) {
+            layer.source.as_mut().unwrap().login = true;
+        }
+        let params = if command == "project.openText" { json!({"text":text}) } else { json!({"id":id}) };
+        let result = s.run(command, &params);
+        match command {
+            "connection.login" => assert_eq!(result.unwrap()["failed"], 2),
+            "project.openText" => assert!(result.is_ok()),
+            _ => assert!(!result.unwrap_err().contains("cached-refused")),
+        }
+        assert_eq!(server.take(), b"cached-refused\0", "{command}");
+        server.empty();
+        let (_, key) = crate::connections::database_key(&server.address).unwrap();
+        assert!(!s.database_logins.has_session_password(&id), "{command}");
+        assert!(!duckdb::has_password(&key), "{command}");
+        assert!(!s.database_logins.activations().iter().any(|(active, _)| active == &key), "{command}");
+        assert!(!s.database_logins.is_rejected(&id), "a session refusal must not reject the saved credential");
+        assert!(store.load(&format!("connection/{id}")).unwrap().is_none());
+        let listing = s.run("connection.list", &Value::Null).unwrap();
+        assert_eq!(listing["connections"][0]["loggedIn"], false);
+        assert_eq!(listing["loginRequests"][0]["reason"], "password");
+        assert_eq!(listing["loginRequests"][0]["connections"], json!([id]));
+        // A second password-free operation must not put the refused password on the wire again.
+        let _ = s.run(command, &params);
+        server.empty();
+    }
+}
+
+#[test]
+fn remembered_database_cached_session_listing_failure_keeps_password() {
+    if isolated("remembered_database_cached_session_listing_failure_keeps_password") {
+        return;
+    }
+    use rustgis_data::source::duckdb;
+    let server = Server::start(true);
+    for command in ["connection.login", "connection.test", "connection.browse", "project.openText"] {
+        let mut s = app(Arc::new(MemorySecrets::new()), "{}");
+        let id = s.run("connection.new", &json!({"kind":"postgres","name":"Session","address":server.address})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.run("connection.login", &json!({"id":id,"password":"cached-accepted"})).unwrap();
+        let text = project_layers(&server.address, 1);
+        s.project = serde_json::from_str(&text).unwrap();
+        s.map_mut().layers[0].source.as_mut().unwrap().login = true;
+        let params = if command == "project.openText" { json!({"text":text}) } else { json!({"id":id}) };
+        let result = s.run(command, &params);
+        match command {
+            "connection.login" => assert_eq!(result.unwrap()["failed"], 1),
+            "project.openText" => assert!(result.is_ok()),
+            _ => assert!(result.unwrap_err().contains("fixture listing failed")),
+        }
+        assert_eq!(server.take(), b"cached-accepted\0", "{command}");
+        server.empty();
+        let (_, key) = crate::connections::database_key(&server.address).unwrap();
+        assert_eq!(s.database_logins.session_password(&id).unwrap().expose(), "cached-accepted", "{command}");
+        assert!(duckdb::has_connection_password(&key, &id), "{command}");
+        assert!(s.database_logins.activations().contains(&(key, id.clone())), "{command}");
+        assert!(!s.database_logins.is_rejected(&id));
+        assert!(s.database_logins.requests(s.opened).next().is_none(), "{command}");
+    }
+}

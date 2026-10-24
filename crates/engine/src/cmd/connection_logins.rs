@@ -112,7 +112,7 @@ fn resolve(s: &mut Session, only: Option<&[(&'static str, String)]>) {
         match super::credential(s, &c) {
             Ok(Some((pw, saved))) => {
                 super::activate(s, &c, pw.expose());
-                super::reopen(s, &c, saved, true);
+                super::reopen(s, &c, saved, !saved, true);
             }
             Ok(None) => {
                 duckdb::set_connection_password(&key, &c.id, None);

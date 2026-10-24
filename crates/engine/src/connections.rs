@@ -526,6 +526,12 @@ impl DatabaseLogins {
         self.session.insert(id.to_string(), Secret::new(password));
     }
 
+    /// Drops only this ID's session password after the server refused that cached credential.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn forget_session_password(&mut self, id: &str) {
+        self.session.remove(id);
+    }
+
     /// Reads the password saved for a definition (once: later calls use what was read).
     pub fn load(&mut self, c: &Connection) -> SavedPassword {
         if let Some(p) = self.saved.get(&c.id) {

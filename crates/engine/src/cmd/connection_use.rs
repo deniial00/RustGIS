@@ -47,6 +47,7 @@ pub(super) fn tables(s: &mut Session, c: &Connection, typed: Option<&str>) -> Re
             return Err("password is required".into());
         }
         let saved = credential.as_ref().is_some_and(|(_, saved)| *saved);
+        let session = credential.as_ref().is_some_and(|(_, saved)| !*saved);
         if typed.is_none()
             && let Some((password, _)) = &credential
         {
@@ -77,6 +78,10 @@ pub(super) fn tables(s: &mut Session, c: &Connection, typed: Option<&str>) -> Re
                 if matches!(&error, DataError::Login(_)) {
                     if saved {
                         s.database_logins.reject(&c.id);
+                    } else if session {
+                        s.database_logins.forget_session_password(&c.id);
+                    }
+                    if saved || session {
                         duckdb::forget_connection_password(&c.id);
                         s.database_logins.drop_activation(key);
                     }

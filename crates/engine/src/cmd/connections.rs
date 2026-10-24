@@ -309,7 +309,7 @@ struct Reopened {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn reopen(s: &mut Session, c: &Connection, saved: bool, all_unopened: bool) -> Reopened {
+fn reopen(s: &mut Session, c: &Connection, saved: bool, session: bool, all_unopened: bool) -> Reopened {
     let Some(key) = crate::connections::database_key(&c.address) else { return Reopened::default() };
     let mut result = Reopened::default();
     let mut first_error = None;
@@ -341,6 +341,10 @@ fn reopen(s: &mut Session, c: &Connection, saved: bool, all_unopened: bool) -> R
         use crate::connections::{LoginReason, LoginRequest};
         if saved {
             s.database_logins.reject(&c.id);
+        } else if session {
+            s.database_logins.forget_session_password(&c.id);
+        }
+        if saved || session {
             rustgis_data::source::duckdb::forget_connection_password(&c.id);
             s.database_logins.drop_activation(&key.1);
         }
@@ -420,7 +424,7 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String>
                     &key.1,
                     &c.id,
                     pw,
-                    || reopen(s, c, false, all_unopened),
+                    || reopen(s, c, false, false, all_unopened),
                     |result| result.refused,
                 )
             } else {
@@ -432,7 +436,8 @@ fn login(s: &mut Session, c: &Connection, p: &Value) -> Result<Reopened, String>
                 if let Some(password) = &password {
                     activate(s, c, password.expose());
                 }
-                reopen(s, c, saved, all_unopened)
+                let session = password.is_some() && !saved;
+                reopen(s, c, saved, session, all_unopened)
             };
             if let Some(pw) = &typed
                 && !result.refused
