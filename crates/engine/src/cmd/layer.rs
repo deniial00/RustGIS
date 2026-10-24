@@ -177,7 +177,7 @@ pub fn commands() -> Vec<C> {
         C::new("layer.lineStrokes", "Line Strokes", "Style › Drawing", line_strokes)
             .when(need_lines)
             .params(
-                r##"{"layer"?, "strokes": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the renderer's line colour), "width"?: points|null (null: the renderer's width), "offset"?: points (positive: right of the line's direction, negative: left), "cap"?: "round"|"flat"|"square", "join"?: "round"|"miter"|"bevel", "level"?: 0..255|null (with layer.strokeLevels: the level it draws at; null: its place in the stack)}] (drawn bottom first; [] goes back to the single stroke, or for a class to the layer's strokes), "value"?: text|number (a Unique Values class's own strokes), "index"?: number (a Graduated Colors class's, 0 = the lowest), "other"?: true (Unique Values' <all other values>)}"##,
+                r##"{"layer"?, "strokes": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the renderer's line colour), "width"?: points|null (null: the renderer's width), "offset"?: points (positive: right of the line's direction, negative: left), "cap"?: "round"|"flat"|"square", "join"?: "round"|"miter"|"bevel", "level"?: 0..255|null (with layer.strokeLevels: the level it draws at; null: its place in the stack), "dash"?: [points, …]|null (dash, gap, … in turn, at most 8; null: solid)}] (drawn bottom first; [] goes back to the single stroke, or for a class to the layer's strokes), "value"?: text|number (a Unique Values class's own strokes), "index"?: number (a Graduated Colors class's, 0 = the lowest), "other"?: true (Unique Values' <all other values>)}"##,
             ),
         C::new("layer.strokeLevels", "Stroke Levels", "Style › Drawing", |s, p| {
             let on = b(p, "on").ok_or("on is true or false")?;
@@ -287,7 +287,7 @@ pub fn commands() -> Vec<C> {
         C::new("labels.style", "Text Symbol", "Style › Text Symbol", |s, p| {
             let size = f(p, "size").map(|v| v.clamp(*LABEL_SIZE.start(), *LABEL_SIZE.end()) as f32);
             let color = s.get_color(p, "color")?;
-            let (halo, bold) = (b(p, "halo"), b(p, "bold"));
+            let (halo, bold, italic) = (b(p, "halo"), b(p, "bold"), b(p, "italic"));
             super::labels::with_class(s, p, |c| {
                 if let Some(v) = size {
                     c.size = v;
@@ -301,10 +301,13 @@ pub fn commands() -> Vec<C> {
                 if let Some(bb) = bold {
                     c.bold = bb;
                 }
+                if let Some(it) = italic {
+                    c.italic = it;
+                }
             })
         })
         .when(need_feature_layer)
-        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "bold"?: bool}"##),
+        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "bold"?: bool, "italic"?: bool}"##),
         C::new("layer.definitionQuery", "Definition Query", "Data › Definition Query", |s, p| {
             let q = ps(p, "where").map(str::trim).unwrap_or("").to_string();
             let id = s.layer_id(p)?;
@@ -423,7 +426,26 @@ fn line_strokes(s: &mut Session, p: &Value) -> CmdResult {
                     .ok_or_else(|| format!("stroke {}: level is a whole number from 0 to 255", i + 1))?,
             ),
         };
-        strokes.push(LineStroke { color, width: num("width")?, offset: num("offset")?.unwrap_or(0.0), cap, join, level }.clamped());
+        let bad_dash = || {
+            format!(
+                "stroke {}: dash is a list of 1 to {} lengths in points (dash, gap, …), each 0 to {}, not all 0",
+                i + 1,
+                rustgis_map::symbology::MAX_DASH_STEPS,
+                rustgis_map::symbology::MAX_DASH_STEP
+            )
+        };
+        // A pattern out of range is an error here, so a script learns of it; a project file's is
+        // brought into range instead (`de_dash`), so a hand-edited file still opens.
+        let dash = match o.get("dash") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => {
+                let steps: Vec<f32> =
+                    a.iter().map(|v| v.as_f64().map(|x| x.clamp(-1e6, 1e6) as f32)).collect::<Option<_>>().ok_or_else(bad_dash)?;
+                Some(rustgis_map::symbology::Dash::new(&steps).ok_or_else(bad_dash)?)
+            }
+            Some(_) => return Err(bad_dash()),
+        };
+        strokes.push(LineStroke { color, width: num("width")?, offset: num("offset")?.unwrap_or(0.0), cap, join, level, dash }.clamped());
     }
     let id = s.layer_id(p)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;

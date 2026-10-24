@@ -363,18 +363,22 @@ command line have none), the login still works for this session and says the key
 remembered; without keys typed, a connection with nothing available says so, and is not logged in.
 **Forget Saved Keys** (`connection.forgetSavedKeys`; the connection's right-click menu or its
 form) deletes them from the store and keeps the session's login. Removing a connection deletes
-its saved keys first, and changing its endpoint does too, since they are for the old one; if the
-store can't delete them, the removal or edit doesn't happen. Renaming, grouping, buckets and
-region keep them, and a copy of a connection has none. A profile, the environment or anonymous
-access never read saved keys.
+its saved keys first, and changing its endpoint or switching away from typed keys does too.
+With a credential store available, these actions check it even when the **Saved keys** indication
+is absent: the indication may be stale. If the store refuses deletion, the forget, removal or
+edit doesn't happen. Without a store, a connection marked as holding saved keys cannot be
+removed or have its endpoint changed. Renaming, grouping, buckets and region keep the keys,
+and a copy of a connection has none. A profile, the environment or anonymous access never
+read saved keys.
 
 A saved connection's login reads only what is added through it: its listings, and the objects
 **Add** takes from them, are kept as addresses that name that connection (and its endpoint), so a
 project reads a bucket through the connection it was added with, never with another connection's
 keys because the endpoint or bucket is the same. Opening a project (or importing a map or layer)
-finds each bucket its S3 sources read: if exactly one saved connection fits (its endpoint, and
-a bucket list that holds it or is empty), it logs in and opens them when its credentials are
-available. Missing or unavailable keys leave the sources blocked until you log in.
+finds each bucket its S3 sources read. A single matching connection whose bucket list explicitly
+includes that bucket logs in and opens the sources when its credentials are available.
+Connections with an empty bucket list require an explicit choice, even when only one matches.
+Missing or unavailable keys leave the sources blocked until you log in.
 If several connections fit, **Choose S3 connection…** (`connection.resolveS3`) asks which one,
 with no connection selected initially; nothing is read until you choose, and **Cancel** leaves
 the sources blocked. If none fits, sources carrying saved-connection provenance stay unread

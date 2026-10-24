@@ -289,9 +289,6 @@ fn delete_account(logins: &mut crate::connections::DatabaseLogins, c: &Connectio
     } else {
         (c.remembered, "The saved password couldn't be deleted. The connection was left unchanged.")
     };
-    if c.kind == "s3" && !marked {
-        return Ok(());
-    }
     if logins.has_store() {
         logins.delete(&c.id).map_err(|_| error.to_string())
     } else if marked {

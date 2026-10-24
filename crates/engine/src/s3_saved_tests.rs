@@ -504,15 +504,13 @@ fn s3_saved_lifecycle_keeps_deletes_and_forgets_keys() {
     assert!(spy.raw(&id).is_none());
     let last_delete = spy.ops().iter().rposition(|o| o.starts_with("delete")).unwrap();
     assert!(spy.ops().iter().skip(last_delete).all(|o| !o.starts_with("save")));
-    // Removal deletes a marked pair; unmarked definitions never access the store.
+    // Removal deletes the saved pair and disconnects the login.
     s.run("connection.edit", &json!({"id": id, "address": srv.base})).unwrap();
     login(&mut s, &id, "SAVEDKEYA", "saved-secret-A", true).unwrap();
     s.run("connection.remove", &json!({"id": id})).unwrap();
     assert!(spy.raw(&id).is_none() && s.connections.find(&id).is_none());
-    let deletes = spy.count("delete");
     let copy_id = copy["id"].as_str().unwrap();
     s.run("connection.remove", &json!({"id": copy_id})).unwrap();
-    assert_eq!(spy.count("delete"), deletes, "an unmarked definition needs no store access");
     // Without a store, a marker blocks removal and forgetting; without one, removal is as before.
     let mut t = session(None);
     t.connections = Connections::from_json(
@@ -1223,13 +1221,39 @@ fn s3_saved_unscoped_connection_requires_a_choice_and_does_not_repeat_the_prompt
 }
 
 #[test]
-fn s3_saved_unmarked_removal_works_with_a_locked_store() {
-    let spy = Arc::new(Spy::default());
-    spy.refuse_delete.store(true, Ordering::Relaxed);
-    let mut s = session(Some(&spy));
-    let id = saved(&mut s, "sv-unmarked-remove", "", "sv-unmarked", "none");
-    s.run("connection.remove", &json!({"id": id})).unwrap();
-    assert_eq!(spy.count("delete"), 0);
+fn s3_saved_stale_marker_cannot_skip_credential_deletion() {
+    for (index, command) in ["connection.forgetSavedKeys", "connection.remove", "connection.edit"].into_iter().enumerate() {
+        let spy = Arc::new(Spy::default());
+        let mut s = session(Some(&spy));
+        let name = format!("sv-stale-delete-{index}");
+        let id = saved(&mut s, &name, "http://127.0.0.1:9", "sv-stale-delete", "keys");
+        login(&mut s, &id, "STALEKEY", "stale-secret", true).unwrap();
+        // Preferences can lose the indication while the OS store retains the account.
+        s.connections.set_saved_keys(&id, false);
+        let before = s.connections.to_json();
+        let generation = s.connections.generation;
+        let raw = spy.raw(&id);
+        assert!(raw.is_some());
+        let params = json!({"id": id, "address": "http://127.0.0.1:10"});
+        spy.refuse_delete.store(true, Ordering::Relaxed);
+        assert_eq!(s.run(command, &params).unwrap_err(), s3_keys::NOT_FORGOTTEN, "{command}");
+        assert_eq!(s.connections.to_json(), before);
+        assert_eq!(s.connections.generation, generation);
+        assert_eq!(spy.raw(&id), raw);
+        assert_eq!(live_key(&name).as_deref(), Some("STALEKEY"));
+        spy.refuse_delete.store(false, Ordering::Relaxed);
+        s.run(command, &params).unwrap();
+        assert!(spy.raw(&id).is_none(), "{command} must delete even without a saved-key indication");
+        match command {
+            "connection.forgetSavedKeys" => {
+                assert_eq!(live_key(&name).as_deref(), Some("STALEKEY"), "forget keeps the live login");
+                assert_eq!(s.run("connection.login", &json!({"id": id})).unwrap_err(), s3_keys::NONE_SAVED);
+            }
+            "connection.remove" => assert!(s.connections.find(&id).is_none()),
+            _ => assert_eq!(s.connections.find(&id).unwrap().address, "http://127.0.0.1:10"),
+        }
+        s3::disconnect(&name);
+    }
 }
 
 #[test]

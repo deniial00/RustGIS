@@ -127,6 +127,16 @@ same). By command, name the class as `layer.classStyle` does, with `value`, `ind
 layer.lineStrokes={"layer":"Roads","value":"Motorway","strokes":[{"color":"#5A3A1E","width":7},{"color":"#F28C28","width":5},{"color":"#FFFFFF","width":0.6}]}
 ```
 
+A stroke can be dashed: **Dash** takes the lengths in points, dash and gap in turn (`4 2`, or
+`4 2 1 2` for dash-dot; an odd list is repeated, as in SVG), and its menu offers dashed,
+dotted, dash-dot and long-dash patterns sized to the stroke's width. Empty is a solid line. With
+flat caps the dashes are as long as given; round and square caps add half the width at each end.
+By command, `"dash"` on a stroke (`null` for solid):
+
+```text
+layer.lineStrokes={"layer":"Paths","strokes":[{"color":"#000000","width":1.2,"cap":"flat","dash":[6,3]}]}
+```
+
 By default, each feature draws its whole stack in turn, so where two roads meet, the second one's
 casing cuts across the first one's core. **Draw strokes in levels** (symbol levels) draws all
 stacked strokes at a lower level before those at a higher one, so the casings join underneath
@@ -229,7 +239,7 @@ Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
 
 - **Label field and text**: the field the labels show
   (`labels.field={"layer": "Cities", "field": "name"}`), and the text symbol's size (4–72 points),
-  colour, halo and bold (`labels.style={"layer": "Cities", "size": 12, "color": "#5A1E0A", "halo": true}`).
+  colour, halo, bold and italic (`labels.style={"layer": "Cities", "size": 12, "color": "#5A1E0A", "halo": true}`).
 - **SQL**: label only the features that match a SQL clause (the language of definition
   queries), such as `pop_max > 5000000`. In the Labeling pane, Class › **SQL** › **New
   expression**: write the clause (the field and operator buttons add to it), **Check** says
@@ -241,7 +251,14 @@ Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
   two viewing distances (Closest / Farthest). Clear Limits removes all four.
 - **Placement**: automatic (above points, centred on lines and polygons), centred, or one of
   eight positions around the feature (`labels.placement={"layer": "Cities", "position":
-  "aboveRight"}`).
+  "aboveRight"}`). Lines can be labelled **along** them (Position › Along lines): **Parallel**
+  sets the text straight, turned to the line's direction across it; **Curved** turns each
+  character with the line where it bends. Both sit at the middle of the line's longest stretch
+  in view, centred on the line and kept upright, and may run past its ends by about a letter; a
+  line too short for its text, or (curved) one bending more than 25° from one character to the
+  next, is left unlabelled. A text over 200 characters long is set straight rather than
+  curved. Points and polygons with these placements are labelled as automatic
+  (`labels.placement={"layer": "Rivers", "position": "curved"}`).
 - **Lock** keeps the labelled features fixed while you pan and zoom; **Pause** stops drawing
   labels for faster navigation; **View Unplaced** draws the labels that didn't fit in red.
 - **Convert** turns a layer's labels into an annotation layer: one point per label, carrying its
