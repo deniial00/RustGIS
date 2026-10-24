@@ -5,12 +5,14 @@
 //! other's) names it: `rustgis-s3:<binding>:<endpoint-byte-length>:<endpoint>:<inner-url>`. The
 //! endpoint is the connection's canonical one (empty for AWS), the inner address is a web address
 //! or an `s3://` one, kept verbatim. An empty binding is an address no connection has been chosen
-//! for yet: it is never fetched. Nothing here is secret, so a saved project may keep these
-//! addresses; deciding whether a binding may sign a request, and for which endpoint and bucket, is
-//! `rustgis_tiles::s3`'s job, not this structural parser's.
+//! for yet. The reserved [`LEGACY`] marker additionally retains an unknown endpoint while a choice
+//! is pending. Neither can be a live login or fetch data. Nothing here is secret, so a saved
+//! project may keep these addresses; `rustgis_tiles::s3` authorizes live bindings, not this parser.
 
 /// Starts an address read through a saved S3 connection.
 pub const PREFIX: &str = "rustgis-s3:";
+/// Reserved unresolved marker for legacy sources whose endpoint is unknown. Never a live login.
+pub const LEGACY: &str = "0000000000000000";
 /// The longest address, in bytes.
 pub const MAX_ADDRESS: usize = 8192;
 /// The longest endpoint, in bytes.
@@ -24,7 +26,7 @@ const TOO_LONG: &str = "the saved S3 address is too long";
 /// The parts of an address read through a saved connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundS3<'a> {
-    /// The runtime token of the connection that may read it (empty: none chosen yet).
+    /// The login's runtime token; empty: no login chosen, [`LEGACY`]: unknown endpoint.
     pub binding: &'a str,
     /// The connection's canonical endpoint (empty: AWS).
     pub endpoint: &'a str,
@@ -74,6 +76,9 @@ pub fn parse(address: &str) -> Result<Option<BoundS3<'_>>, &'static str> {
     // Slicing at a byte offset that isn't a character boundary is `None`, not a panic.
     let endpoint = rest.get(..length).ok_or(BAD)?;
     let url = rest.get(length..).and_then(|r| r.strip_prefix(':')).ok_or(BAD)?;
+    if binding == LEGACY && (!endpoint.is_empty() || !url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("s3://"))) {
+        return Err(BAD);
+    }
     if is_wrapper(url) || !web_or_s3(url) {
         return Err(BAD);
     }
@@ -108,12 +113,6 @@ pub fn rebound(address: &str, binding: &str) -> Option<String> {
     bind(binding, b.endpoint, b.url).ok()
 }
 
-/// `address` with its inner address replaced, keeping binding and endpoint.
-pub fn with_url(address: &str, url: &str) -> Option<String> {
-    let b = parse(address).ok().flatten()?;
-    bind(b.binding, b.endpoint, url).ok()
-}
-
 /// The address a server is reached at, for an address that may be read through a saved connection
 /// (as it is, or as the archive after a tile template's `@`): the wrapper's inner address, else
 /// `address` itself.
@@ -143,10 +142,6 @@ mod tests {
         let p = parse(&aws).unwrap().unwrap();
         assert_eq!((p.binding, p.endpoint, p.url), ("", "", "s3://my-bucket/k.tif"));
         assert_eq!(rebound(&aws, B).unwrap(), format!("rustgis-s3:{B}:0::s3://my-bucket/k.tif"));
-        assert_eq!(
-            with_url(&a, "https://minio.example:9000/b/other.fgb").unwrap(),
-            format!("rustgis-s3:{B}:26:https://minio.example:9000:https://minio.example:9000/b/other.fgb")
-        );
         // Not a wrapper: left alone.
         assert_eq!(parse("https://x.org/a").unwrap(), None);
         assert_eq!(inner("https://x.org/a"), "https://x.org/a");
@@ -164,6 +159,9 @@ mod tests {
             "rustgis-s3:abc:17:https://h.example:https://h.example/k".to_string(),
             format!("rustgis-s3:{B}0:17:{endpoint}:https://h.example/k"),
             format!("rustgis-s3:{}:17:{endpoint}:https://h.example/k", "g".repeat(16)),
+            // Unknown origin is only meaningful for a bare s3 object, never a known endpoint.
+            format!("rustgis-s3:{LEGACY}:{}:{endpoint}:s3://b/k", endpoint.len()),
+            format!("rustgis-s3:{LEGACY}:0::https://h.example/b/k"),
             // length: missing, signed, too long, past the end, off by one either way
             format!("rustgis-s3:{B}::{endpoint}:https://h.example/k"),
             format!("rustgis-s3:{B}:+17:{endpoint}:https://h.example/k"),

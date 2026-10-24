@@ -383,6 +383,9 @@ sessions keep reading as they did.
 A saved login belonging to another open session is not reused merely because its name matches:
 each session logs in through its selected saved connection.
 Resolving a bucket retries only that bucket's deferred sources, keeping layer styles and ordering.
+An older source with an unknown endpoint stays separate from an explicitly AWS-backed source,
+even when both name the same bucket and object. Saving and reopening while a choice is pending
+preserves that distinction; choosing a connection for one resource does not choose for the other.
 Raster reloads use the same authorized address and load their pixels in the background.
 Keys go only to the endpoint they're for: a signed request that is redirected isn't followed, and
 keys from a profile or the environment are used only with AWS or the profile's own

@@ -836,7 +836,6 @@ fn s3_saved_sources_without_keys_zero_matches_and_older_addresses_stay_blocked_o
     assert_eq!(two.s3_pending.len(), 2, "{:?}", two.s3_pending);
     let older = two.s3_pending.iter().find(|p| p.endpoint.is_none()).unwrap().clone();
     assert_eq!(older.candidates.len(), 2);
-    assert_eq!(older.source, "rustgis-s3::0::s3://sv-proj-edge/grid.fgb");
     assert!(two.s3_pending.iter().any(|p| p.endpoint.is_some() && p.candidates.len() == 2));
     let r = two.run("connection.resolveS3", &json!({"source": older.source, "id": "c2"})).unwrap();
     assert_eq!(r["id"], "c2");
@@ -1152,4 +1151,56 @@ fn s3_saved_favourites_keep_provenance_overhead_without_relaxing_destination_lim
     let oversized = format!("{inner}{}", "v".repeat(2049 - inner.len()));
     let too_long = rustgis_data::s3_address::bind("0123456789abcdef", endpoint, &oversized).unwrap();
     assert!(sources.keep("favourites", crate::sources::Source { address: too_long, ..source }).is_err());
+}
+
+#[test]
+fn s3_saved_legacy_choice_never_rebinds_an_explicit_aws_source_for_the_same_object() {
+    for aws_first in [false, true] {
+        let bucket = format!("sv-mixed-{aws_first}");
+        let srv = serve_bucket(&bucket, vec![("same.fgb", grid_fgb())], Vec::new());
+        let store = Arc::new(Spy::default());
+        let mut s = session(Some(&store));
+        let custom_name = format!("{bucket}-custom");
+        let custom = saved(&mut s, &custom_name, &srv.base, &bucket, "keys");
+        login(&mut s, &custom, "MIXEDCUSTOMKEY", "mixed-custom-secret", true).unwrap();
+        let aws_a = saved(&mut s, &format!("{bucket}-aws-a"), "", &bucket, "none");
+        let aws_b = saved(&mut s, &format!("{bucket}-aws-b"), "", &bucket, "none");
+        let raw = format!("s3://{bucket}/same.fgb");
+        let aws = rustgis_data::s3_address::bind("", "", &raw).unwrap();
+        let sources = if aws_first { [("AWS", &aws), ("Legacy", &raw)] } else { [("Legacy", &raw), ("AWS", &aws)] };
+        for (name, path) in sources {
+            s.map_mut().add_streamed(name, serde_json::from_value(json!({"path":path})).unwrap());
+        }
+        let text = s.project.saved_text().unwrap().0;
+        s.run("project.openText", &json!({"text":text})).unwrap();
+        assert_eq!(srv.requests(), 0, "neither resource is read before a choice");
+        // Saving while a choice is pending must retain unknown origin, not turn it into AWS.
+        let text = s.project.saved_text().unwrap().0;
+        let definitions = s.connections.to_json();
+        s = session(Some(&store));
+        s.connections = Connections::from_json(&definitions);
+        s.run("project.openText", &json!({"text":text})).unwrap();
+        assert_eq!(srv.requests(), 0, "a pending save/reopen still fetches nothing");
+        let legacy = s.s3_pending.iter().find(|p| p.endpoint.is_none()).unwrap().clone();
+        let aws_pending = s.s3_pending.iter().find(|p| p.endpoint.as_deref() == Some("")).unwrap().clone();
+        assert_eq!(aws_pending.candidates, vec![aws_a, aws_b]);
+        let result = s.run("connection.resolveS3", &json!({"source":legacy.source,"id":custom})).unwrap();
+        assert_eq!((result["reopened"].as_u64(), result["failed"].as_u64()), (Some(1), Some(0)));
+        let legacy_id = s.map().layer_by_name("Legacy").unwrap().id;
+        assert!(read_view(&mut s, legacy_id) > 0);
+        let aws_source = s.map().layer_by_name("AWS").unwrap().source.as_ref().unwrap();
+        assert_eq!(aws_source.path.as_deref(), Some(aws.as_str()), "explicit AWS provenance is unchanged");
+        assert!(!aws_source.is_open());
+        assert_eq!(s.s3_pending, vec![aws_pending.clone()], "AWS still requires its own choice");
+        settle(&srv);
+        let from = srv.requests();
+        assert_eq!(
+            s.run("connection.resolveS3", &json!({"source":aws_pending.source,"id":custom})).unwrap_err(),
+            crate::s3_connections::STALE
+        );
+        crate::s3_connections::resolve_project_s3(&mut s);
+        assert_eq!(s.s3_pending, vec![aws_pending]);
+        assert_eq!(srv.requests(), from, "the AWS source never reaches the custom endpoint");
+        s3::disconnect(&custom_name);
+    }
 }

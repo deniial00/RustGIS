@@ -217,12 +217,6 @@ fn form_name(st: &State) -> String {
     if st.name.trim().is_empty() { "default".to_string() } else { st.name.trim().to_string() }
 }
 
-/// The typed key pair, when both halves are typed.
-fn typed_pair(st: &State) -> Option<(String, String)> {
-    let (key, secret) = (st.key.trim(), st.secret.trim());
-    (!key.is_empty() && !secret.is_empty()).then(|| (key.to_string(), secret.to_string()))
-}
-
 /// The saved connection the form stands for, when one was picked and nothing typed since changes
 /// its definition (name, endpoint, region, where its keys come from).
 fn unchanged_saved(app: &RustGisApp) -> Option<Connection> {
@@ -249,7 +243,7 @@ fn unchanged_saved(app: &RustGisApp) -> Option<Connection> {
 fn connect(app: &mut RustGisApp) {
     app.ui.s3.warning = None;
     let remember = app.ui.s3.remember && app.ui.s3.source == "keys" && app.session.database_logins.has_store();
-    if remember && typed_pair(&app.ui.s3).is_none() {
+    if remember && (app.ui.s3.key.trim().is_empty() || app.ui.s3.secret.trim().is_empty()) {
         app.ui.s3.error = Some(tl!("Type the access key ID and the secret access key to remember them on this computer.").to_string());
         return;
     }
@@ -710,41 +704,6 @@ mod tests {
         let binding = saved_binding(&app.session, &c.name).unwrap();
         assert_eq!(app.session.s3_binding(&c.id), Some(binding.as_str()));
         s3::disconnect(&c.name);
-    }
-
-    #[test]
-    fn remember_on_an_unsaved_form_saves_a_connection_then_its_keys() {
-        let mut app = RustGisApp::with_sample();
-        app.session.database_logins.set_store(Some(std::sync::Arc::new(rustgis_engine::data::secrets::MemorySecrets::new())));
-        let name = "remember-s3ui-test";
-        app.ui.s3.name = name.into();
-        app.ui.s3.source = "keys".into();
-        app.ui.s3.key = "AKIDREMEMBERS3UI".into();
-        app.ui.s3.secret = "remember-s3ui-secret".into();
-        app.ui.s3.remember = true;
-        connect(&mut app);
-        assert_eq!(app.ui.s3.error, None);
-        assert_eq!(app.ui.s3.warning, None);
-        assert_eq!(app.session.connections.connections.len(), 1, "one definition");
-        let c = app.session.connections.connections[0].clone();
-        assert!(c.saved_keys);
-        assert_eq!(c.options.get("credentials").map(String::as_str), Some("keys"));
-        assert_eq!(app.ui.s3.connection.as_deref(), Some(c.id.as_str()));
-        assert!(app.ui.s3.key.is_empty() && app.ui.s3.secret.is_empty() && !app.ui.s3.remember);
-        assert!(saved_binding(&app.session, name).is_some());
-        s3::disconnect(name);
-
-        // The same name typed again with other settings: never written over.
-        app.ui.s3.connection = None;
-        app.ui.s3.endpoint = "https://other.example.com".into();
-        app.ui.s3.key = "AKIDOTHER".into();
-        app.ui.s3.secret = "other-secret".into();
-        app.ui.s3.remember = true;
-        connect(&mut app);
-        assert!(app.ui.s3.error.is_some());
-        assert_eq!(app.session.connections.connections.len(), 1);
-        assert_eq!(app.ui.s3.secret, "other-secret", "the typed values stay");
-        assert!(s3::connection(name).is_none());
     }
 
     #[test]

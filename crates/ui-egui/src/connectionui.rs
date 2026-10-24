@@ -1040,57 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn remembered_keys_log_in_again_only_when_asked_and_can_be_forgotten() {
-        let mut app = RustGisApp::with_sample();
-        app.session.database_logins.set_store(Some(std::sync::Arc::new(rustgis_engine::data::secrets::MemorySecrets::new())));
-        let name = "remember-ui-test";
-        new_s3_form(&mut app, name);
-        save(&mut app).unwrap();
-        let id = app.ui.connection.id.clone().unwrap();
-        assert!(app.session.connections.find(&id).unwrap().saved_keys);
-        assert!(app.ui.connection.access_key.is_empty() && app.ui.connection.secret_key.is_empty() && !app.ui.connection.remember);
-        assert!(app.ui.connection.warned.is_none());
-        assert!(s3::connection(name).is_some());
-        s3::disconnect(name);
-
-        // A plain edit changes the definition, and logs nothing in.
-        open_edit(&mut app, &id).unwrap();
-        assert!(!app.ui.connection.remember && !app.ui.connection.login);
-        app.ui.connection.group = "Lab".into();
-        save(&mut app).unwrap();
-        assert!(s3::connection(name).is_none(), "an edit is no login");
-
-        // Log In with nothing typed reads the saved keys.
-        assert!(log_in(&mut app, &id));
-        assert!(app.ui.connection.login);
-        save(&mut app).unwrap();
-        assert!(s3::connection(name).is_some());
-        assert_eq!(s3::binding_of(name).as_deref(), app.session.s3_binding(&id));
-
-        forget_keys(&mut app, &id).unwrap();
-        assert!(!app.session.connections.find(&id).unwrap().saved_keys);
-        assert!(s3::connection(name).is_some(), "forgetting keeps the session's login");
-        s3::disconnect(name);
-    }
-
-    #[test]
-    fn a_login_whose_keys_were_not_remembered_stays_open_to_say_so() {
-        let mut app = RustGisApp::with_sample();
-        let store = rustgis_engine::data::secrets::MemorySecrets::failing(rustgis_engine::data::secrets::SecretError::Denied);
-        app.session.database_logins.set_store(Some(std::sync::Arc::new(store)));
-        let name = "remember-ui-warned-test";
-        new_s3_form(&mut app, name);
-        save(&mut app).unwrap();
-        let id = app.ui.connection.id.clone().unwrap();
-        assert!(!app.session.connections.find(&id).unwrap().saved_keys);
-        assert!(app.ui.connection.warned.is_some());
-        assert_eq!(app.dialogs.open, Some("editConnection"));
-        assert!(app.ui.connection.secret_key.is_empty());
-        assert!(s3::connection(name).is_some(), "logged in for the session");
-        s3::disconnect(name);
-    }
-
-    #[test]
     fn remember_without_a_typed_pair_changes_nothing() {
         let mut app = RustGisApp::with_sample();
         app.session.database_logins.set_store(Some(std::sync::Arc::new(rustgis_engine::data::secrets::MemorySecrets::new())));

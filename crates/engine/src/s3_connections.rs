@@ -17,10 +17,8 @@
 //!   with a notice.
 //!
 //! An older project's bare `s3://` address names no endpoint: any saved connection whose buckets
-//! include (or aren't limited to) its bucket is a candidate. While it waits it is an unresolved
-//! address with an empty endpoint (and so AWS, if the project is saved then).
-
-use std::collections::BTreeSet;
+//! include (or aren't limited to) its bucket is a candidate. Its blocked placeholder uses the
+//! reserved non-login marker `s3_address::LEGACY`, distinct from explicit AWS provenance.
 
 use rustgis_data::s3_address;
 
@@ -77,15 +75,18 @@ fn part(address: &str) -> &str {
     address.get(head_len(address)..).unwrap_or(address)
 }
 
-/// Empties the binding of every address read through a saved connection: what a file or an
-/// import brings is no login of this computer's.
+/// Clears imported runtime authority. A legacy placeholder becomes its original bare address;
+/// its reserved marker was never authority to use a login.
 pub(crate) fn clear_bindings<'a>(addresses: impl IntoIterator<Item = &'a mut String>) {
     for a in addresses {
         let at = head_len(a);
         let Some(p) = a.get(at..) else { continue };
-        if let Some(cleared) = s3_address::rebound(p, "")
-            && cleared != p
-        {
+        let cleared = match s3_address::parse(p) {
+            Ok(Some(b)) if b.binding == s3_address::LEGACY => Some(b.url.to_string()),
+            Ok(Some(b)) if !b.binding.is_empty() => s3_address::bind("", b.endpoint, b.url).ok(),
+            _ => None,
+        };
+        if let Some(cleared) = cleared {
             *a = format!("{}{cleared}", a.get(..at).unwrap_or(""));
         }
     }
@@ -99,18 +100,18 @@ struct Unresolved {
     bucket: String,
 }
 
-/// `address` as [`Unresolved`], when it is one. `legacy` holds the buckets of older addresses
-/// waiting for a choice, whose placeholder (no endpoint, no binding) is not AWS's.
-fn unresolved(address: &str, legacy: &BTreeSet<String>) -> Option<Unresolved> {
+/// What an unresolved address names, without inferring origin from another source's bucket.
+fn unresolved(address: &str) -> Option<Unresolved> {
     let p = part(address);
     match s3_address::parse(p) {
         Ok(Some(b)) => {
-            if !b.binding.is_empty() {
+            let is_legacy = b.binding == s3_address::LEGACY;
+            if !b.binding.is_empty() && !is_legacy {
                 return None;
             }
             let endpoint = s3::canonical(b.endpoint).ok()?.unwrap_or_default();
             let bucket = s3::bucket_of(&endpoint, b.url)?;
-            let endpoint = if endpoint.is_empty() && legacy.contains(&bucket) { None } else { Some(endpoint) };
+            let endpoint = if is_legacy { None } else { Some(endpoint) };
             Some(Unresolved { endpoint, bucket })
         }
         Ok(None) if s3::is_s3(p) => Some(Unresolved { endpoint: None, bucket: s3::parse(p).ok()?.0 }),
@@ -155,22 +156,17 @@ struct Group {
 }
 
 impl Group {
-    fn has(&self, address: &str, legacy: &BTreeSet<String>) -> bool {
-        unresolved(address, legacy).is_some_and(|u| u.endpoint == self.endpoint && u.bucket == self.bucket)
+    fn has(&self, address: &str) -> bool {
+        unresolved(address).is_some_and(|u| u.endpoint == self.endpoint && u.bucket == self.bucket)
     }
-}
-
-fn legacy_buckets(s: &Session) -> BTreeSet<String> {
-    s.s3_pending.iter().filter(|p| p.endpoint.is_none()).map(|p| p.bucket.clone()).collect()
 }
 
 /// Settles the S3 sources of the project: see the module's text. Called when a project opens
 /// and when maps or layers are imported, never from a frame.
 pub(crate) fn resolve_project_s3(s: &mut Session) {
-    let legacy = legacy_buckets(s);
     let mut groups: Vec<Group> = Vec::new();
     for a in s.project.addresses_mut() {
-        if let Some(u) = unresolved(a, &legacy)
+        if let Some(u) = unresolved(a)
             && !groups.iter().any(|g| g.endpoint == u.endpoint && g.bucket == u.bucket)
         {
             groups.push(Group { endpoint: u.endpoint, bucket: u.bucket });
@@ -178,7 +174,7 @@ pub(crate) fn resolve_project_s3(s: &mut Session) {
     }
     let mut pending = Vec::new();
     for g in &groups {
-        if let Some(p) = settle(s, g, &legacy) {
+        if let Some(p) = settle(s, g) {
             pending.push(p);
         }
     }
@@ -186,7 +182,7 @@ pub(crate) fn resolve_project_s3(s: &mut Session) {
 }
 
 /// What `g`'s sources do now: bound to its one candidate, kept for a choice, or as they were.
-fn settle(s: &mut Session, g: &Group, legacy: &BTreeSet<String>) -> Option<PendingS3> {
+fn settle(s: &mut Session, g: &Group) -> Option<PendingS3> {
     let candidates: Vec<Connection> = s.connections.connections.iter().filter(|c| matches(c, &g.endpoint, &g.bucket)).cloned().collect();
     let at = match g.endpoint.as_deref() {
         Some(e) if !e.is_empty() => format!(" at {e}"),
@@ -197,9 +193,10 @@ fn settle(s: &mut Session, g: &Group, legacy: &BTreeSet<String>) -> Option<Pendi
             if g.endpoint.is_none() {
                 // An older project's bare address, and no saved connection to read it: as it
                 // always was (anonymously, or through a connection of this session).
-                reopen_where(s, |a| g.has(a, legacy));
+                clear_bindings(s.project.addresses_mut().into_iter().filter(|a| g.has(a)));
+                reopen_where(s, |a| g.has(a));
             } else {
-                let n = block(s, g, legacy, "");
+                let n = block(s, g);
                 s.notify(
                     format!("{n} source(s) read the S3 bucket '{}'{at}, and no saved connection does: add one under Data Sources › Connections, then open the project again", g.bucket),
                     true,
@@ -207,14 +204,14 @@ fn settle(s: &mut Session, g: &Group, legacy: &BTreeSet<String>) -> Option<Pendi
             }
             None
         }
-        [c] => match bind_group(s, g, legacy, c) {
+        [c] => match bind_group(s, g, c) {
             Ok(_) => None,
             Err(e) => {
                 // Kept blocked, naming the one connection that could read it (an older project's
                 // address now names its endpoint).
                 let endpoint = endpoint_of(c).unwrap_or_default();
-                let source = rewrite(s, g, legacy, &endpoint, "").into_iter().next()?;
-                block_by(s, &source, &endpoint);
+                block(s, g);
+                let source = rewrite(s, g, &endpoint, "").into_iter().next()?;
                 s.notify(
                     format!("Log in to the saved S3 connection '{}' to open the sources that read the bucket '{}': {e}", c.name, g.bucket),
                     false,
@@ -224,8 +221,9 @@ fn settle(s: &mut Session, g: &Group, legacy: &BTreeSet<String>) -> Option<Pendi
         },
         many => {
             let endpoint = g.endpoint.clone().unwrap_or_default();
-            let source = rewrite(s, g, legacy, &endpoint, "").into_iter().next()?;
-            block_by(s, &source, &endpoint);
+            let binding = if g.endpoint.is_none() { s3_address::LEGACY } else { "" };
+            block(s, g);
+            let source = rewrite(s, g, &endpoint, binding).into_iter().next()?;
             s.notify(
                 format!(
                     "{} saved S3 connections could read the bucket '{}'{at}: choose which one reads this project's sources (Data Sources › Choose S3 connection…); nothing is read until you do",
@@ -246,10 +244,10 @@ fn settle(s: &mut Session, g: &Group, legacy: &BTreeSet<String>) -> Option<Pendi
 
 /// Rewrites the unresolved addresses of `g` to read through `binding` at `endpoint`: the new
 /// addresses, in project order.
-fn rewrite(s: &mut Session, g: &Group, legacy: &BTreeSet<String>, endpoint: &str, binding: &str) -> Vec<String> {
+fn rewrite(s: &mut Session, g: &Group, endpoint: &str, binding: &str) -> Vec<String> {
     let mut out = Vec::new();
     for a in s.project.addresses_mut() {
-        if g.has(a, legacy)
+        if g.has(a)
             && let Some(new) = bound(a, endpoint, binding)
         {
             *a = new.clone();
@@ -259,30 +257,15 @@ fn rewrite(s: &mut Session, g: &Group, legacy: &BTreeSet<String>, endpoint: &str
     out
 }
 
-/// Marks the streamed sources of the address that wait for a choice (their layers show why).
-fn block_by(s: &mut Session, source: &str, endpoint: &str) {
-    let Some(want) = unresolved(source, &BTreeSet::new()) else { return };
+/// Marks the streamed sources of `g` as blocked for want of any connection; how many addresses
+/// of `g` there are.
+fn block(s: &mut Session, g: &Group) -> usize {
     for src in s.project.maps.iter_mut().flat_map(|m| m.layers.iter_mut()).filter_map(|l| l.source.as_mut()) {
-        let Some(path) = src.path.as_deref() else { continue };
-        if !src.is_open()
-            && unresolved(path, &BTreeSet::new()).is_some_and(|u| u.bucket == want.bucket)
-            && s3_address::parse(part(path)).ok().flatten().is_some_and(|b| b.endpoint == endpoint)
-        {
+        if !src.is_open() && src.path.as_deref().is_some_and(|p| g.has(p)) {
             src.error = Some(s3::UNRESOLVED.into());
         }
     }
-}
-
-/// Marks the streamed sources of `g` as blocked for want of any connection; how many addresses
-/// of `g` there are.
-fn block(s: &mut Session, g: &Group, legacy: &BTreeSet<String>, why: &str) -> usize {
-    let why = if why.is_empty() { s3::UNRESOLVED } else { why };
-    for src in s.project.maps.iter_mut().flat_map(|m| m.layers.iter_mut()).filter_map(|l| l.source.as_mut()) {
-        if !src.is_open() && src.path.as_deref().is_some_and(|p| g.has(p, legacy)) {
-            src.error = Some(why.into());
-        }
-    }
-    s.project.addresses_mut().into_iter().filter(|a| g.has(a, legacy)).count()
+    s.project.addresses_mut().into_iter().filter(|a| g.has(a)).count()
 }
 
 /// Opens (again) the streamed sources whose address `which` accepts; how many opened and how
@@ -312,11 +295,11 @@ fn reopen_where(s: &mut Session, which: impl Fn(&str) -> bool) -> (usize, usize)
 /// Binds `g`'s sources to the saved connection `c`: logs it in if it isn't, lets its login read
 /// the bucket (the user's choice, or its only candidate's), rewrites the addresses to name it and
 /// reads them. How many sources opened and how many failed.
-fn bind_group(s: &mut Session, g: &Group, legacy: &BTreeSet<String>, c: &Connection) -> Result<(usize, usize), String> {
+fn bind_group(s: &mut Session, g: &Group, c: &Connection) -> Result<(usize, usize), String> {
     let endpoint = endpoint_of(c).ok_or_else(|| s3::MISMATCH.to_string())?;
     let binding = crate::cmd::connections::login_saved(s, c)?;
     s3::grant_saved(&binding, &g.bucket)?;
-    let addresses = rewrite(s, g, legacy, &endpoint, &binding);
+    let addresses = rewrite(s, g, &endpoint, &binding);
     // What failed before at an identical address is read again with this login.
     for a in &addresses {
         cache::forget(part(a));
@@ -336,13 +319,12 @@ pub(crate) fn choose(s: &mut Session, source: &str, id: &str) -> crate::CmdResul
     let Some(index) = s.s3_pending.iter().position(|p| p.source == source) else { return Err(STALE.into()) };
     let pending = s.s3_pending.get(index).cloned().ok_or(STALE)?;
     let c = s.connections.find(id).filter(|c| c.id == id && matches(c, &pending.endpoint, &pending.bucket)).cloned().ok_or(STALE)?;
-    let legacy = legacy_buckets(s);
     let g = Group { endpoint: pending.endpoint.clone(), bucket: pending.bucket.clone() };
-    if !s.project.addresses_mut().into_iter().any(|a| g.has(a, &legacy)) {
+    if !s.project.addresses_mut().into_iter().any(|a| g.has(a)) {
         s.s3_pending.remove(index);
         return Err(STALE.into());
     }
-    let (reopened, failed) = bind_group(s, &g, &legacy, &c)?;
+    let (reopened, failed) = bind_group(s, &g, &c)?;
     s.s3_pending.remove(index);
     Ok(serde_json::json!({"id": c.id, "reopened": reopened, "failed": failed}))
 }
@@ -366,26 +348,21 @@ mod tests {
         assert_eq!(part("s3://data/a.fgb"), "s3://data/a.fgb");
         let mut addresses = [template.clone(), "s3://data/b.fgb".to_string(), wrapped.clone(), "https://x.org/a".to_string()];
         clear_bindings(addresses.iter_mut());
-        let none = BTreeSet::new();
         assert_eq!(addresses[0], "pmtiles:{z}/{x}/{y}@rustgis-s3::22:https://s3.example.org:https://s3.example.org/data/a.pmtiles");
         assert_eq!(addresses[1], "s3://data/b.fgb");
-        let u = unresolved(&addresses[0], &none).unwrap();
+        let u = unresolved(&addresses[0]).unwrap();
         assert_eq!((u.endpoint.as_deref(), u.bucket.as_str()), (Some("https://s3.example.org"), "data"));
-        let u = unresolved(&addresses[1], &none).unwrap();
+        let u = unresolved(&addresses[1]).unwrap();
         assert_eq!((u.endpoint, u.bucket.as_str()), (None, "data"));
-        assert!(unresolved(&addresses[3], &none).is_none());
+        assert!(unresolved(&addresses[3]).is_none());
         // A bound address is resolved; rebinding keeps its template and inner address.
-        assert!(unresolved(&wrapped, &none).is_none());
+        assert!(unresolved(&wrapped).is_none());
         let again = bound(&addresses[0], "https://s3.example.org", B).unwrap();
         assert_eq!(again, template);
         assert!(has_binding(&again, B) && !has_binding(&addresses[0], B));
         let bare = bound("s3://data/b.fgb", "", B).unwrap();
         assert_eq!(bare, format!("rustgis-s3:{B}:0::s3://data/b.fgb"));
-        // An older address's placeholder is AWS's unless an older one is waiting for its bucket.
-        let placeholder = "rustgis-s3::0::s3://data/b.fgb";
-        assert_eq!(unresolved(placeholder, &none).unwrap().endpoint.as_deref(), Some(""));
-        assert_eq!(unresolved(placeholder, &BTreeSet::from(["data".to_string()])).unwrap().endpoint, None);
         // Malformed provenance is nobody's resource and never a file.
-        assert!(unresolved("rustgis-s3:junk", &none).is_none() && is_s3_backed("rustgis-s3:junk"));
+        assert!(unresolved("rustgis-s3:junk").is_none() && is_s3_backed("rustgis-s3:junk"));
     }
 }

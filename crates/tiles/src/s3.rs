@@ -180,7 +180,7 @@ pub fn new_binding() -> Result<String, String> {
 /// granted to this binding are kept for a login of the same connection at the same endpoint, and
 /// forgotten otherwise.
 pub fn connect_saved(c: Connection, binding: &str, id: &str) -> Result<(), String> {
-    if binding.is_empty() || !rustgis_data::s3_address::valid_binding(binding) {
+    if binding.is_empty() || binding == rustgis_data::s3_address::LEGACY || !rustgis_data::s3_address::valid_binding(binding) {
         return Err("not a saved S3 connection token".into());
     }
     if id.is_empty() || id.len() > 64 {
@@ -311,8 +311,12 @@ pub const MISMATCH: &str = "The saved S3 connection no longer matches this sourc
 /// a fetch of it, and a project, keep. (A binding alone grants no bucket: [`grant_saved`], or the
 /// connection's own buckets, do.)
 pub fn bound_url(binding: &str, url: &str) -> Result<String, String> {
-    let (c, _) = saved_connection(binding).ok_or(UNRESOLVED)?;
-    rustgis_data::s3_address::bind(binding, c.endpoint.as_deref().unwrap_or(""), url).map_err(str::to_string)
+    let endpoint = {
+        let reg = lock();
+        let saved = reg.saved.iter().find(|s| !binding.is_empty() && s.binding == binding).ok_or(UNRESOLVED)?;
+        reg.connections.iter().find(|c| c.name == saved.name).ok_or(UNRESOLVED)?.endpoint.clone()
+    };
+    rustgis_data::s3_address::bind(binding, endpoint.as_deref().unwrap_or(""), url).map_err(str::to_string)
 }
 
 /// An endpoint as connections keep it: a web address's scheme and authority, no path.
@@ -1262,6 +1266,11 @@ mod tests {
         let (a, b) = (new_binding().unwrap(), new_binding().unwrap());
         assert_ne!(a, b);
         assert!(a.len() == 16 && a.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        let legacy = rustgis_data::s3_address::LEGACY;
+        assert!(connect_saved(saved_login("sv-pending", "NEVERINSTALLED", None, &["sv-bucket"]), legacy, "c1").is_err());
+        assert!(connection("sv-pending").is_none(), "a pending marker can never install credentials");
+        let pending = rustgis_data::s3_address::bind(legacy, "", "s3://sv-bucket/k.fgb").unwrap();
+        assert_eq!(prepare(&pending).unwrap_err(), UNRESOLVED);
         // The second saved connection is registered first: insertion order decides nothing.
         connect_saved(saved_login("sv-b", "SAVEDKEYB", Some(ep), &["sv-bucket"]), &b, "c1").unwrap();
         connect_saved(saved_login("sv-a", "SAVEDKEYA", Some(ep), &["sv-bucket"]), &a, "c1").unwrap();
