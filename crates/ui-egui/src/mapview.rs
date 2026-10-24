@@ -1431,11 +1431,12 @@ fn selection_tool(tool: Tool) -> bool {
 fn cancel_changed_selection(app: &mut RustGisApp, rect: Rect) {
     if app.map.selection_gesture.as_ref().is_some_and(|g| {
         let map = app.session.map();
+        // Polygon vertices are lon/lat and remain valid when the view moves between clicks.
+        let view_bound = g.tool != Tool::SelectPolygon;
         g.tool != app.session.tool
             || g.map != app.session.project.active_map
-            || g.camera != map.camera
             || g.projection != map.projection
-            || g.rect != rect
+            || (view_bound && (g.camera != map.camera || g.rect != rect))
     }) {
         app.map.cancel_sketch();
     }
@@ -3485,6 +3486,32 @@ mod tests {
         assert_eq!(h.state().session.tool, Tool::Select);
         selection_click(&mut h, [2., 2.]);
         assert_eq!(selection_rows(&h), vec![1]);
+    }
+
+    #[test]
+    fn selection_tools_polygon_survives_camera_and_viewport_changes() {
+        let mut h = selection_harness();
+        h.state_mut().run("tool.set", json!({"tool": "selectPolygon"})).unwrap();
+        for point in [[0., 0.], [3., 0.], [3., 1.]] {
+            selection_click(&mut h, point);
+        }
+        let sketch = h.state().map.sketch.clone();
+        h.state_mut().session.map_mut().camera.center.x += 1000.0;
+        h.step();
+        assert_eq!(h.state().map.sketch, sketch, "camera movement preserves polygon vertices");
+        assert!(h.state().map.selection_gesture.is_some());
+
+        let rect = h.state().map.view_rect.unwrap().0;
+        cancel_changed_selection(h.state_mut(), rect.translate(vec2(8.0, 0.0)));
+        assert_eq!(h.state().map.sketch, sketch, "viewport movement preserves polygon vertices");
+        assert!(h.state().map.selection_gesture.is_some());
+
+        for point in [[1., 1.], [1., 3.], [0., 3.], [0., 0.]] {
+            selection_click(&mut h, point);
+        }
+        assert_eq!(selection_rows(&h), vec![0, 2]);
+        assert!(h.state().map.sketch.is_empty());
+        assert!(h.state().map.selection_gesture.is_none());
     }
 
     #[test]
