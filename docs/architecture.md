@@ -25,6 +25,13 @@ description, an `enabled` check and a `run` function. The ribbon, keyboard short
 search, CLI and Python dispatch engine commands through `Session::run`. UI-only commands
 (`ui.*`) live in `crates/ui-egui/src/lib.rs`; engine commands never open dialogs.
 
+The UI exports `big_split_menu` for a large ribbon control with independent, accessible primary
+and alternatives buttons. Pass the primary command id and parameters separately from the menu
+closure; menu choices run their own commands and never replace the primary action. The primary's
+enabled state comes from its command, while `menu_enabled` controls the arrow independently. Use
+`ui.push_id` when placing repeated controls whose order can change. Keep whole-button dropdowns
+for choices without a clear everyday default.
+
 Mutating commands snapshot the project for undo and restore it on an error or escaped panic.
 View-only commands do not take undo snapshots. Undo and rollback cover project state, not
 external effects such as files already written.
