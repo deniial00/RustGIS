@@ -1378,11 +1378,12 @@ mod tests {
         // A binding is a token, not a name: junk and the id are refused.
         assert!(connect_saved(saved_login("sv-grant-3", "K", Some(ep), &[]), "c7", "c7").is_err());
         assert!(connect_saved(saved_login("sv-grant-3", "K", Some(ep), &[]), "", "c7").is_err());
-        // A login that doesn't fit leaves nothing registered.
+        // A refused login neither registers its name nor replaces the existing login or grants.
+        grant_saved(&a, "sv-browsed").unwrap();
         let bad = Credentials { access_key_id: "has space".into(), secret_access_key: "s".into(), session_token: None };
-        let before = connections().len();
         assert!(connect_saved(Connection { credentials: Some(bad), ..saved_login("sv-grant-4", "K", Some(ep), &[]) }, &a, "c7").is_err());
-        assert!(connection("sv-grant-4").is_none() && connections().len() == before);
+        assert!(connection("sv-grant-4").is_none());
+        assert_eq!(key_of(&prepare(&moved).unwrap()), "GRANTKEY4");
         disconnect("sv-grant-2");
     }
 
