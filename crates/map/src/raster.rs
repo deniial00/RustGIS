@@ -148,6 +148,7 @@ impl RasterLayer {
                                 .map_err(|e| e.to_string())
                         });
                     *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                    crate::source::landed();
                 }),
             );
             return Ok(());

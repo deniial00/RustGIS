@@ -504,7 +504,7 @@ fn s3_saved_lifecycle_keeps_deletes_and_forgets_keys() {
     assert!(spy.raw(&id).is_none());
     let last_delete = spy.ops().iter().rposition(|o| o.starts_with("delete")).unwrap();
     assert!(spy.ops().iter().skip(last_delete).all(|o| !o.starts_with("save")));
-    // Removal deletes, even without a marker.
+    // Removal deletes a marked pair; unmarked definitions never access the store.
     s.run("connection.edit", &json!({"id": id, "address": srv.base})).unwrap();
     login(&mut s, &id, "SAVEDKEYA", "saved-secret-A", true).unwrap();
     s.run("connection.remove", &json!({"id": id})).unwrap();
@@ -512,7 +512,7 @@ fn s3_saved_lifecycle_keeps_deletes_and_forgets_keys() {
     let deletes = spy.count("delete");
     let copy_id = copy["id"].as_str().unwrap();
     s.run("connection.remove", &json!({"id": copy_id})).unwrap();
-    assert_eq!(spy.count("delete"), deletes + 1, "asked even when nothing was marked");
+    assert_eq!(spy.count("delete"), deletes, "an unmarked definition needs no store access");
     // Without a store, a marker blocks removal and forgetting; without one, removal is as before.
     let mut t = session(None);
     t.connections = Connections::from_json(
@@ -1203,4 +1203,43 @@ fn s3_saved_legacy_choice_never_rebinds_an_explicit_aws_source_for_the_same_obje
         assert_eq!(srv.requests(), from, "the AWS source never reaches the custom endpoint");
         s3::disconnect(&custom_name);
     }
+}
+
+#[test]
+fn s3_saved_unscoped_connection_requires_a_choice_and_does_not_repeat_the_prompt() {
+    let p = saved_project("sv-unscoped");
+    let mut s = reopened(&p, &p.store, 1);
+    s.connections.connections[0].options.remove("buckets");
+    let before = p.store.count("load");
+    s.run("project.openText", &json!({"text": p.text})).unwrap();
+    assert_eq!(s.s3_pending.len(), 1);
+    assert_eq!(p.store.count("load"), before, "unscoped keys are never automatically read");
+    let mark = s.notice_mark();
+    crate::s3_connections::resolve_project_s3(&mut s);
+    assert_eq!(s.s3_pending.len(), 1);
+    assert!(s.notices_since(mark).is_empty(), "an unchanged pending choice is not repeated");
+    assert_eq!(p.store.count("load"), before);
+}
+
+#[test]
+fn s3_saved_unmarked_removal_works_with_a_locked_store() {
+    let spy = Arc::new(Spy::default());
+    spy.refuse_delete.store(true, Ordering::Relaxed);
+    let mut s = session(Some(&spy));
+    let id = saved(&mut s, "sv-unmarked-remove", "", "sv-unmarked", "none");
+    s.run("connection.remove", &json!({"id": id})).unwrap();
+    assert_eq!(spy.count("delete"), 0);
+}
+
+#[test]
+fn s3_saved_changing_away_from_keys_forgets_the_pair() {
+    let srv = serve_bucket("sv-mode-change", vec![], vec![]);
+    let spy = Arc::new(Spy::default());
+    let mut s = session(Some(&spy));
+    let id = saved(&mut s, "sv-mode-change-conn", &srv.base, "sv-mode-change", "keys");
+    login(&mut s, &id, "MODEKEY", "mode-secret", true).unwrap();
+    assert!(spy.raw(&id).is_some());
+    let r = s.run("connection.edit", &json!({"id": id, "options": {"credentials": "none", "buckets": "sv-mode-change"}})).unwrap();
+    assert_eq!(r["savedKeys"], false);
+    assert!(spy.raw(&id).is_none());
 }

@@ -9035,6 +9035,105 @@ fn a_zarr_variable_summarised_over_time() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Where nothing but a shell waits on them (`rustgis-cli run`: `long_runs` set), a trend and a
+/// summary tell their progress up to its end and give what they give anywhere else; and there a
+/// STAC trend's or summary's search takes more items than in the app (a state's four MODIS tiles
+/// over 25 years are 2,304).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_trend_where_nothing_waits_tells_its_progress() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    use std::sync::Mutex;
+    // What was told, by this test alone: no other test sets `long_runs` with this `tell`.
+    static TOLD: Mutex<Vec<(String, f64)>> = Mutex::new(Vec::new());
+    fn tell(what: &str, share: f64) {
+        assert!((0.0..=1.0).contains(&share), "{what}: {share}");
+        TOLD.lock().unwrap().push((what.to_string(), share));
+    }
+    // The last share each run told: its end, 1, however soon it finished, and told only then.
+    let ended = |what: &str| {
+        let told = TOLD.lock().unwrap();
+        let ends = told.iter().filter(|(w, x)| w == what && *x >= 1.0).count();
+        assert!(ends <= 1, "{what} told its end {ends} times");
+        told.iter().rev().find(|(w, _)| w == what).map(|(_, x)| *x)
+    };
+    let gt = GeoTransform { origin_x: -56.0, origin_y: -12.0, pixel_width: 0.01, pixel_height: -0.01 };
+    let slope = |s: &mut Session| {
+        let mut names = Vec::new();
+        for (k, y) in (2013..2025).enumerate() {
+            let name = format!("ndvi_{y}-07-01");
+            let r = Raster::new(&name, 2, 1, vec![vec![0.3 + 0.02 * k as f32, 0.5]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32")
+                .unwrap();
+            let bytes = geotiff::write(&r, 0).unwrap();
+            crate::cmd::raster::add_raster(s, &name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+            names.push(name);
+        }
+        let band = |s: &Session, r: &Value| {
+            let id = r["layers"][0].as_u64().unwrap() as u32;
+            s.map().layer(id).unwrap().raster.as_ref().unwrap().data.clone().unwrap().bands[0].data.clone()
+        };
+        let trend = s.run("cube.trend", &json!({"layers": names})).unwrap();
+        let mean = s.run("cube.reduce", &json!({"layers": names, "stat": "mean"})).unwrap();
+        (band(s, &trend), band(s, &mean))
+    };
+    let mut plain = Session::new(Project::default());
+    let mut told = Session::new(Project::default());
+    told.long_runs = Some(tell);
+    let ((a, mean_a), (b, mean_b)) = (slope(&mut plain), slope(&mut told));
+    assert_eq!(a, b);
+    assert_eq!(mean_a, mean_b);
+    assert!((a[0] - 0.02).abs() < 1e-4, "{a:?}");
+    assert!((mean_a[0] - 0.41).abs() < 1e-5 && (mean_a[1] - 0.5).abs() < 1e-6, "{mean_a:?}");
+    assert_eq!(ended("cube.trend"), Some(1.0), "the trend's progress is told to its end");
+    assert_eq!(ended("cube.reduce"), Some(1.0), "the summary's progress is told to its end");
+    // 2,100 items (a tile each, one day) in eleven pages of 200: too many for the time slider and
+    // for a trend in the app, not for a trend or a summary where nothing waits, which go on to
+    // read their first file (here on a closed port).
+    let item = |k: usize| {
+        format!(
+            r#"{{"type": "Feature", "id": "i{k}", "collection": "c", "bbox": [10, 45, 11, 46], "geometry": null, "properties": {{"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["t{k}"]}}, "assets": {{"NDVI": {{"href": "http://127.0.0.1:9/i{k}.tif"}}}}}}"#
+        )
+    };
+    let page = |n: usize| {
+        let items: Vec<String> = (n * 200..((n + 1) * 200).min(2100)).map(item).collect();
+        let next = if (n + 1) * 200 < 2100 {
+            format!(r#", "links": [{{"rel": "next", "href": "{{base}}/v1/search?page=p{:02}"}}]"#, n + 1)
+        } else {
+            String::new()
+        };
+        format!(r#"{{"type": "FeatureCollection", "features": [{}]{next}}}"#, items.join(","))
+    };
+    // The pages by their marks first: the search's own address is a prefix of theirs.
+    const MARKS: [&str; 10] = [
+        "/v1/search?page=p01",
+        "/v1/search?page=p02",
+        "/v1/search?page=p03",
+        "/v1/search?page=p04",
+        "/v1/search?page=p05",
+        "/v1/search?page=p06",
+        "/v1/search?page=p07",
+        "/v1/search?page=p08",
+        "/v1/search?page=p09",
+        "/v1/search?page=p10",
+    ];
+    let mut routes: Vec<(&'static str, String)> = MARKS.iter().enumerate().map(|(i, m)| (*m, page(i + 1))).collect();
+    routes.push(("/v1/search", page(0)));
+    // Eleven pages for each of the four searches, with room to spare.
+    let api = format!("{}/v1", serve_routes(routes, 60));
+    let p = json!({"url": api, "collection": "c", "asset": "NDVI", "bbox": [10, 45, 11, 46], "start": "2024", "end": "2024"});
+    let e = plain.run("stac.addCube", &p).unwrap_err();
+    assert!(e.contains("more than 2000 items"), "{e}");
+    let e = plain.run("cube.trend", &p).unwrap_err();
+    assert!(e.contains("more than 2000 items"), "the app's trend doesn't take them: {e}");
+    // Taken, they go on to the first file, which can't be read.
+    let e = told.run("cube.trend", &p).unwrap_err();
+    assert!(e.contains("127.0.0.1:9/i") && !e.contains("items"), "a trend takes them: {e}");
+    let mut summary = p.clone();
+    summary["stat"] = json!("mean");
+    let e = told.run("cube.reduce", &summary).unwrap_err();
+    assert!(e.contains("127.0.0.1:9/i") && !e.contains("items"), "a summary takes them: {e}");
+}
+
 /// A trend over a data cube (#579), from the three kinds of cube: a stack of raster layers dated
 /// by their names, a raster whose bands are dates, and a Zarr variable along its time dimension.
 /// A cell with a clear trend gets Sen's slope and a significant slope; noise gets a slope but no
@@ -9713,6 +9812,38 @@ fn streamed_layer_outside_its_zoom_range_reads_nothing() {
     let l = s.map().layer(id).unwrap();
     assert!(!l.dataset.features.is_empty(), "{:?}", l.source.as_ref().unwrap().error);
     assert!(sent.load(std::sync::atomic::Ordering::Relaxed) > before);
+}
+
+/// Load All Features on a layer whose web source is still opening waits for it to open, rather
+/// than fail with "the layer's source isn't open" (the server here holds its answers a while).
+#[test]
+fn load_all_features_waits_for_a_source_still_opening() {
+    use rustgis_data::{Dataset, Feature, Geometry, GeometryType};
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![]);
+    for i in 0..100u32 {
+        let c = rustgis_geom::Coord::new(f64::from(i) * 0.1, 1.0);
+        ds.features.push(Feature { id: u64::from(i) + 1, geometry: Some(Geometry::Point(c)), attrs: vec![] });
+    }
+    let fgb = rustgis_data::source::fgb::write(&ds).unwrap();
+    let (base, _) = serve_ranges(fgb.clone());
+    let mut s = Session::new(Project::default());
+    s.run("layer.addUrl", &json!({"url": format!("{base}/pts.fgb")})).unwrap();
+    let text = serde_json::to_string(&s.project).unwrap();
+    let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (slow, _) = serve_gated(fgb, true, Some(gate.clone()));
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text.replace(&base, &slow)})).unwrap();
+    let layer = t.map().layers.iter().find(|l| l.is_streamed()).unwrap().clone();
+    // Started as the view starts it, and held by the server: still opening when the load begins.
+    let mut started = layer.source.clone().unwrap();
+    started.open().unwrap();
+    assert!(!started.is_open() && started.is_pending());
+    let load = std::thread::spawn(move || layer.load_all());
+    // Still waiting while the server holds its answers, rather than failed at once.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!load.is_finished(), "the load didn't wait for the source: {:?}", load.join().unwrap().err());
+    gate.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(load.join().unwrap().unwrap().features.len(), 100);
 }
 
 /// A FlatGeobuf and a GeoParquet by their address are read in place, by range: a view fetches a

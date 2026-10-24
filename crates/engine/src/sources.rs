@@ -158,9 +158,9 @@ pub fn clean(mut s: Source) -> Result<Source, String> {
     }
     s.address = redact(s.address.trim());
     // Provenance has its own structural bound; it must not consume the destination's limit.
-    let archive = template_archive(&s.address).map_or(s.address.as_str(), |(_, archive)| archive);
+    let (head, archive) = template_archive(&s.address).unwrap_or(("", s.address.as_str()));
     let bounded = match rustgis_data::s3_address::parse(archive) {
-        Ok(Some(bound)) => bound.url.len() <= MAX_TEXT,
+        Ok(Some(bound)) => head.len().saturating_add(bound.url.len()) <= MAX_TEXT,
         Ok(None) => s.address.len() <= MAX_TEXT,
         Err(_) => false,
     };
@@ -516,6 +516,18 @@ fn build_library() -> Vec<(&'static str, Source)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_archive_still_bounds_its_template_head() {
+        let address = rustgis_data::s3_address::bind("", "", "s3://data/a.pmtiles").unwrap();
+        let source = Source {
+            kind: "url".into(),
+            name: "Huge template".into(),
+            address: format!("pmtiles:{}@{address}", "x".repeat(MAX_TEXT)),
+            extra: Value::Null,
+        };
+        assert!(clean(source).is_err());
+    }
 
     #[test]
     fn secrets_in_command_parameters_are_noticed() {

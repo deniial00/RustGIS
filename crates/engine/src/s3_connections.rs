@@ -7,11 +7,11 @@
 //! read from a file is cleared ([`clear_bindings`]); a source with none can't be fetched. Opening
 //! a project (or importing a map) settles each bucket its sources read ([`resolve_project_s3`]):
 //!
-//! - exactly one saved connection could read it: it logs in (a profile, the environment,
-//!   anonymously, or its saved keys) and the sources are bound to that login and opened. Its
+//! - exactly one saved connection explicitly lists the bucket and could read it: it logs in
+//!   (a profile, the environment, anonymously, or its saved keys) and the sources are bound to that login and opened. Its
 //!   keys missing or the store refusing, they stay blocked, pending that connection's log in;
-//! - several could: they stay blocked, [`PendingS3`] lists the candidates, and the user chooses
-//!   (`connection.resolveS3`). Nothing is fetched, signed or not, until then;
+//! - several could, or the only candidate has no explicit bucket scope: they stay blocked,
+//!   [`PendingS3`] lists the candidates, and the user chooses (`connection.resolveS3`). Nothing is fetched, signed or not, until then;
 //! - none could: an older project's bare `s3://` address is read as it always was (anonymously,
 //!   or through a session-only connection); one that names a connection's endpoint stays blocked
 //!   with a notice.
@@ -174,7 +174,12 @@ pub(crate) fn resolve_project_s3(s: &mut Session) {
     }
     let mut pending = Vec::new();
     for g in &groups {
-        if let Some(p) = settle(s, g) {
+        let candidates: Vec<String> =
+            s.connections.connections.iter().filter(|c| matches(c, &g.endpoint, &g.bucket)).map(|c| c.id.clone()).collect();
+        if let Some(existing) = s.s3_pending.iter().find(|p| p.endpoint == g.endpoint && p.bucket == g.bucket && p.candidates == candidates)
+        {
+            pending.push(existing.clone());
+        } else if let Some(p) = settle(s, g) {
             pending.push(p);
         }
     }
@@ -204,7 +209,7 @@ fn settle(s: &mut Session, g: &Group) -> Option<PendingS3> {
             }
             None
         }
-        [c] => match bind_group(s, g, c) {
+        [c] if c.options.get("buckets").is_some_and(|scope| scope.split(',').any(|b| b.trim() == g.bucket)) => match bind_group(s, g, c) {
             Ok(_) => None,
             Err(e) => {
                 // Kept blocked, naming the one connection that could read it (an older project's

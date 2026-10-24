@@ -323,7 +323,7 @@ struct Pending {
 type Opening = Arc<Mutex<Option<Result<Arc<dyn FeatureSource>, String>>>>;
 
 /// Tells the app something landed (a read, or a source opened by its address).
-fn landed() {
+pub(crate) fn landed() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
     if let Some(w) = waker().lock().ok().and_then(|w| w.clone()) {
         w();

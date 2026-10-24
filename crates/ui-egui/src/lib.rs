@@ -11,6 +11,8 @@ pub mod i18n;
 #[cfg(not(target_arch = "wasm32"))]
 mod agentthreads;
 mod analysispane;
+#[cfg(not(target_arch = "wasm32"))]
+mod assistantkeys;
 mod assistantpane;
 mod backstage;
 mod bookmarkpane;

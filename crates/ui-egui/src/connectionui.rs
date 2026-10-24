@@ -524,6 +524,9 @@ fn save(app: &mut RustGisApp) -> Result<(), String> {
     if remember && (st.access_key.trim().is_empty() || st.secret_key.trim().is_empty()) {
         return Err(tl!("Type the access key ID and the secret access key to remember them on this computer.").into());
     }
+    if DATABASE_KINDS.contains(&st.kind.as_str()) && st.remember && st.password.is_empty() {
+        return Err(tl!("Type the password to remember it on this computer.").into());
+    }
     let wants_login = typed_secrets(st) || (st.login && keys_mode && st.id.is_some());
     let mut p = definition(st);
     let command = if let Some(id) = &st.id {
@@ -1037,6 +1040,16 @@ mod tests {
         st.access_key = "AKIDREMEMBERUI".into();
         st.secret_key = "remember-ui-secret".into();
         st.remember = true;
+    }
+
+    #[test]
+    fn remember_without_a_database_password_changes_nothing() {
+        let mut app = RustGisApp::with_sample();
+        app.session.database_logins.set_store(Some(std::sync::Arc::new(rustgis_engine::data::secrets::MemorySecrets::new())));
+        app.run("ui.connection", json!({"kind": "postgres"})).unwrap();
+        app.ui.connection.remember = true;
+        assert!(save(&mut app).is_err());
+        assert!(app.session.connections.connections.is_empty());
     }
 
     #[test]

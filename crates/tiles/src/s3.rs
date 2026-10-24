@@ -687,7 +687,8 @@ pub fn bucket_of(endpoint: &str, url: &str) -> Option<String> {
         let host = authority.split(':').next().unwrap_or(authority);
         return aws_bucket(host, rest);
     }
-    let path = rest.get(authority.len()..).unwrap_or("");
+    let (_, original_rest) = url.split_once("://")?;
+    let path = original_rest.get(authority.len()..).unwrap_or("");
     path.trim_start_matches('/').split(['/', '?', '#']).next().filter(|b| valid_bucket(b)).map(str::to_string)
 }
 
@@ -1015,6 +1016,13 @@ pub fn profile(credentials_ini: &str, config_ini: &str, name: &str) -> Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bucket_paths_at_custom_endpoints_are_case_sensitive() {
+        assert_eq!(bucket_of("https://minio.example", "https://minio.example/MyBucket/key"), None);
+        assert_eq!(bucket_of("https://minio.example", "https://minio.example/mybucket/key").as_deref(), Some("mybucket"));
+        assert_eq!(bucket_of("", "https://BUCKET.s3.amazonaws.com/key").as_deref(), Some("bucket"));
+    }
 
     #[test]
     fn aws_bucket_from_every_host_form() {

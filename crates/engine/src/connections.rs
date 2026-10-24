@@ -557,6 +557,7 @@ impl DatabaseLogins {
     pub fn secret_store(&self) -> Option<&Arc<dyn SecretStore>> {
         self.store.as_ref()
     }
+
     /// Whether `id` has a password given this session.
     pub fn has_session_password(&self, id: &str) -> bool {
         self.session.contains_key(id)
@@ -587,6 +588,7 @@ impl DatabaseLogins {
             self.reject(&c.id);
         }
     }
+
     /// Reads the password saved for a definition (once: later calls use what was read).
     pub fn load(&mut self, c: &Connection) -> SavedPassword {
         if let Some(p) = self.saved.get(&c.id) {

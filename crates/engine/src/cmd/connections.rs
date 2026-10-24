@@ -207,7 +207,11 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
     // Validate everything, then locate the commit target before touching the store.
     let (mut prepared, stripped) = s.connections.prepare_update(&old.id, c)?;
     let database_changed = DATABASE_KINDS.contains(&old.kind.as_str()) && old.address != prepared.address;
-    let credentials_changed = database_changed || old.kind == "s3" && endpoint_changed(&old, &prepared);
+    let credentials_changed = database_changed
+        || (old.kind == "s3"
+            && (endpoint_changed(&old, &prepared)
+                || (old.options.get("credentials").is_some_and(|v| v == "keys")
+                    && prepared.options.get("credentials").is_none_or(|v| v != "keys"))));
     let slot = s.connections.connections.iter_mut().find(|c| c.id == old.id).ok_or("connection no longer exists")?;
     if credentials_changed {
         delete_account(&mut s.database_logins, &old)?;
@@ -285,6 +289,9 @@ fn delete_account(logins: &mut crate::connections::DatabaseLogins, c: &Connectio
     } else {
         (c.remembered, "The saved password couldn't be deleted. The connection was left unchanged.")
     };
+    if c.kind == "s3" && !marked {
+        return Ok(());
+    }
     if logins.has_store() {
         logins.delete(&c.id).map_err(|_| error.to_string())
     } else if marked {
@@ -310,6 +317,7 @@ pub(crate) fn layer_keys(src: &rustgis_map::source::SourceLayer) -> Vec<(&'stati
     let Some((_, database)) = crate::connections::layer_database(src) else { return Vec::new() };
     crate::connections::database_key(&crate::sources::redact(database)).into_iter().collect()
 }
+
 fn forget_password(s: &mut Session, p: &Value) -> CmdResult {
     let c = found(s, p)?.clone();
     if !DATABASE_KINDS.contains(&c.kind.as_str()) {

@@ -502,10 +502,17 @@ fn objects(bytes: &[u8], bucket: &str, prefix: &str, binding: Option<&str>) -> R
         let node = format!("s3:{bucket}/{p}");
         json!({"key": node, "node": node, "name": format!("{}/", last(p)), "what": "prefix"})
     });
+    let mut dropped = false;
     let files = list.objects.iter().filter(|o| o.key != prefix && !o.key.ends_with('/')).filter_map(|o| {
         let url = format!("s3://{bucket}/{}", o.key);
         let add = match binding {
-            Some(b) => s3::bound_url(b, &url).ok()?,
+            Some(b) => match s3::bound_url(b, &url) {
+                Ok(bound) => bound,
+                Err(_) => {
+                    dropped = true;
+                    return None;
+                }
+            },
             None => url.clone(),
         };
         Some(json!({
@@ -517,6 +524,17 @@ fn objects(bytes: &[u8], bucket: &str, prefix: &str, binding: Option<&str>) -> R
         }))
     });
     let mut found = Found::new(folders.chain(files).take(MAX_CHILDREN + 1).collect());
-    found.truncated |= list.next.is_some();
+    found.truncated |= dropped || list.next.is_some();
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn failed_saved_login_addresses_mark_the_object_listing_incomplete() {
+        let xml = b"<ListBucketResult><Contents><Key>object.fgb</Key><Size>42</Size></Contents></ListBucketResult>";
+        let result = super::objects(xml, "data", "", Some("not-a-live-binding")).unwrap();
+        assert!(result.truncated);
+        assert!(result.children.is_empty());
+    }
 }
