@@ -24,6 +24,7 @@ pub mod osm;
 pub mod photo;
 pub mod query;
 pub mod raster;
+pub mod s3_address;
 pub mod secrets;
 pub mod sheets;
 pub mod source;

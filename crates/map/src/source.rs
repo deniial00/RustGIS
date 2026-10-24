@@ -607,6 +607,19 @@ impl SourceLayer {
         self.pending.is_some() || self.opening.is_some()
     }
 
+    /// Opens the source afresh, forgetting a failed or never-started open (and the window read
+    /// from the old one): a source by its web address read again once what signs it has changed
+    /// (its address, or the login behind it). Its symbology and place in the project stay.
+    pub fn reopen(&mut self) -> Result<(), String> {
+        self.handle = None;
+        self.opening = None;
+        self.pending = None;
+        self.error = None;
+        self.login = false;
+        self.reset();
+        self.open()
+    }
+
     /// Forgets the window, so the next view reads again (after the source changes).
     pub fn reset(&mut self) {
         self.window = None;

@@ -157,7 +157,14 @@ pub fn clean(mut s: Source) -> Result<Source, String> {
         return Err(format!("unknown kind '{}' ({})", s.kind, KINDS.join(", ")));
     }
     s.address = redact(s.address.trim());
-    if s.address.is_empty() || s.address.len() > MAX_TEXT || s.address.chars().any(char::is_control) {
+    // Provenance has its own structural bound; it must not consume the destination's limit.
+    let archive = template_archive(&s.address).map_or(s.address.as_str(), |(_, archive)| archive);
+    let bounded = match rustgis_data::s3_address::parse(archive) {
+        Ok(Some(bound)) => bound.url.len() <= MAX_TEXT,
+        Ok(None) => s.address.len() <= MAX_TEXT,
+        Err(_) => false,
+    };
+    if s.address.is_empty() || !bounded || s.address.chars().any(char::is_control) {
         return Err("a source needs an address (a path, web address or connection)".into());
     }
     s.name = s.name.trim().chars().filter(|c| !c.is_control()).take(200).collect();
@@ -315,11 +322,34 @@ pub fn redact_text(text: &str) -> String {
         .collect()
 }
 
+/// A PMTiles or COG tile template (`pmtiles:{z}/{x}/{y}@archive`, `cog:…@archive`): what comes
+/// before its archive (up to and with the first `@`), and the archive, whose address is the one
+/// that holds credentials and names a saved S3 connection.
+pub(crate) fn template_archive(address: &str) -> Option<(&str, &str)> {
+    use crate::render::rustgis_tiles::{cog, pmtiles};
+    let rest = [pmtiles::SCHEME, cog::SCHEME].iter().find_map(|s| address.strip_prefix(s))?;
+    let (_, archive) = rest.split_once('@')?;
+    let head = address.get(..address.len() - archive.len())?;
+    Some((head, archive))
+}
+
 /// An address without what would give someone else the user's access: the user and password of
 /// a web address, query parameters that are keys, tokens or signatures (a signed blob's SAS, an
 /// S3 presigned URL), and a PostgreSQL connection string's password. A MySQL, MariaDB or SQL Server
-/// address keeps its user (the one to connect as), never its password.
+/// address keeps its user (the one to connect as), never its password. An address read through a
+/// saved S3 connection is redacted inside (its inner address), and its length-prefixed form
+/// rebuilt; a tile template, in its archive.
 pub fn redact(address: &str) -> String {
+    if let Some((head, archive)) = template_archive(address)
+        && rustgis_data::s3_address::is_wrapper(archive)
+    {
+        return format!("{head}{}", redact(archive));
+    }
+    if let Ok(Some(b)) = rustgis_data::s3_address::parse(address)
+        && let Ok(rebuilt) = rustgis_data::s3_address::bind(b.binding, b.endpoint, &redact(b.url))
+    {
+        return rebuilt;
+    }
     if let Some((public, _)) = rustgis_data::source::myconn::split_password(address) {
         return public;
     }
