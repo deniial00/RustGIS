@@ -256,6 +256,11 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let mut cfg = Config::from_env(&provider);
+    if cfg.login()
+        && let Some(c) = rustgis_assistant::chatgpt::load_any()
+    {
+        cfg.sign_in(&c);
+    }
     if let Some(m) = opt(args, "--model").map(str::to_string).or_else(|| std::env::var("RUSTGIS_ASSISTANT_MODEL").ok()) {
         cfg.model = m;
     }

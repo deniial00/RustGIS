@@ -80,7 +80,9 @@ browser and the CLI, where callers keep a secret for the session only, as before
   `store-lock` covers every keychain read and write too, so a rotating refresh token is never used
   twice. Keychain tokens are read again for each use; only those it couldn't keep stay in memory,
   for the session. Tokens from an earlier version's file leave it only after the keychain has
-  taken them.
+  taken them. `Config::from_env` never reads the sign-in: the Assistant reads it on a worker
+  (startup, switching to the provider, after a failed request) and requests wait for it; only
+  selecting, signing out and removing an account, user actions, read the keychain on the frame.
 - **macOS.** The system asks again for access when the app's code signature changes, which
   happens with unsigned or re-signed builds.
 - **Tests.** Use `MemorySecrets`, and `MemorySecrets::failing(..)` for error paths. The desktop
