@@ -1022,7 +1022,8 @@ mod native {
         keep_tokens(v, path, &mut read_accounts(path)?, c, false)
     }
 
-    /// The selected registration, including signed-out accounts. Never reads the keychain.
+    /// The selected registration, including signed-out accounts. Reads the keychain only to move
+    /// an older version's tokens into it (once); otherwise only the file.
     pub fn load_any() -> Option<Credentials> {
         let path = auth_path()?;
         let _guard = store(&path).ok()?;

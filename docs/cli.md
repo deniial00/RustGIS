@@ -112,7 +112,9 @@ plan. `--another-account` starts a new registration, `--accounts` lists saved re
 `--account <client-id>` selects one, `--remove-account <client-id>` signs it out and forgets it,
 and `--logout` signs out. The command line has no system keychain: it uses a sign-in an earlier
 version saved in the settings folder, but not one the desktop app keeps in the keychain, and its
-own sign-ins last for the command only (it can still sign them out and remove them later).
+own sign-ins last for the command only. A later `--logout` or `--remove-account` of such a sign-in
+clears it on this computer but can't end its session at OpenAI (its token is gone); disconnect
+RustGIS in ChatGPT's settings for that.
 `--logout` and `--remove-account` refuse an account whose token is in the keychain (sign out or
 remove it in the app), so it is never left there unrevoked, and `--login` never replaces such a
 sign-in. See [Signing in with ChatGPT](user-guide/assistant.md#signing-in-with-chatgpt).

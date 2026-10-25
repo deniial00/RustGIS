@@ -301,13 +301,12 @@ fn poll_sign_in(app: &mut RustGisApp, ctx: &egui::Context) {
         if signed_in_somewhere || cfg.binding() != binding || cfg.key.is_empty() {
             return;
         }
+        // The same as signing out here: no key, account or catalog, and a model list still on
+        // its way is dropped.
         let mut next = cfg;
-        next.key.clear();
+        forget_sign_in(app, &mut next);
         apply_config(app, next);
-        app.assistant.account = None;
-        app.assistant.welcome = false;
         app.assistant.settings = true;
-        app.assistant.accounts = None;
         return;
     }
     let mut next = cfg.clone();
@@ -2505,10 +2504,22 @@ mod tests {
         finish(&mut app, Some(first.binding()), Some(creds("second")));
         assert_eq!(app.assistant.agent.as_ref().unwrap().config, first);
         assert!(app.assistant.retry.is_some());
-        // One that finds the sign-in gone clears it and stops the work bound to it.
+        // One that finds the sign-in gone clears it and stops the work bound to it, and a model
+        // list still on its way can't bring its catalog back.
+        let late: Reply = Slot::default();
+        app.assistant.models_slot = Some(late.clone());
+        app.assistant.models = vec!["first-model".into()];
         finish(&mut app, Some(first.binding()), None);
         assert!(app.assistant.agent.as_ref().unwrap().config.key.is_empty());
         assert!(app.assistant.retry.is_none() && app.assistant.settings);
+        assert!(app.assistant.models.is_empty() && app.assistant.models_slot.is_none());
+        *late.lock().unwrap() = Some(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({"models": [{"slug": "late", "visibility": "list"}]}).to_string().into_bytes(),
+        }));
+        poll(&mut app, &ctx);
+        assert!(app.assistant.models.is_empty() && app.assistant.catalog.is_empty());
         // Taking the selected account: another one stops work for the first and drops its catalog.
         apply_config(&mut app, first.clone());
         app.assistant.retry = Some((2, web_time::Instant::now()));
