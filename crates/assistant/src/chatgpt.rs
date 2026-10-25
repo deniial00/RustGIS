@@ -807,8 +807,9 @@ mod native {
         (c.client_id.clone(), c.subject.clone())
     }
 
-    /// The keychain's value: the refresh token and the `rev` it is for. Kept small: Windows
-    /// Credential Manager takes at most 2560 bytes of UTF-16.
+    /// The keychain's value: the refresh token and the `rev` it is for, without the much longer
+    /// access and id tokens, for Windows Credential Manager's 2560 bytes of UTF-16 (a real refresh
+    /// token's length is not verified here).
     fn secret(c: &Credentials) -> Secret {
         Secret::new(serde_json::json!({"rev": c.rev, "refresh_token": c.refresh_token}).to_string())
     }
@@ -881,7 +882,9 @@ mod native {
     /// them; the file changes only then. Under the store lock.
     fn with_tokens(v: &Vault, path: &Path, accounts: &mut Accounts, entry: Credentials) -> Result<Credentials, Error> {
         if entry.kept == Kept::SettingsFile {
-            let Some(store) = v.store() else { return Ok(entry) };
+            // Without a refresh token there is nothing the keychain could renew it with: the
+            // file's access token keeps working until it expires.
+            let Some(store) = v.store().filter(|_| !entry.refresh_token.is_empty()) else { return Ok(entry) };
             let moved = Credentials { rev: random_token()?, in_keychain: true, kept: Kept::Keychain, ..entry.clone() };
             if let Err(e) = store.save(&secret_name(&entry.client_id, &entry.subject), &secret(&moved)) {
                 log::warn!("the ChatGPT sign-in stays in the settings folder: {e}");
@@ -931,10 +934,11 @@ mod native {
     }
 
     /// Keeps a registration and its tokens, selects it and writes the file: the refresh token
-    /// goes to the keychain (the item noted in the file first). If the keychain doesn't take it,
-    /// tokens renewed from the file's own go back there, others last for this session; a new
-    /// sign-in (`new`) over an account the keychain still holds is refused instead. Without
-    /// tokens, any in the keychain are deleted. Gives the credentials as kept. Under the store lock.
+    /// goes to the keychain, and the file names it (and the item) before the keychain is written.
+    /// If the keychain doesn't take it (or there is none to take), tokens renewed from the file's
+    /// own go back there, others last for this session; a new sign-in (`new`) over an account the
+    /// keychain still holds is refused instead. Without tokens, any in the keychain are deleted.
+    /// Gives the credentials as kept. Under the store lock.
     fn keep_tokens(v: &Vault, path: &Path, accounts: &mut Accounts, c: &Credentials, new: bool) -> Result<Credentials, Error> {
         let name = secret_name(&c.client_id, &c.subject);
         let store = v.store();
@@ -953,40 +957,49 @@ mod native {
             write_accounts(path, accounts)?;
             return Ok(entry);
         }
-        let mut kept = Credentials { rev: random_token()?, kept: Kept::Keychain, ..c.clone() };
+        // Only tokens renewed from the file's own may go back there; a new sign-in never does.
+        let from_file = c.kept == Kept::SettingsFile && existing.as_ref().is_some_and(|e| e.kept == Kept::SettingsFile);
+        let before = Accounts { entries: accounts.entries.clone(), active: accounts.active.clone() };
+        let mut kept = Credentials { rev: random_token()?, in_keychain: true, kept: Kept::Keychain, ..c.clone() };
+        let attempted = store.is_some() && !c.refresh_token.is_empty();
         let saved = match &store {
+            None => Err("no system keychain here".to_string()),
+            // Nothing outlasts the access token: nothing to keep.
+            Some(_) if !attempted => Err("the sign-in has no refresh token".to_string()),
             Some(store) => {
-                if !in_keychain {
-                    // Noted before the item exists, so it is never left behind unreferenced.
-                    in_keychain = true;
-                    let mut marked = Accounts { entries: accounts.entries.clone(), active: accounts.active.clone() };
-                    match marked.entries.iter_mut().find(|e| id(e) == id(c)) {
-                        Some(e) => e.in_keychain = true,
-                        None => marked.entries.push(Credentials { rev: String::new(), in_keychain: true, ..c.without_tokens() }),
-                    }
-                    write_accounts(path, &marked)?;
-                    *accounts = marked;
-                }
+                // Written first, so a failure after the keychain's write never leaves a token the
+                // file can't name. Tokens from the file stay in it until the keychain has them.
+                accounts.put(&if from_file { Credentials { kept: Kept::SettingsFile, ..kept.clone() } } else { kept.without_tokens() });
+                write_accounts(path, accounts)?;
                 store.save(&name, &secret(&kept)).map_err(|e| e.to_string())
             }
-            None => Err("no system keychain here".to_string()),
         };
+        if saved.is_ok() {
+            v.held().insert(id(c), Held::of(&kept));
+            if from_file {
+                accounts.put(&kept.without_tokens());
+                write_accounts(path, accounts)?;
+            }
+            return Ok(kept);
+        }
         if let Err(why) = saved {
             log::warn!("the system keychain didn't keep the ChatGPT sign-in: {why}");
-            // Replacing it would sign the account out where the keychain holds it, unrevoked.
-            if new && existing.as_ref().is_some_and(|e| !e.rev.is_empty()) {
-                return Err(Error::new(
-                    Recovery::Auth,
-                    "the system keychain didn't keep the new sign-in, and it holds this account's earlier one; sign in again where the keychain is available",
-                ));
-            }
-            // Only tokens renewed from the file's own may go back there; a new sign-in never does.
-            let from_file = c.kept == Kept::SettingsFile && existing.as_ref().is_some_and(|e| e.kept == Kept::SettingsFile);
-            kept.kept = if from_file { Kept::SettingsFile } else { Kept::Session };
-            kept.rev = String::new();
         }
-        kept.in_keychain = in_keychain;
-        if kept.kept == Kept::SettingsFile {
+        // Replacing it would sign the account out where the keychain holds it, unrevoked.
+        if new && existing.as_ref().is_some_and(|e| !e.rev.is_empty()) {
+            if attempted {
+                write_accounts(path, &before)?;
+            }
+            *accounts = before;
+            return Err(Error::new(
+                Recovery::Auth,
+                "the system keychain didn't keep the new sign-in, and it holds this account's earlier one; sign in again where the keychain is available",
+            ));
+        }
+        kept.kept = if from_file { Kept::SettingsFile } else { Kept::Session };
+        kept.rev = String::new();
+        kept.in_keychain = in_keychain || attempted;
+        if from_file {
             v.held().remove(&id(c));
             accounts.put(&kept);
         } else {
@@ -1866,8 +1879,8 @@ mod native {
                 assert!(!entry[k].is_null(), "{k} stays in the file");
             }
             assert_eq!(entry["keychain"], true);
-            // The keychain keeps the refresh token alone: small enough for Windows (2560 bytes of
-            // UTF-16).
+            // The keychain keeps the refresh token alone, not the access and id tokens, to stay
+            // within Windows' limit (a real refresh token's length is not verified by this test).
             let saved = store.load(NAME).unwrap().unwrap();
             assert!(
                 saved.expose().contains("synthetic-refresh")
@@ -2036,7 +2049,8 @@ mod native {
             assert!(read_accounts(&path).unwrap().entries.is_empty());
         }
 
-        /// A keychain that checks the file notes its item before it is written.
+        /// A keychain that checks the file already names each item, and its revision, before the
+        /// item is written: a failed file write after it can't leave a token the file can't name.
         struct Noting {
             inner: MemorySecrets,
             path: std::path::PathBuf,
@@ -2047,7 +2061,9 @@ mod native {
                 self.inner.load(account)
             }
             fn save(&self, account: &str, value: &Secret) -> Result<(), SecretError> {
-                assert_eq!(entry_json(&self.path)["keychain"], true, "noted before the keychain write");
+                let saved: Value = serde_json::from_str(value.expose()).unwrap();
+                let entry = entry_json(&self.path);
+                assert_eq!((entry["keychain"].clone(), entry["rev"].clone()), (Value::Bool(true), saved["rev"].clone()));
                 self.inner.save(account, value)
             }
             fn delete(&self, account: &str) -> Result<(), SecretError> {
@@ -2056,12 +2072,37 @@ mod native {
         }
 
         #[test]
-        fn a_keychain_item_is_noted_in_the_file_before_it_is_written() {
+        fn the_file_names_a_keychain_item_before_it_is_written() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("auth.json");
             let v = Vault::new(Some(Arc::new(Noting { inner: MemorySecrets::new(), path: path.clone() })));
-            save_at(&path, &v, &synthetic(now() + 100_000), None).unwrap();
-            assert_eq!(read_credentials(&path, &v).unwrap().kept, Kept::Keychain);
+            // A sign-in, then a renewal of it.
+            save_at(&path, &v, &synthetic(0), None).unwrap();
+            send_at(&test_request(), &synthetic(0).binding(), &path, &v, &mut |req| {
+                Ok(if req.url == super::super::TOKEN_URL {
+                    grant(now() + 100_000, "rotated")
+                } else {
+                    HttpResponse { status: 200, body: vec![], headers: vec![] }
+                })
+            })
+            .unwrap();
+            let c = read_credentials(&path, &v).unwrap();
+            assert_eq!((c.kept, load_refresh(&v, &c).unwrap().as_str()), (Kept::Keychain, "rotated"));
+        }
+
+        #[test]
+        fn a_file_sign_in_without_a_refresh_token_stays_in_the_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            let mut old = synthetic(now() + 100_000);
+            old.refresh_token.clear();
+            let text = legacy_json(&old).to_string();
+            std::fs::write(&path, &text).unwrap();
+            let store = Arc::new(MemorySecrets::new());
+            let c = read_credentials(&path, &sharing(&store)).unwrap();
+            assert!(c.signed_in() && c.kept == Kept::SettingsFile);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "its access token keeps working");
+            assert_eq!(store.load(NAME).unwrap(), None);
         }
 
         #[test]

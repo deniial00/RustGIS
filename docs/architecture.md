@@ -77,7 +77,8 @@ browser and the CLI, where callers keep a secret for the session only, as before
 - **ChatGPT sign-in.** The desktop app gives its store to `chatgpt::set_secret_store` at start.
   The keychain keeps only each registration's refresh token, `chatgpt/<client_id>/<subject>`,
   with the `rev` its entry in `chatgpt-auth.json` names (any other is out of date and never
-  used), small enough for Windows Credential Manager's 2560 bytes of UTF-16. Access and id
+  used), without the access and id tokens, to stay within Windows Credential Manager's 2560 bytes
+  of UTF-16 (a real refresh token's length is not verified yet). Access and id
   tokens stay with the process that got them; a process without one renews first. The keychain
   is read only to renew, sign out or remove, under the file's `store-lock` (and, to renew, the
   `renewal-lock`), so a rotating refresh token is never used twice. The entry's `keychain` flag is
