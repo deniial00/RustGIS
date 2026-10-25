@@ -1,0 +1,38 @@
+{"width": 1366, "height": 900}
+{"cmd": "ui.tab", "params": {"tab": "Home"}}
+{"shot": "/tmp/ribbon-shots/home.png"}
+{"cmd": "ui.tab", "params": {"tab": "Data"}}
+{"shot": "/tmp/ribbon-shots/data.png"}
+{"cmd": "ui.tab", "params": {"tab": "Edit"}}
+{"shot": "/tmp/ribbon-shots/edit.png"}
+{"cmd": "ui.tab", "params": {"tab": "Analyze"}}
+{"shot": "/tmp/ribbon-shots/analyze.png"}
+{"cmd": "ui.tab", "params": {"tab": "View"}}
+{"shot": "/tmp/ribbon-shots/view.png"}
+{"cmd": "ui.tab", "params": {"tab": "Publish"}}
+{"shot": "/tmp/ribbon-shots/publish.png"}
+{"cmd": "ui.tab", "params": {"tab": "Plugins"}}
+{"shot": "/tmp/ribbon-shots/plugins.png"}
+{"cmd": "ui.tab", "params": {"tab": "Settings"}}
+{"shot": "/tmp/ribbon-shots/settings.png"}
+{"cmd": "ui.tab", "params": {"tab": "Help"}}
+{"shot": "/tmp/ribbon-shots/help.png"}
+{"cmd": "layer.select", "params": {"layer": "Countries"}}
+{"cmd": "ui.tab", "params": {"tab": "Style"}}
+{"shot": "/tmp/ribbon-shots/style-polygon.png"}
+{"cmd": "layer.select", "params": {"layer": "Cities"}}
+{"cmd": "ui.tab", "params": {"tab": "Style"}}
+{"shot": "/tmp/ribbon-shots/style-point.png"}
+{"cmd": "ui.tab", "params": {"tab": "Data"}}
+{"shot": "/tmp/ribbon-shots/data-layer.png"}
+{"cmd": "ui.tab", "params": {"tab": "View"}}
+{"click": "Panes", "exact": true}
+{"steps": 3}
+{"shot": "/tmp/ribbon-shots/view-panes-menu.png"}
+{"key": "Escape"}
+{"cmd": "layout.new", "params": {"page": "letter"}}
+{"shot": "/tmp/ribbon-shots/layout.png"}
+{"cmd": "ui.tab", "params": {"tab": "Publish"}}
+{"shot": "/tmp/ribbon-shots/publish-layout-open.png"}
+{"cmd": "ui.backstage", "params": {"open": true}}
+{"shot": "/tmp/ribbon-shots/backstage-start.png"}
