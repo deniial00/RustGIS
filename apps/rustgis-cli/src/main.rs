@@ -276,9 +276,12 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
             );
             return Ok(());
         }
-        if let Some(r) = out.revocation
-            && let Err(e) = chatgpt::revoke(&r)
-        {
+        let Some(r) = out.revocation else {
+            // No token here to end a session with (none, or a command-line sign-in that has ended).
+            eprintln!("signed out on this computer; no session could be ended at OpenAI from here");
+            return Ok(());
+        };
+        if let Err(e) = chatgpt::revoke(&r) {
             eprintln!(
                 "signed out on this computer, but OpenAI didn't confirm it ({e}); disconnect RustGIS in ChatGPT's settings if needed"
             );

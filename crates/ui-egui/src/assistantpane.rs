@@ -1219,11 +1219,16 @@ fn revoke_later(app: &mut RustGisApp, revocation: Option<chatgpt::Revocation>, c
     app.assistant.signout = Some(slot);
 }
 
-/// After signing out or removing the account: no tokens, no catalog.
+/// After signing out or removing the account: no tokens, no catalog, and nothing waiting to be
+/// sent with them (a queued message goes back to the input box, not to the provider).
 #[cfg(not(target_arch = "wasm32"))]
 fn forget_sign_in(app: &mut RustGisApp, cfg: &mut Config) {
     app.assistant.sign_in_read = None;
     app.assistant.models_slot = None;
+    app.assistant.catalog_pending = false;
+    if let Some(text) = app.assistant.queued.take() {
+        app.assistant.input = text;
+    }
     cfg.key.clear();
     app.assistant.account = None;
     app.assistant.models.clear();
@@ -2509,6 +2514,9 @@ mod tests {
         let late: Reply = Slot::default();
         app.assistant.models_slot = Some(late.clone());
         app.assistant.models = vec!["first-model".into()];
+        // A message typed while the check was under way, and a catalog request it deferred.
+        app.assistant.queued = Some("synthetic question".into());
+        app.assistant.catalog_pending = true;
         finish(&mut app, Some(first.binding()), None);
         assert!(app.assistant.agent.as_ref().unwrap().config.key.is_empty());
         assert!(app.assistant.retry.is_none() && app.assistant.settings);
@@ -2520,6 +2528,10 @@ mod tests {
         }));
         poll(&mut app, &ctx);
         assert!(app.assistant.models.is_empty() && app.assistant.catalog.is_empty());
+        // Neither goes out after the sign-out; the message is back in the input box.
+        assert!(app.assistant.queued.is_none() && !app.assistant.catalog_pending);
+        assert!(app.assistant.inflight.is_none() && app.assistant.models_slot.is_none());
+        assert_eq!(app.assistant.input, "synthetic question");
         // Taking the selected account: another one stops work for the first and drops its catalog.
         apply_config(&mut app, first.clone());
         app.assistant.retry = Some((2, web_time::Instant::now()));
