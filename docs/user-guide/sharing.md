@@ -2,11 +2,11 @@
 
 ## Exporting
 
-**Publish › Output › Export Map** writes the map view as a PNG with labels, the scale bar and
+**Publish › Export › Export Map** writes the map view as a PNG with labels, the scale bar and
 tile credits. The ribbon exports at 192 DPI; `share.exportMap` accepts `width` and `height`
 in pixels and a `dpi` value (96 by default). **Print Map** opens a PDF in the system viewer
-on desktop; **Capture To Clipboard** copies a map image. **Export To 3D** writes a layer as a
-Wavefront OBJ model with polygons extruded by a field.
+on desktop; **Capture To Clipboard** copies a map image. **Data › Export › Export To 3D…** writes a
+layer as a Wavefront OBJ model with polygons extruded by a field.
 
 **Data › Export** (or `share.exportLayer`, **Export Features**) writes a layer to GeoJSON, CSV,
 GeoPackage, GeoParquet, Shapefile (including a zip), FlatGeobuf, KML, KMZ or GPX (see
@@ -21,8 +21,9 @@ Packages and project item files are described under [Project items](data.md#proj
 
 ## Sharing as open formats
 
-**Publish › Share As** writes open-format files to a chosen file on desktop, or downloads them
-in the browser. The Share As commands accept a `path`; without one they use the first
+**Publish › Share › Web Map** writes an HTML web map from its split-button face; its menu offers
+the other open formats below. Choose a file on desktop, or download it in the browser.
+These sharing commands accept a `path`; without one they use the first
 **data store** (a folder added with **Add Data Store…** in the Shared Items pane).
 
 - **Web Map** (`share.webMap`): an HTML page of visible layers (rasters as embedded images),
@@ -45,13 +46,13 @@ in the browser. The Share As commands accept a `path`; without one they use the 
 - **Web Link Chart** (`share.linkChart`): the features joined by the map's relationships as a
   node-link HTML page; `relationship` limits it to one relationship.
 
-**Publish › Share As › Jobs** (the Shared Items pane) lists desktop shares; **Save Web Map**,
+**Publish › Share › Share Jobs** (the Shared Items pane) lists desktop shares; **Save Web Map**,
 **Replace Web Layer**, **Save Web Scene** and **Save Web Link Chart** update a share in place
 (`share.saveWebMap`, `share.replaceWebLayer`, `share.saveWebScene`, `share.saveWebLinkChart`).
 The `item` parameter chooses the share by ID or name; omitting it uses the latest of that kind.
 **Upload File** (`share.upload`) copies a file into a data store; it does not upload to a remote server.
 
 After opening a project, register its data stores again before writing to them, and use
-**Share As** to choose each item's destination again before updating it. Saved share records do
-not grant permission to overwrite their paths. Undo changes the project record, not files
+**Web Map** or its split menu to choose each item's destination again before updating it. Saved
+share records do not grant permission to overwrite their paths. Undo changes the project record, not files
 already written.

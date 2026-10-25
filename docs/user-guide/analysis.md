@@ -2,10 +2,11 @@
 
 ## Selection and queries
 
-**Home › Select** picks features by clicking or dragging a box (Shift adds, Ctrl removes). It
-takes only features that are drawn, in selectable layers: a definition query or a display filter
-hiding a feature keeps it out, and a click picks the feature drawn on top among the selectable
-layers. **Select By Attributes** takes a SQL clause and checks it as you type; **Select By Location**
+**Home › Selection › Select** picks features by clicking or dragging a box (Shift adds, Ctrl removes). Its
+split menu offers Polygon, Lasso and Radius; the face always starts box selection. Selection takes
+only features that are drawn, in selectable layers: a definition query or a display filter hiding
+a feature keeps it out, and a click picks the feature drawn on top among the selectable layers.
+**Home › Selection › By Attributes** takes a SQL clause and checks it as you type; **By Location**
 picks features that touch another layer's features or lie within a search distance of them (or,
 inverted, those that don't). Selected features draw in
 cyan and are highlighted in the attribute table, and the selection is synced both ways. Switch,
@@ -43,10 +44,10 @@ gdp_md IS NULL
   <figcaption>The Analyze tab's tool gallery and the Tools pane running Buffer.</figcaption>
 </figure>
 
-Open a tool from **Analyze › Portal › Feature Analysis** or **Raster Analysis**, **Analyze › Tools** (the Tools pane,
-which searches every tool) or Command Search. Fill in its parameters and click **Run**: new
+Open a tool from the **Analyze › Tools** gallery, **Analyze › Geoprocessing › Tools** (the Tools pane,
+which searches every tool), **View › Windows › Panes › Tools** or Command Search. Fill in its parameters and click **Run**: new
 layers or tables are added to the project; selection tools select existing rows and Calculate
-Geometry Attributes updates the input layer. Each run is listed under **Analyze › History**.
+Geometry Attributes updates the input layer. Each run is listed under **Analyze › Geoprocessing › History**.
 From the command line or a script (`gp.run`), a built-in tool's parameter with a list of choices, such as Buffer's
 units, takes one of them in any letter case (`"meters"` for `Meters`); any other value is an error
 that names the choices (Buffer's units no longer take the abbreviations `m`, `mi` or `metres`).
@@ -242,8 +243,12 @@ in the page, so the page is busy while it computes.
 
 ## Analysis workflows
 
-The Analyze tab's Workflows pane holds guided analyses. Where one needs points, it asks you to
-click them on the map:
+**Analyze › Workflows** holds the non-imagery guided analyses. Imagery workflows are grouped under
+**Analyze › Imagery**: **Raster Functions** opens its namesake workflow, with Function Editor,
+Indices, Process and Pixel Editor in its split menu; **Classify** lists the classification and
+deep-learning tools, and **Imagery Workflows** lists georeferencing, change detection, spectral
+and trend analysis, ortho and reality mapping, mensuration and hosted imagery. They all open
+the Workflows pane. Where a workflow needs points, it asks you to click them on the map:
 
 | Workflow | What it does |
 | --- | --- |
@@ -270,7 +275,7 @@ IDW Interpolation and Ordinary Kriging instead use their own `extent` and `pixel
 the environment does not set their output grids. Raster Functions › Resample matches a target
 raster's grid.
 
-The **Script** pane runs commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
+**Analyze › Automate › Script** opens the pane for commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
 short of the buttons, and then scrolls, so **Run** stays in view; Ctrl+Enter (⌘+Enter on macOS)
 in the box runs the script too. Above a run's results, a line tells its number, how long it took
 and when it started (`Run #2 (0.84 s)`, and `14:04 UTC` on the right), so a run made again by
@@ -320,7 +325,7 @@ itself, and accepting keeps that quote. Pasting adds nothing.
   <figcaption>A model after its run: each node is ticked, and its outputs are layers on the map.</figcaption>
 </figure>
 
-**Analyze › Model Builder** opens a model in a view of its own, a tab beside the maps and
+**Analyze › Geoprocessing › Model Builder** opens a model in a view of its own, a tab beside the maps and
 layouts. A model is a graph of three kinds of node: **inputs** (blue) name layers of the map,
 **tools** (amber) are geoprocessing tools, and **outputs** (green) keep a result as a layer of
 their name.
@@ -362,7 +367,8 @@ save and run models without the canvas:
 
 ## Imagery
 
-The Analyze tab's imagery groups open their tools in the Workflows pane:
+**Analyze › Imagery** gathers its workflows into Raster Functions, Classify and Imagery Workflows;
+each opens the Workflows pane at the chosen section:
 
 - **Ortho Mapping** and **Reality Mapping** workspaces mosaic georeferenced images into an
   orthomosaic, or elevation rasters into a surface model that exports as a 3D mesh (OBJ).
@@ -573,9 +579,10 @@ fields is rejected as ambiguous. This prevents silently using the wrong field.
 
 ## Deep learning and hosted imagery
 
-**Analyze › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels
-under training polygons and classifies every pixel, adding a class raster with a confidence band
-and reporting the accuracy on held-back pixels. Trained models stay in the project; **Publish ›
-Share As › Deep Learning** saves one as a package to apply in other projects. **Analyze › Create
-Hosted Imagery** cuts a raster into XYZ web map tiles (PNG, transparent outside the raster) with
-a TileJSON file and a viewer page.
+**Analyze › Imagery › Classify › Deep Learning Tools** trains a neural network (a multilayer
+perceptron) on the pixels under training polygons and classifies every pixel, adding a class
+raster with a confidence band and reporting the accuracy on held-back pixels. Trained models
+stay in the project; **Publish › Share › Project Package › Deep Learning Model** saves one as a
+package to apply in other projects. **Analyze › Imagery › Imagery Workflows › Create Hosted
+Imagery** cuts a raster into XYZ web map tiles (PNG, transparent outside the raster) with a
+TileJSON file and a viewer page.

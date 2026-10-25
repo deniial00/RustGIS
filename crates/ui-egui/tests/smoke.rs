@@ -466,6 +466,9 @@ fn every_tab_pane_and_dialog_renders() {
         h.state_mut().ui.tab = tab.into();
         h.run();
     }
+    h.state_mut().run("layout.new", json!({"name": "Ribbon smoke"})).unwrap();
+    h.run();
+    h.state_mut().run("layout.close", json!(null)).unwrap();
     for (id, p) in [
         ("ui.pane.symbology", json!(null)),
         ("ui.pane.labeling", json!({"layer": "Cities"})),
@@ -520,7 +523,7 @@ static PLUGINS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
     let mut h = harness();
-    h.set_size(egui::vec2(900.0, 600.0));
+    h.set_size(egui::vec2(600.0, 600.0));
     h.state_mut().ui.tab = "View".into();
     for _ in 0..4 {
         h.step();
@@ -1193,7 +1196,7 @@ fn show_me_points_at_where_a_steps_command_is() {
     show(&mut h, step("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 1"})));
     let app = h.state_mut();
     assert_eq!(app.ui.tab, "Home");
-    assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "Select By Attributes is outlined");
+    assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "By Attributes is outlined");
     // A command no ribbon button runs: Command Search on its name.
     h.state_mut().ui.command_search = None;
     show(&mut h, step("layer.zoomTo", json!({"layer": "Lakes"})));
@@ -1241,6 +1244,87 @@ fn old_and_unknown_tab_names_open_a_current_tab() {
         assert_eq!(h.state().ui.tab, opened, "{asked}");
         h.step();
     }
+}
+
+#[test]
+fn layout_tab_follows_the_open_layout_and_keeps_publish_separate() {
+    let mut h = harness();
+    h.run_steps(3);
+    assert!(h.query_by_label("Layout").is_none());
+
+    h.state_mut().run("layout.new", json!({"name": "Ribbon layout"})).unwrap();
+    assert_eq!(h.state().ui.tab, "Layout");
+    h.run_steps(3);
+    assert!(h.query_by_label("Layout").is_some());
+    assert!(h.query_by_label("Page Size").is_some());
+    assert!(h.query_by_label("Close Layout").is_some());
+
+    h.state_mut().run("ui.tab", json!({"tab": "Publish"})).unwrap();
+    h.run_steps(3);
+    assert!(h.query_by_label("Layout").is_some(), "the contextual tab remains available while the page is open");
+    assert!(h.query_by_label("Page Size").is_none(), "page controls belong to Layout, not Publish");
+    assert!(h.query_by_label("Export Map").is_some());
+
+    h.state_mut().run("ui.tab", json!({"tab": "Layout"})).unwrap();
+    h.run_steps(3);
+    h.get_by_label("Close Layout").click_accesskit();
+    h.run_steps(3);
+    assert_eq!(h.state().session.active_layout, None);
+    assert_eq!(h.state().ui.tab, "Publish");
+    assert!(h.query_by_label("Layout").is_none());
+
+    h.state_mut().run("layout.activate", json!({"name": "Ribbon layout"})).unwrap();
+    assert_eq!(h.state().ui.tab, "Layout");
+    h.run_steps(3);
+    assert!(h.query_by_label("Page Size").is_some());
+    h.state_mut().run("ui.tab", json!({"tab": "Home"})).unwrap();
+    h.state_mut().run("layout.close", json!(null)).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.tab, "Home", "closing a layout preserves another selected tab");
+    assert!(h.query_by_label("Layout").is_none());
+}
+
+#[test]
+fn selection_stays_a_plain_tool_until_alternative_shapes_exist() {
+    let mut h = harness();
+    for tab in ["Home", "Edit"] {
+        h.state_mut().run("tool.set", json!({"tool": "explore"})).unwrap();
+        h.state_mut().run("ui.tab", json!({"tab": tab})).unwrap();
+        h.run_steps(3);
+        assert!(h.query_by_label("Select options").is_none(), "{tab} must not advertise unimplemented selection shapes");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Select").click_accesskit();
+        h.step();
+        assert_eq!(h.state().session.tool.code(), "select", "{tab}");
+    }
+}
+
+#[test]
+fn layout_preferences_support_toggling_and_explicit_command_values() {
+    let mut h = harness();
+    h.state_mut().run("layout.new", json!({"name": "Layout preferences"})).unwrap();
+    for command in ["ui.layoutSnap", "ui.layoutRulers"] {
+        let disabled = |app: &RustGisApp| if command == "ui.layoutSnap" { app.layout.no_snap } else { app.layout.no_rulers };
+        h.state_mut().run(command, json!({"on": true})).unwrap();
+        assert!(!disabled(h.state()), "{command}");
+        h.state_mut().run(command, json!(null)).unwrap();
+        assert!(disabled(h.state()), "{command}");
+        h.state_mut().run(command, json!({"on": false})).unwrap();
+        assert!(disabled(h.state()), "{command}: explicit values are not toggles");
+        h.state_mut().run(command, json!(null)).unwrap();
+        assert!(!disabled(h.state()), "{command}");
+    }
+    h.state_mut().layout.tool = Some("polygon");
+    h.state_mut().run("ui.layoutNavigate", json!({"on": true})).unwrap();
+    assert!(h.state().layout.navigate);
+    assert_eq!(h.state().layout.tool, None, "map navigation ends an unfinished frame drawing tool");
+    h.state_mut().run("ui.layoutNavigate", json!({"on": true})).unwrap();
+    assert!(h.state().layout.navigate, "an explicit value is not a toggle");
+    h.state_mut().run("ui.layoutNavigate", json!(null)).unwrap();
+    assert!(!h.state().layout.navigate);
+    h.state_mut().run("ui.layoutNavigate", json!(null)).unwrap();
+    assert!(h.state().layout.navigate);
+    h.state_mut().run("ui.layoutNavigate", json!({"on": false})).unwrap();
+    assert!(!h.state().layout.navigate);
 }
 
 /// Settings holds Customize › Ribbon, so it (like Help) can't be hidden.
@@ -2873,7 +2957,7 @@ fn dynamic_text_is_a_menu_of_values_that_starts_the_text() {
     let mut h = harness();
     h.state_mut().ui.tab = "Edit".into();
     h.step();
-    h.get_by_label("Dynamic Text").click_accesskit();
+    h.get_by_label("Text options").click_accesskit();
     h.step();
     // What it opened shows on the next frame.
     h.step();
@@ -2896,7 +2980,7 @@ fn dynamic_text_is_a_menu_of_values_that_starts_the_text() {
     click_map(&mut h);
     assert_eq!(selected_text(&h).as_deref(), Some("Text"));
     // Another tool forgets the value.
-    h.get_by_label("Dynamic Text").click_accesskit();
+    h.get_by_label("Text options").click_accesskit();
     h.step();
     // What it opened shows on the next frame.
     h.step();

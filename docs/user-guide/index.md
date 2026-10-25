@@ -73,7 +73,7 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   to the full extent; the north arrow and scale bar sit in the corners (on a rotated or tilted
   map, click the north arrow to face north and look straight down); tile credits at the bottom right.
 - **Panes** (right): Tools (geoprocessing), Symbology, Labeling, History, Details, Bookmarks,
-  Editing, Workflows, Script, SQL, the AI Assistant and more. Open them from **View › Windows** or the commands that use
+  Editing, Workflows, Script, SQL, the AI Assistant and more. Open them from **View › Windows › Panes** or the commands that use
   them. Each pane opened gets a tab at the top, in the order opened: click a tab to show its pane,
   and its **✕** to close it (the next tab shows; closing the last hides the side). Right-click a
   tab to close it, the others or all; the **✕** at the header's end closes every pane. Tabs that
@@ -104,18 +104,21 @@ ribbon, arrows at its ends scroll it.
 
 | Tab | Groups |
 | --- | --- |
-| **Home** | Project (New Map, Toolbox, Import Project, New Layout, Browser, Add Data, Add Folder, Import, Templates), Navigate (Pan, Bookmarks, Full Extent, Zoom In/Out, Previous/Next, Go To XY, Planar/First-Person, Identify, Find Place, Directions), Add (Basemap, Add Data, [Web Data](web-data.md)), Selection (Select, Select By Attributes, Select By Location, Clear, Zoom To, Attributes), Inspect (Measure, Locate, Zoom Box, Infographics) |
-| **Data** | Layer Templates; for a feature layer: Definition Query, Table, Selection, Data Design, Archiving, Relationship and Export; for a raster layer: Information and Export; then Offline and Feature Cache |
-| **Style** | For the layer selected in Layers. A feature layer: Visibility Range, Effects, Drawing, Drawing Effects, Extrusion for polygons (with Faces and Light and Shadow once on), Layer, Labels, Label Range, Label Placement, Label Class and Text Symbol. A raster layer: Visibility Range, Effects, Compare, Raster Effects, Rendering, Enhancement and Layer. Both: Styles |
-| **Edit** | Manage Edits (Edit, Save, Undo, Redo, Status, Settings, Templates, Topology), Snapping, Features (Create, Delete, Edit Vertices, Modify), Tools, Elevation, Corrections, Graphics, Graphics and Text, Clipboard |
-| **Analyze** | Geoprocessing (History, Tools, Model Builder, Script, SQL, Environments), Tasks (the Tasks pane; Task: Record Task, New Task From History, Import Task, run a task), AI (AI Assistant), Portal (Feature Analysis, Raster Analysis), Workflows, Raster (Raster Functions, Function Editor), Tools (the tool gallery), Selection, Notebook, the imagery groups (Ortho Mapping, Reality Mapping, Alignment, Image Analysis, Image Classification, Imagery Sharing, Mensuration, Imagery Tools) |
-| **View** | Display (Graticule, Dark Mode, GPU Rendering), View (Globe, Projection, Global; Local on the desktop), Effects, Scene, Windows, Labeling, Navigation, Link, Workspace, Animation, Time (Time Slider), Profile (Profile; Time Series on the desktop) |
-| **Publish** | While a layout is open, its groups first (Page, Map Frames, Map Surrounds, Shapes, Text, Export); then Report, Presentation, Output (Export Map, Export Features, Print Map, Capture To Clipboard, Report, Presentation, Export To 3D), Package, Share As, Layout, Save As, Thumbnail |
-| **Plugins** | Plugins (Plugin Manager, Install From File, Browse Plugins), plus a group for each enabled [plugin](../plugins.md) with commands or tools; a plugin with its own tab adds that tab instead |
-| **Settings** | Customize (Ribbon, Quick Access), Language (interface language and worldview), Start-up (Start With, Projection, Extent) |
-| **Help** | Performance (Diagnostic Monitor), Learn (Learning Resources), Help (About, Check for Updates on the desktop, Command Search, Shortcuts) |
+| **Home** | Project (New Map, New Layout), Navigate (Pan, Bookmarks, Full Extent, Zoom In/Out, Previous/Next, Zoom Box, Go To XY, Find Place, Directions), Add (Basemap, Add Data split button, [Web Data](web-data.md)), Selection (Select split button, By Attributes, By Location, Clear, Zoom To, Attributes), Inspect (Measure Distance, Measure Area, Infographics) |
+| **Data** | For the selected feature layer: Table (Attribute Table, Definition Query), Selection, Fields (Add Field, Calculate, Data Design, Archive, Related Data), Export and Offline; a raster layer has Raster Information instead of Fields, and Export Raster |
+| **Style** | For the selected feature layer: Visibility (scale range and transparency), Drawing, Effects, 3D for polygons, Layer (including Draw Priority), Labels (Label, Properties, Field, Placement), Label Text, Label Range and Styles. A raster layer: Visibility, Compare, Rendering, Enhancement, Raster Effects, Layer and Styles |
+| **Edit** | Manage Edits (Edit, Save, Undo, Redo, Editing Pane, Validate Topology), Selection, Options (Snapping, Elevation), Features (Create, Edit Vertices, Delete, Editor Tools), Graphics (including Polygon and Text split buttons), Clipboard (Paste split button, Cut, Copy, Copy Path) |
+| **Analyze** | Geoprocessing (Tools, Model Builder, History, Environments, SQL), Automate (Tasks, Task menu, New Notebook, Open Notebook, Notebook Pane, Script, AI Assistant), Workflows, Tools (the tool gallery), Imagery (Raster Functions split button, Classify, Imagery Workflows) |
+| **View** | Map (Globe, Projection, Global, Local, Graticule), Navigation (World, Navigator, Camera, Magnifier, Navigation Mode, Identify), Effects (Effects, Color Vision, Scene), Windows (Layers, Browser, Data Sources, Details, Panes), Labeling, Link, Time (Time Slider, Animation, Profile, Time Series on the desktop), Workspace (Browser View, Workflow Manager, Pane Sets) |
+| **Publish** | Export (Export Map, Print Map, Capture To Clipboard), Report (New Report, Import Report, Report Pane, Report Section, Report Data, Report Output), Presentation (New Presentation, Import Presentation, Presentation Pane, Page, Presentation Output), Share (Project Package and Web Map split buttons, Share Jobs), Save As (project and item-file split button) |
+| **Layout** | While a layout is open: Page (Page Size, Snap, Rulers, Clear Guides), Map Frames (Map Frame split button, Pan/Zoom Map, Grid, Extent Indicator, Map Series), Surrounds, Graphics (Text and Shapes split buttons, Picture), Output (Export, Print, Close Layout) |
+| **Plugins** | Plugins (Plugin Manager, Install From File), plus a group for each enabled [plugin](../plugins.md) with commands or tools; a plugin with its own tab adds that tab instead. Browse plugins in the Plugin Manager's Browse tab |
+| **Settings** | Customize (Ribbon, Quick Access), Display (Dark Mode, GPU Rendering, Item Pop-ups, Measurement Units, Feature Cache), Language (interface language and worldview), Start-up (Start With, Projection, Extent) |
+| **Help** | Help (Learning Resources, Command Search, Shortcuts, Diagnostic Monitor, Check for Updates on the desktop) |
 
-The tabs stay the same whatever is selected: Style and Data act on the layer selected in Layers.
+Style and Data are contextual to the selected layer. Layout appears and is selected when a layout
+opens; its page tools no longer share the Publish tab. Split-button faces keep their fixed default:
+Select uses a box, Add Data opens the file picker, and New Layout creates a Letter page.
 
 ## Projects
 
@@ -126,10 +129,12 @@ web app are embedded. Saved web addresses drop passwords, keys and tokens. A pro
 (`.rgispkg`) also embeds linked rasters within a size limit, while large files read in place,
 database and web layers stay linked; it opens as a new, unsaved project.
 
-On the backstage's **Start** or **New** page, choose a blank **Map**, the **World Atlas** sample or
-**Open…**. **Save** and **Save As** write the project, named after its file; a project opened
-from a file is named after that file too. See [Project items](data.md#project-items) for the
-other files RustGIS reads and writes.
+On the backstage's **Start** or **New** page, choose a blank **Map**, the **World Atlas** sample,
+**From Template…**, **Open…**, **QGIS Project…** or **Import Maps…**. Under **Current Project**,
+**Thumbnail** and **Map Thumbnail** each offer **Create From View** and **Import Image…**.
+**Save** and **Save As** write the project, named after its file; a project opened from a file is
+named after that file too. **Project › About** shows the app's version and licence links. See
+[Project items](data.md#project-items) for the other files RustGIS reads and writes.
 
 Changes to the project are commands, and each can be undone (++ctrl+z++) and redone
 (++ctrl+y++). Undo keeps the last 40 changes; starting or opening another project clears it.

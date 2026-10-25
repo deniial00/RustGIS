@@ -28,7 +28,7 @@ Formats](data-formats.md).
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
 | Unreferenced TIFF and PNG scans; JPEG with `"as": "scan"` | Yes | GeoTIFF after georeferencing |
 | Through GDAL: JPEG 2000, ERDAS Imagine, SRTM HGT, DTED, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
-| Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Analyze › Create Hosted Imagery) |
+| Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Analyze › Imagery › Imagery Workflows › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
 
 Add data with **Home › Add Data** (**From URL…** adds a file by its web address, reading a
@@ -49,7 +49,7 @@ the table's name beside it (`input_name`). The **XY Table To Point** tool
 the project, from two fields of coordinates and their coordinate system. In a text field a single comma is the decimal separator
 (`1,234` is 1.234); thousands separators are not read.
 **Home › Add Data › Graphics Layer** adds a layer for [drawn graphics](cartography.md#graphics),
-and **Data › Layer Templates** adds empty layers with ready-made schemas to draw into.
+and **Home › Add Data › Layer Templates** adds empty layers with ready-made schemas to draw into.
 
 Vector geometry is stored as WGS 84 longitude/latitude. Data in another supported coordinate
 system is converted as it is read; Shapefiles use their `.prj`, and formats such as GeoPackage,
@@ -111,7 +111,7 @@ query as a layer, with the `layer.addSql` command (Add Data From SQL in command 
 {"sql": "SELECT name, geometry FROM read_parquet('places.parquet') WHERE country = 'FR'", "name": "French places"}
 ```
 
-**Analyze › SQL** opens the SQL pane, a workspace for these queries: an editor (Ctrl+Enter runs
+**Analyze › Geoprocessing › SQL** opens the SQL pane, a workspace for these queries: an editor (Ctrl+Enter runs
 the query) that completes table and column names of the database named above it and DuckDB
 Spatial's common functions, the result's first 200 rows as a table, **Add to Map** for a result
 with a geometry column, and a history of the queries run (kept by the app with its preferences,
@@ -733,7 +733,7 @@ With a raster layer selected in Layers, the **Style** and **Data** tabs show its
 
 | Tab › Group | Controls |
 | --- | --- |
-| Style › Visibility Range, Effects | Scale range, transparency |
+| Style › Visibility | Scale range, transparency |
 | Style › Rendering | **Symbology**: Stretch, RGB, Classify, Unique Values, Colormap, Shaded Relief; **Stretch Type**: None, Minimum Maximum, Custom Min/Max (your own bounds, one pair per colour channel on an RGB layer), Percent Clip, Standard Deviation, Histogram Equalize; **DRA** (stretch the pixels in view); **Resampling** (nearest or bilinear); **Band Combination** (natural colour, colour infrared, or any bands) |
 | Style › Enhancement | Brightness, contrast, gamma |
 | Data | Raster information (size, bands, statistics, coordinate system) and Export Raster (GeoTIFF) |
@@ -807,7 +807,7 @@ and selection, not as a slice, and reads the slider's step again when it opens.
 rustgis-cli run --cmd 'layer.addZarr={"path":"air.zarr","variable":"t","time":true}' --cmd 'time.export={"path":"t.gif"}'
 ```
 
-**View › Time Series** (desktop; `zarr.series`) reads a Zarr variable's values through time at a
+**View › Time › Time Series** (desktop; `zarr.series`) reads a Zarr variable's values through time at a
 point. Pick a Zarr layer, then **Pick a Point** on the map. A layer that follows the time slider
 gives its period, a slice the whole axis, and `"start"`/`"end"` any other. Only the chunks holding
 that point's cell are read. A store chunked one step at a time, such as ARCO-ERA5's map-oriented
@@ -847,26 +847,26 @@ RustGIS saves pieces of a project as files you can share and reuse:
 
 | Item | Extension | Made with | Opened with |
 | --- | --- | --- | --- |
-| Map file (a map with its data) | `.rgismap` | Publish › Save As › Map File | Home › Import |
+| Map file (a map with its data) | `.rgismap` | Publish › Save As › Map File | Project › Start › Import Maps… |
 | Layer file (a layer with its symbology) | `.rgislyr` | Publish › Save As › Layer File | Add Data |
 | Styles (saved symbology) | `.rgisstyle` | Style › Styles › New Style, then Publish › Save As › Style Items | Style › Styles › Add Style File |
 | [Color ramps](cartography.md#custom-color-ramps) | `.rgisramp` (also reads QGIS `.xml`/`.qml`, GDAL color `.txt` and GMT `.cpt`) | Publish › Save As › Color Ramps, or by hand | Style › Styles › Add Color Ramp File |
-| Project template (the setup without features) | `.rgistemplate` | Home › Templates, or Publish › Save As | Home › Templates › Open Custom Template |
-| Project package (the project, with linked raster files embedded while they fit) | `.rgispkg` | Publish › Package › Project | Project › Open, or drop it on the window |
-| Map package / mobile map package | `.rgismpk` | Publish › Package › Map or Mobile Map | Home › Import |
-| Results package (geoprocessing history and outputs) | `.rgisgpk` | Publish › Package › Results | any zip tool |
-| Task (guided command steps) | `.rgistask` | Analyze › Task, Publish › Save As › Task Item | Analyze › Task › Import Task |
+| Project template (the setup without features) | `.rgistemplate` | Publish › Save As › Project Template | Project › Start › From Template… |
+| Project package (the project, with linked raster files embedded while they fit) | `.rgispkg` | Publish › Share › Project Package | Project › Open, or drop it on the window |
+| Map package / mobile map package | `.rgismpk` | Publish › Share › Project Package › Map or Mobile Map | Project › Start › Import Maps… |
+| Results package (geoprocessing history and outputs) | `.rgisgpk` | Publish › Share › Project Package › Results | any zip tool |
+| Task (guided command steps) | `.rgistask` | Analyze › Automate › Task, Publish › Save As › Task Item | Analyze › Automate › Task › Import Task |
 | Bookmarks (as longitude, latitude and scale) | `.rgisbookmarks` | Home › Navigate › Bookmarks › Export Bookmarks | Home › Navigate › Bookmarks › Import Bookmarks |
-| Layout | `.rgislayout` | Publish › Save Layout File | Home › New Layout › Import Layout |
+| Layout | `.rgislayout` | Publish › Save As › Layout File | Home › New Layout › Import Layout |
 
 Packages are zip files. Project and map packages can newly embed a combined 512 MiB of linked
 raster files on the desktop (128 MiB in the web app); a raster that doesn't fit stays linked.
 Already embedded uploads are retained. Local streamed vector files, databases and web layers
 stay linked to their sources. A mobile map package keeps only the visible layers and simplifies their
 geometry, for phones and tablets. Styles can also be imported from the layers of a layer file,
-map file or project. Data › Layer Templates adds empty layers with ready-made schemas (places,
-routes, areas, observations…) to draw into. Add Folder connects a folder to the Browser, which
-also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
+map file or project. Home › Add Data › Layer Templates adds empty layers with ready-made schemas
+(places, routes, areas, observations…) to draw into. **Home › Add Data › Add Folder…** connects a
+folder to the Browser, which also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
 From History turns the geoprocessing history into a task you can replay.
 
 Saved projects, map and layer files, and packages keep no password, key, token or signature in

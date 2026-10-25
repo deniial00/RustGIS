@@ -2035,7 +2035,6 @@ fn catalog(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             );
                             if resp.clicked() {
                                 let _ = app.run("layout.activate", json!({"name": n}));
-                                app.ui.tab = "Publish".into();
                             }
                             resp.context_menu(|ui| layout_menu(app, ui, &n));
                         });
@@ -5244,11 +5243,9 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
         let _ = app.run("ui.dialog", json!({"name": "renameLayout", "target": n}));
         ui.close();
     }
-    // The copy opens, on the Publish tab like a click on a layout.
+    // The copy opens on the contextual Layout tab, like a click on a layout.
     if ui.button(tl!("Duplicate")).clicked() {
-        if app.run("layout.duplicate", json!({"layout": n})).is_ok() {
-            app.ui.tab = "Publish".into();
-        }
+        let _ = app.run("layout.duplicate", json!({"layout": n}));
         ui.close();
     }
     if ui.button(tl!("Delete")).clicked() {

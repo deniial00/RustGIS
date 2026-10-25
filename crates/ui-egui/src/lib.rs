@@ -1,5 +1,5 @@
 //! L6: the RustGIS desktop front end, built around a ribbon (Home, Data, Style, Edit, Analyze,
-//! View, Publish), the Layers and Browser panes, a Tools pane, the map view, the
+//! View, Publish, Layout), the Layers and Browser panes, a Tools pane, the map view, the
 //! attribute table and the status bar.
 //!
 //! The UI is thin: it reads [`Session`] state and runs commands by id ([`RustGisApp::run`]).
@@ -1578,6 +1578,17 @@ impl RustGisApp {
         if open_layout(self) != layout_before {
             self.layout.selected = None;
         }
+        // Opening a layout selects its contextual ribbon tab, including commands from scripts,
+        // the Browser and file imports. Leaving the layout preserves any other working tab.
+        if r.is_ok()
+            && self.session.active_layout.is_some()
+            && (layout_before.0 != self.session.active_layout
+                || matches!(id, "layout.new" | "layout.publication" | "layout.activate" | "layout.duplicate" | "layout.import"))
+        {
+            self.ui.tab = "Layout".into();
+        } else if self.ui.tab == "Layout" && self.session.active_layout.is_none() {
+            self.ui.tab = "Publish".into();
+        }
         // A project this command opened: a layout element's selection and the text typed into its
         // fields stay with the old one.
         layoutview::follow_project(self);
@@ -2847,6 +2858,18 @@ impl RustGisApp {
                 }
             }
             "ui.magnifier" => self.map.magnifier = p.get("on").and_then(Value::as_bool).unwrap_or(!self.map.magnifier),
+            "ui.layoutSnap" => {
+                self.layout.no_snap = p.get("on").and_then(Value::as_bool).map(|on| !on).unwrap_or(!self.layout.no_snap);
+            }
+            "ui.layoutRulers" => {
+                self.layout.no_rulers = p.get("on").and_then(Value::as_bool).map(|on| !on).unwrap_or(!self.layout.no_rulers);
+            }
+            "ui.layoutNavigate" => {
+                self.layout.navigate = p.get("on").and_then(Value::as_bool).unwrap_or(!self.layout.navigate);
+                if self.layout.navigate {
+                    self.layout.tool = None;
+                }
+            }
             "ui.layoutSelect" => self.layout.selected = p.get("element").and_then(Value::as_u64).map(|v| v as u32),
             "ui.layoutTool" => {
                 self.layout.tool = match p.get("shape").and_then(Value::as_str) {

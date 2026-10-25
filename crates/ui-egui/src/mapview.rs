@@ -2726,7 +2726,6 @@ fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         if resp.clicked() && !is {
             app.mb.active = false;
             let _ = app.run("layout.activate", json!({"name": n}));
-            app.ui.tab = "Publish".into();
         }
         if resp.double_clicked() {
             let _ = app.run("ui.dialog", json!({"name": "renameLayout", "target": n}));

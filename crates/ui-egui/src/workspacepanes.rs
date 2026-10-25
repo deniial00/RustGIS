@@ -964,9 +964,6 @@ pub fn catalog_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let cmd = a["cmd"].as_str().unwrap_or("").to_string();
         let _ = app.run(&cmd, json!({"name": a["name"]}));
         app.ws.catalog_view = false;
-        if cmd == "layout.activate" {
-            app.ui.tab = "Publish".into();
-        }
         app.map.invalidate();
     }
 }

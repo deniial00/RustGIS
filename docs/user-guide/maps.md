@@ -18,7 +18,7 @@ projection; places that projection can't show are skipped. Type a scale in the s
 to it. Beside it are the zoom level, bearing and pitch; click them to face north and look straight
 down again. More navigation tools are under [View effects](#view-effects) below.
 
-**Measurement units.** In **Home › Inspect › Measure**, choose **Metric** or **Imperial**.
+**Measurement units.** In **Settings › Display › Measurement Units**, choose **Metric** or **Imperial**.
 The choice is remembered and updates existing distance and area measurements, the live
 map scale bar, elevation profiles, and distance labels and presets for label visibility
 and view clipping. Imperial readouts use feet or miles for length, and square feet, acres
@@ -49,7 +49,7 @@ of the view: nearer ground is larger, farther ground smaller and drawn coarser, 
 and, past about 72 degrees, a sky above the horizon. Labels stay upright, and those too far away
 to read are left out. Point markers stand upright, facing you, as MapLibre's circles do, smaller
 with distance (aggregated, masked or blended point layers, and layers of more than 50,000 points,
-keep their markers on the ground). Extruded layers (Style › Extrusion) stand up in perspective on a tilted
+keep their markers on the ground). Extruded layers (Style › 3D › Extrusion) stand up in perspective on a tilted
 map, as in MapLibre: walls lit by the way they face and darker toward their foot, roofs at their
 height, with the labels of extruded features on their roofs. While a tilted map moves, the
 picture drawn last is laid over the ground and the extrusions and markers are moved with it, and the map is
@@ -88,7 +88,7 @@ Link** (`map.goToLink {"url": …}`) takes such a link, or the part after its `#
 zoom, bearing and pitch, and `map.link` gives the current view the same way. The web app reads
 one from its own address (see [Installation](../installation.md)).
 
-**Manage Bookmarks** (at the foot of the Bookmarks menu, or **View › Windows › Bookmarks**) opens
+**Manage Bookmarks** (at the foot of the Bookmarks menu, or **View › Windows › Panes › Bookmarks**) opens
 the Bookmarks pane: every map's bookmarks, grouped by map (the map in view in the accent colour),
 with a box that filters them by name or description. On each bookmark, **Zoom To** shows its place
 at its scale and **Pan To** centres it at the current scale; a bookmark of another map takes the map
@@ -357,7 +357,7 @@ graphics card, so it moves smoothly whatever the basemap; labels come back, and 
 drawn exactly, as soon as it stops.
 
 The globe hangs in dark space, in the light theme too, with stars around it and now and then a
-shooting star passing behind it. **View › Visual Effect › Stars** turns them off. Exported maps
+shooting star passing behind it. **View › Effects › Effects › Visual Effect › Stars** turns them off. Exported maps
 and layout map frames print the globe in a light space instead, without stars, so a globe inset
 suits a light page (on the Midnight basemap the space stays dark).
 
@@ -368,25 +368,26 @@ suits a light page (on the Midnight basemap the space stays dark).
   <figcaption>Dark mode on the Midnight basemap.</figcaption>
 </figure>
 
-The View tab adds effects drawn over the map: **Illumination** (day and night shading for a time,
-with twilight), **Weather** (haze, fog, rain, snow), **Visual Effect** (vignette, edges, the stars around the globe), **Camera
-Effect** (tilt-shift blur, film grain) and **Postprocessing** (brightness, contrast, saturation,
-sepia). The **Color Vision** simulator shows the map as people with protanopia, deuteranopia,
-tritanopia or achromatopsia see it (on screen only; exports are untouched). **View › Display ›
-Graticule** (`map.graticule`) draws latitude and longitude lines over the basemap.
+**View › Effects › Effects** groups the effects drawn over the map: **Illumination** (day and night
+shading for a time, with twilight), **Weather** (haze, fog, rain, snow), **Visual Effect** (vignette,
+edges, the stars around the globe), **Camera Effect** (tilt-shift blur, film grain) and
+**Postprocessing** (brightness, contrast, saturation, sepia). **View › Effects › Color Vision**
+shows the map as people with protanopia, deuteranopia, tritanopia or achromatopsia see it
+(on screen only; exports are untouched). **View › Map › Graticule** (`map.graticule`) draws
+latitude and longitude lines over the basemap.
 
 **Global** shows a globe; **Local** a flat view centred where you are (azimuthal equidistant;
 not in the web app, which doesn't include that projection).
-**Wireframe** draws polygons as outlines; **Raise Priority** and **Lower Priority** change a
-layer's drawing priority independently of its order. **View Clipping** hides features beyond a
-distance from the centre, and **Speed Display** draws without antialiasing.
+**View › Effects › Scene** holds **Wireframe** (polygons as outlines), **View Clipping** (hides
+features beyond a distance from the centre) and **Speed Display** (draws without antialiasing).
+**Style › Layer › Draw Priority › Raise / Lower** changes a layer's drawing priority independently of its order.
 The **Navigator** adds a compass, zoom buttons and a pan
 pad; **Camera** shows and sets the position and scale; the **Magnifier** shows twice the map under
-the pointer. On the Home tab, **First-Person** navigation walks with W A S D and flies up and down
-with Q and E. The interface follows the system's light or dark setting; **View › Display › Dark
-Mode** switches it by hand.
+the pointer. **View › Navigation › Navigation Mode › First-Person** walks with W A S D and flies
+up and down with Q and E. The interface follows the system's light or dark setting;
+**Settings › Display › Dark Mode** switches it by hand.
 
-**View › Display › GPU Rendering** (beta) draws supported parts of the flat map on the GPU
+**Settings › Display › GPU Rendering** (beta) draws supported parts of the flat map on the GPU
 for smoother navigation on large datasets. Unsupported geometry and layer effects fall back
 to the CPU. Raster tiles and opaque vector tile styles can be drawn directly on the GPU on a
 north-up Web Mercator map; translucent or blended tiles use cached pictures during navigation.

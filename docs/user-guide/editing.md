@@ -6,8 +6,8 @@
 click once for a point, or click each vertex and double-click to finish a line or polygon
 (++esc++ cancels). **Delete** (++delete++) removes the selected features across the map's layers.
 Edit attributes in the attribute table (++ctrl+t++): double-click a cell
-to change it. **Data › Data Design** (and **Data › Fields**) adds and deletes fields and calculates a
-field from an expression; **Calculate Geometry** (in the attribute table's toolbar) fills a new or
+to change it. **Data › Fields › Add Field** adds a field and **Calculate** fills one from an
+expression; the attribute table's toolbar also deletes fields. **Calculate Geometry** (in the attribute table's toolbar) fills a new or
 existing numeric field with each feature's area, perimeter, length or X/Y coordinate, in the units
 you choose, for all features or the selected ones. Length and perimeter include feet and miles;
 area includes square feet (`ft2`), acres (`ac`) and square miles (`mi2`). Every edit is one undo step.
@@ -25,8 +25,9 @@ a project clears it. Undo does not reverse files already written by an export.
 </figure>
 
 The Edit tab's **Edit** button turns feature editing on or off for the map; with it off,
-feature creation, geometry changes and attribute edits are disabled. The Editing pane
-(Settings, Templates, Status, Modify) holds the rest. Its **Distance units**
+feature creation, geometry changes and attribute edits are disabled. **Edit › Manage Edits ›
+Editing Pane** opens the pane for settings, templates, status, modification, topology and
+ground-to-grid corrections. Its **Distance units**
 selector sets the units used for Move and constant elevation. The choice is remembered independently
 of the live map's measurement units. The entered numbers are interpreted in the selected units when
 you click **Move**, **Constant** or **Apply elevation**. The current elevation stays in effect while
@@ -36,7 +37,8 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   merge them (polygons are unioned), explode multipart features, split a line where you click,
   and flip line direction. A single point turns and scales on itself, so Rotate and Scale leave
   points (text graphics included) as they are: with only points selected they change nothing,
-  say so, and add no undo step. Edit › Tools lists every editing tool.
+  say so, and add no undo step. **Edit › Features › Editor Tools** offers Merge, Explode, Flip Line,
+  Rotate 90°, Scale ×2, Scale ×½ and Split; open the Editing pane for custom Move, Rotate and Scale.
 - **Edit Vertices** (Edit › Features): reshape the selected features on the map. Their vertices
   show as square handles and each edge has a round midpoint handle. Drag a vertex to move it;
   drag a midpoint, or click an edge, to insert a vertex; click a vertex and press ++delete++ to
@@ -47,7 +49,7 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   same to one vertex and `edit.setGeometry` (Set Geometry) replaces a feature's whole shape.
 - **Feature templates**: named default values for new features, made from a selected feature;
   the Create tool uses the chosen template.
-- **Snapping** (**Edit › Snapping**): new and dragged vertices snap to nearby vertices, edges and
+- **Snapping** (**Edit › Options › Snapping**): new and dragged vertices snap to nearby vertices, edges and
   line ends of visible feature layers at the current scale (magenta marker; graphics and rasters
   are not targets). Vertices and ends take priority over edges within the tolerance. Snapping
   starts off; its vertex, edge and end options start on. The tolerance is how near, in screen
@@ -57,12 +59,13 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   the current snap target without editing a feature.
 - **Settings**: **Show Vertices** marks the vertices of the selected features even when Edit
   Vertices isn't on (`edit.settings={"showVertices": true}`).
-- **Elevation**: new features get a `z` attribute, constant or sampled from a raster surface at
+- **Elevation** (**Edit › Options › Elevation**): new features get a `z` attribute, constant or sampled from a raster surface at
   the feature's label point; this is not a change to its geometry's coordinates.
 - **Ground to grid**: a scale factor and rotation applied to entered distances and directions
   (Move, and `edit.traverse`, which draws a line or polygon from distances and bearings).
 - **Topology**: rules (must not overlap, must not have gaps, must not self-intersect, must not
-  have dangles, must be covered by); Validate lists the errors, and clicking one zooms to it.
+  have dangles, must be covered by) live in the Editing pane. **Edit › Manage Edits › Validate
+  Topology** lists the errors, and clicking one zooms to it.
 - **Status**: features added, changed and deleted per layer since the last save.
 
 ### Distance units in commands
@@ -78,8 +81,9 @@ For example, `edit.move={"dx":500,"dy":0,"units":"Feet"}` moves selected feature
 
 ## Data design
 
-The Data tab's Data Design pane keeps attributes valid, on every edit (creating, pasting,
-attribute edits, Calculate Field):
+**Data › Fields › Data Design** opens one pane for subtypes, domains, attribute rules, contingent
+values and relationships. It keeps attributes valid on every edit (creating, pasting, attribute
+edits, Calculate Field):
 
 - **Domains**: coded values (`code=description`) or a numeric range for a field.
 - **Subtypes**: an integer field's codes, each with a name and default values for new features;
@@ -105,7 +109,7 @@ Whole-layer copying is separate: use **Copy Layer** or **Copy Group** and **Past
 Layers pane's context menus to preserve symbology and other layer settings, including when
 moving layers between maps.
 
-Pop-ups (Home › Navigate) choose which layers a click with Explore identifies: the topmost layer
+**View › Navigation › Identify** chooses which layers a click with Explore identifies: the topmost layer
 under the click, every visible layer, only selectable layers, only the layer selected in Layers, or
 nothing. The pop-up lists every feature under the click in those layers, overlapping ones included
 (up to 100): step through them with ‹ ›. The feature shown is the one selected. The magnifier in

@@ -15,6 +15,11 @@ templates, packages and files for individual items.
 command line. A package opens as a new, unsaved project; Save writes a plain `.rgis` file.
 Opening or creating a project clears undo history; saving does not.
 
+The backstage's **Start** page also has **From Template…** for a project template and
+**Import Maps…** for map files and packages. Save a reusable setup with **Publish › Save As ›
+Project Template**. Under **Current Project**, **Thumbnail** and **Map Thumbnail** each let you
+**Create From View** or **Import Image…**; **Project › About** shows version and licence information.
+
 Saved layer addresses omit passwords, access keys, tokens and signatures. The open session
 keeps them, but after restarting RustGIS a protected source may need you to sign in to its
 connection again or add it again with credentials.
@@ -66,8 +71,10 @@ ranges) are multiplied by 0.945 on the way in, so a layer shows at the same zoom
 
 The left pane has tabs for **Layers**, **Browser** and **Data Sources**. Right-hand panes
 such as **Tools**, **Symbology**, **Labeling**, **Format** and **AI Assistant** remain open as
-tabs: select a tab to bring it forward, or its × to close it. Right-click a tab to close it,
-the other panes or all panes; an overflow menu lists tabs that do not fit.
+tabs: open them from **View › Windows › Panes** or their workflow tab, then select a tab to bring
+it forward, or its × to close it. The Panes menu shows each pane's open state. **Details** stays
+directly in **View › Windows**. Right-click a tab to close it, the other panes or all panes; an
+overflow menu lists tabs that do not fit.
 
 Right-click a map or layout tab (or its entry in Browser) to **Rename**, **Duplicate** or
 **Delete** it. Deletion asks for confirmation; a project must keep at least one map.
@@ -92,7 +99,7 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   **Link Views** keeps maps at the same place and scale, and **Link Cursors** marks the
   pointer's place on the other map.
 - **Browser View** shows the project's maps, layouts, tables, styles, tasks, models, folders and
-  offline areas as cards (double-click to open); **Item Pop-ups** add hover details.
+  offline areas as cards (double-click to open); **Settings › Display › Item Pop-ups** adds hover details.
 - **Pane Sets** (View › Workspace) save the left pane, open right-hand pane tabs, active pane
   and ribbon tab and bring them back. The **Workflow Manager** tracks jobs (new, in progress,
   on hold, done) with the area each covers.
@@ -102,14 +109,14 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   each kind of connection (PostgreSQL/PostGIS, MySQL/MariaDB and SQL Server are left out in the web
   app) and opens its form. Saved connections are listed in the pane, not in the menu. Command
   Search finds **Connections…** by name.
-- **Tasks** (Analyze › Tasks, or View › Tasks) steps through a task's instructions: read the current step and do it
+- **Tasks** (Analyze › Automate › Tasks, or View › Windows › Panes › Tasks) steps through a task's instructions: read the current step and do it
   yourself, with **Show Me** to find where, or click **Run** to have it done.
     - **Show Me** points at the step's command:
         - a ribbon button gets its tab opened and is outlined for a few seconds;
         - a tool is outlined in the Analyze gallery, or opened, empty, in the Tools pane;
         - a symbology step opens the Symbology pane on its layer;
         - a command no button runs opens Command Search on its name.
-    - **Record Task** (in the pane, or Analyze › Task) turns an exercise into a task: do it once, and
+    - **Record Task** (in the pane, or Analyze › Automate › Task) turns an exercise into a task: do it once, and
       each command that changes the project becomes a step. Panes, dialogs and moving the view
       aren't recorded, and a colour adjusted several times stays one step. **Stop Recording** makes
       the task, named as typed beside it, and opens it for editing. Opening or creating another
@@ -134,8 +141,9 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
       name: one with `/`, `\`, `.` or `:` (a folder, an extension or a drive) makes the task count
       as writing files, so write `Buffer 1500 m` rather than `Buffer 1.5 km`. GeoLibre and plugin
       tools' outputs are refused.
-- **Thumbnails** for the project and for each map, from the view or an image.
-- **Animation**: add keyframes (views), play them, and export the moves as a zip of PNG frames
+- **Thumbnails** for the project and active map are under **Project › Start › Current Project**:
+  choose **Create From View** or **Import Image…** for either thumbnail.
+- **Animation** (View › Time › Animation): add keyframes (views), play them, and export the moves as a zip of PNG frames
   on desktop.
 - **Time Slider** (View › Time) shows data through time, in a timeline docked under the map.
 
@@ -169,14 +177,17 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
     - **Export** on desktop writes the steps as an animated GIF (`time.export` also writes a zip of PNG
       frames). The slider, its window and the bindings are saved with the project; the off button
       turns it off and every feature shows again.
-- **Time Series**: a Zarr variable's values through time at points clicked on the map, as lines on
+- **Time Series** (View › Time): a Zarr variable's values through time at points clicked on the map, as lines on
   one chart; see [Zarr stores](data.md#zarr-stores).
-- **Profile**: elevation profiles along clicked points or selected lines, auto-completed to the
+- **Profile** (View › Time): elevation profiles along clicked points or selected lines, auto-completed to the
   raster's edge, or across a line (a cross section), with gain, loss and a chart.
 - **Infographics** (Home tab) summarise what's in view: counts, totals and top categories.
-- **Offline**: Download Map takes the data in view into an offline area; open it to edit, then
-  Sync sends changed, new and deleted features back and refreshes it. **Feature Cache** prepares
-  every layer's geometry for the current projection (Fill, Empty, Cancel, Auto Cache).
+- **Data › Offline**: **Download Map** takes the data in view into an offline area; use **Offline
+  Areas › Open** to edit it, then **Offline Areas › Sync** sends changed, new and deleted features
+  back and refreshes it. **Offline Areas › Remove** removes an area.
+- **Settings › Display** holds **Dark Mode**, **GPU Rendering**, **Item Pop-ups** and
+  **Measurement Units** (Metric or Imperial). **Feature Cache** in the same group prepares every
+  layer's geometry for the current projection (Fill, Empty, Cancel, Auto Cache).
 - **Settings › Customize** chooses the ribbon's tabs and the Quick Access Toolbar's extra
   buttons. Settings and Help always remain visible. **Help** opens the user guide and the
   **Diagnostic Monitor** (frame rate, draw time, data size).

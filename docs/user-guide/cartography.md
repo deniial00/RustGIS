@@ -39,9 +39,9 @@ greyscale and for colour-blind viewers), **Sequential**, **Diverging** (Red–Bl
 Balance), **Topographic and Bathymetric** (Terrain, Oleron, Topo and Deep; Oleron and Topo change
 colour sharply at the middle of the range, sea level for data centred on 0), **Qualitative** and
 the project's own **Custom** ramps. Click a group's name to show or hide it. The Style tab sets the fill **Color**, the
-**Outline** width, **Transparency** and a **Visibility Range** (the scales between which the layer
+**Outline** width, plus **Transparency** and the **Visibility** scale limits (the scales between which the layer
 draws; a large file read in place is not read at all outside them); points can be circles, squares,
-triangles, diamonds or stars. **Data › Definition Query** draws only the features matching a SQL
+triangles, diamonds or stars. **Data › Table › Definition Query** draws only the features matching a SQL
 clause; Unique Values, Graduated Colors and Proportional Symbols take their values, classes and
 sizes from those features when you apply them (apply the symbology again after changing the query),
 and **Full Extent** zooms to them. A layer with [subtypes](editing.md#data-design) can be symbolized
@@ -238,11 +238,11 @@ it unchanged.
 The **Labeling pane** brings together the label classes and the chosen class's field, SQL
 clause, text symbol, placement and visibility limits, plus the map-wide label display controls.
 Open it for a feature layer with Layers › right-click › **Labeling Properties…**, **View ›
-Windows › Labeling**, or **Style › Labels › Properties**. It runs the same commands as the
+Windows › Panes › Labeling**, or **Style › Labels › Properties**. It runs the same commands as the
 ribbon, so each setting change undoes on its own (a dragged size or a colour pick is one step).
 Label classes are described below.
 
-Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
+Turn labels on per layer with **Style › Labels › Label**, then:
 
 - **Label field and text**: the field the labels show
   (`labels.field={"layer": "Cities", "field": "name"}`), and the text symbol's size (4–72 points),
@@ -305,7 +305,7 @@ Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
   ```
 
   Convert keeps the classes, with a point for each matching class and a `CLASS` field identifying
-  it. Web Style and Web Layer exports (**Publish › Share As**) use Default only, and have no labels
+  it. Web Style and Web Layer exports (**Publish › Share › Web Map** split menu) use Default only, and have no labels
   when Default is hidden.
 
 <figure markdown="span">
@@ -318,9 +318,9 @@ Turn labels on per layer (View › Labeling › Label, or the Style tab), then:
 On the **Style** tab, **Masking** shows a layer only inside another layer's polygons;
 **Display Filters** show different features at different scales (a SQL condition per scale
 range); **Aggregation** draws points as hexagon or square bins coloured by count.
-**Extrusion** raises polygons by a constant height or numeric field (in metres), multiplied by
-**Factor**, with **Face Culling**, **Lighting** and **Cast Shadow** controls. It draws in an
-oblique view on an untilted flat map and in perspective on a tilted map; the globe draws the
+**Style › 3D › Extrusion** raises polygons by a constant height or numeric field (in metres),
+multiplied by **Factor**, alongside **Face Culling**, **Lighting** and **Cast Shadow**.
+It draws in an oblique view on an untilted flat map and in perspective on a tilted map; the globe draws the
 polygons flat. See [Rotating and tilting the map](maps.md#navigating).
 
 For a raster layer, the **Style** tab also has **Layer Blend** (multiply, screen, overlay,
@@ -332,10 +332,11 @@ compare it with what's beneath), **Masking** and **Rotation**.
 **Edit › Graphics** draws shapes in a graphics layer (**Home › Add › Add Data › Graphics Layer**, or
 one is made with the first graphic). Click once for a Point. Line, Curve and Polygon are clicked
 vertex by vertex (double-click to finish); Freehand, Lasso, Rectangle, Circle and Ellipse are
-dragged. **Edit › Graphics and Text › Text** places a text where you click, as a layout's text
-is placed: it says "Text", is selected, and opens in the **Format** pane (beside the other
-right-hand panes) with its text selected, so you type over
-it. Shift+Enter starts a new line, and Enter ends the text. Dynamic Text is a menu of values that
+dragged. **Polygon** is a split button: its face draws a polygon, and its menu holds Lasso,
+Rectangle, Circle and Ellipse. **Edit › Graphics › Text** places text where you click from its
+split-button face, as a layout's text is placed: it says "Text", is selected, and opens in the
+**Format** pane (beside the other right-hand panes) with its text selected, so you type over it.
+Shift+Enter starts a new line, and Enter ends the text. The Text split menu offers Dynamic Text values that
 update as the map changes (map name, scale, date, time, coordinate system, number of layers, map
 centre): pick one, then click the map, and the text starts with its token (`{map}`, `{scale}`,
 `{date}`, `{time}`, `{crs}`, `{layers}` or `{center}`); the pane's **Insert Dynamic Text** menu adds

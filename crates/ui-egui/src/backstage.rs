@@ -104,8 +104,8 @@ fn start(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(24.0);
     ui.label(egui::RichText::new(tl!("New Project")).font(semibold(15.0)));
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(18.0, 0.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(18.0, 18.0);
         if card(ui, t, "Map", "A blank map with a basemap", "new_map") {
             let _ = app.run("project.new", Value::Null);
             app.ui.backstage = false;
@@ -116,11 +116,19 @@ fn start(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             app.ui.backstage = false;
             app.map.invalidate();
         }
+        if card(ui, t, "From Template…", "Start from a project template", "open") {
+            let _ = app.run("ui.openItem", json!({"kind": "template"}));
+            app.ui.backstage = false;
+        }
         if card(ui, t, "Open…", "Open a .rgis project", "open") {
             let _ = app.run("ui.open", Value::Null);
         }
         if card(ui, t, "QGIS Project…", "A .qgs or .qgz project as a map", "open") {
             let _ = app.run("ui.openItem", json!({"kind": "qgisProject"}));
+            app.ui.backstage = false;
+        }
+        if card(ui, t, "Import Maps…", "Add maps to the current project", "map") {
+            let _ = app.run("ui.openItem", json!({"kind": "map"}));
             app.ui.backstage = false;
         }
     });
@@ -140,11 +148,32 @@ fn start(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         ui.label(egui::RichText::new(tl!("Layers")).color(t.text_dim));
         ui.label(app.session.project.maps.iter().map(|m| m.layers.len()).sum::<usize>().to_string());
         ui.end_row();
+        ui.label(egui::RichText::new(tl!("Thumbnail")).color(t.text_dim));
+        ui.horizontal(|ui| {
+            if ui.button(tl!("Create From View")).on_hover_text(tl!("The project's thumbnail, from the map view.")).clicked() {
+                let _ = app.run("project.thumbnail", json!({"create": true}));
+            }
+            if ui.button(tl!("Import Image…")).on_hover_text(tl!("The project's thumbnail, from an image.")).clicked() {
+                let _ = app.run("ui.importThumbnail", Value::Null);
+            }
+        });
+        ui.end_row();
+        ui.label(egui::RichText::new(tl!("Map Thumbnail")).color(t.text_dim));
+        ui.horizontal(|ui| {
+            if ui.button(tl!("Create From View")).on_hover_text(tl!("This map's thumbnail, from the view.")).clicked() {
+                let _ = app.run("map.thumbnail", json!({"create": true}));
+            }
+            if ui.button(tl!("Import Image…")).on_hover_text(tl!("This map's thumbnail, from an image.")).clicked() {
+                let _ = app.run("ui.importThumbnail", json!({"map": true}));
+            }
+        });
+        ui.end_row();
     });
 }
 
 fn card(ui: &mut Ui, t: &Tokens, title: &str, sub: &str, icon: &str) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(200.0, 160.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!(title)));
     ui.painter().rect_filled(r, CornerRadius::same(10), if resp.hovered() { t.hover } else { t.pane });
     ui.painter().rect_stroke(
         r,

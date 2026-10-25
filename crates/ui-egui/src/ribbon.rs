@@ -11,12 +11,12 @@ use serde_json::{Value, json};
 
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{
-    CONTENT_H, Dragged, LABEL_H, big, big_form_menu, big_menu, col, group, menu_item, small, small_form_menu, small_menu, submenu_row,
-    text_w,
+    CONTENT_H, Dragged, LABEL_H, big, big_form_menu, big_menu, big_split_menu, col, group, menu_item, small, small_form_menu, small_menu,
+    submenu_row, text_w,
 };
 use crate::{RightPane, RustGisApp, icons};
 
-pub const TABS: [&str; 10] = ["Home", "Data", "Style", "Edit", "Analyze", "View", "Publish", "Plugins", "Settings", "Help"];
+pub const TABS: [&str; 11] = ["Home", "Data", "Style", "Edit", "Analyze", "View", "Publish", "Layout", "Plugins", "Settings", "Help"];
 
 /// Tabs that always show: Settings holds Customize › Ribbon, the way to show hidden tabs again.
 pub const FIXED_TABS: [&str; 2] = ["Settings", "Help"];
@@ -29,7 +29,7 @@ pub fn current_tab(name: &str) -> &str {
         "Insert" | "Raster Data" => "Data",
         "Feature Layer" | "Labeling" | "Raster Layer" => "Style",
         "Analysis" | "Imagery" => "Analyze",
-        "Share" | "Layout" => "Publish",
+        "Share" => "Publish",
         _ => name,
     };
     if TABS.contains(&tab) || tab.starts_with("plugin:") { tab } else { "Home" }
@@ -47,7 +47,11 @@ pub fn current_hidden_tabs(saved: Vec<String>) -> Vec<String> {
             "Share" => "Publish",
             n => n,
         };
-        if (TABS.contains(&tab) || tab.starts_with("plugin:")) && !FIXED_TABS.contains(&tab) && !out.iter().any(|t| t == tab) {
+        if (TABS.contains(&tab) || tab.starts_with("plugin:"))
+            && tab != "Layout"
+            && !FIXED_TABS.contains(&tab)
+            && !out.iter().any(|t| t == tab)
+        {
             out.push(tab.to_string());
         }
     }
@@ -71,6 +75,9 @@ fn plugin_tabs(app: &RustGisApp) -> Vec<(String, String)> {
 
 pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    if app.ui.tab == "Layout" && app.session.active_layout.is_none() {
+        app.ui.tab = "Publish".into();
+    }
     // A plugin's tab whose plugin was turned off or removed.
     if app.ui.tab.starts_with("plugin:") && !plugin_tabs(app).iter().any(|(id, _)| *id == app.ui.tab) {
         app.ui.tab = "Plugins".into();
@@ -108,6 +115,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
                         "Analyze" => analyze_tab(app, ui),
                         "View" => view_tab(app, ui),
                         "Publish" => publish_tab(app, ui),
+                        "Layout" => layout_groups(app, ui),
                         "Plugins" => plugins_tab(app, ui),
                         "Settings" => settings_tab(app, ui),
                         "Help" => help_tab(app, ui),
@@ -216,7 +224,11 @@ fn tab_strip(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         // RustGIS's tabs, then plugins' own tabs; the user can hide any of them.
         let mut tabs: Vec<(String, String)> = TABS.iter().map(|t| (t.to_string(), tl!(*t).to_string())).collect();
         tabs.extend(plugin_tabs(app));
-        tabs.retain(|(id, _)| !app.ui.hidden_tabs.iter().any(|h| h == id));
+        tabs.retain(
+            |(id, _)| {
+                if id == "Layout" { app.session.active_layout.is_some() } else { !app.ui.hidden_tabs.iter().any(|h| h == id) }
+            },
+        );
         // The tabs scroll between the Project button and the right-side controls (the collapse
         // button and the active tool indicator) when the window is too narrow for them.
         let tool = tool_indicator(app, ui);
@@ -325,10 +337,22 @@ fn tool_btn(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, desc: &s
 /// The Clipboard group of the Edit tab.
 fn clipboard_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Clipboard", |ui| {
-        big_menu(ui, app, "paste", "Paste", "Paste copied features into the selected layer, or as a new layer.", |ui, app| {
-            menu_item(ui, app, "paste", "Paste", "edit.paste", Value::Null);
-            menu_item(ui, app, "paste", "Paste Special (as a new layer)", "edit.pasteSpecial", Value::Null);
-        });
+        big_split_menu(
+            ui,
+            app,
+            "paste",
+            "Paste",
+            "Paste copied features into the selected layer.",
+            "edit.paste",
+            Value::Null,
+            false,
+            "Paste options",
+            "Paste features into the selected layer or a new layer.",
+            true,
+            |ui, app| {
+                menu_item(ui, app, "paste", "Paste Special (as a new layer)", "edit.pasteSpecial", Value::Null);
+            },
+        );
         col(ui, |ui| {
             small(ui, app, "cut", "Cut", "Copy the selected features and delete them.", "ui.cut", Value::Null, false);
             small(ui, app, "copy", "Copy", "Copy the selected features (also as GeoJSON text).", "ui.copy", Value::Null, false);
@@ -391,36 +415,19 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         col(ui, |ui| {
             small(ui, app, "prev_extent", "Previous", "Go back to the previous extent.", "map.prevExtent", Value::Null, false);
             small(ui, app, "next_extent", "Next", "Go forward to the next extent.", "map.nextExtent", Value::Null, false);
-            small(ui, app, "goto_xy", "Go To XY", "Pan to a longitude/latitude.", "ui.dialog", json!({"name": "goToXY"}), false);
-        });
-        col(ui, |ui| {
-            let fp = app.session.map().view.first_person;
-            small_menu(
+            small(
                 ui,
                 app,
-                "explore",
-                if fp { "First-Person" } else { "Planar" },
-                "Navigate with the mouse (planar) or walk with W A S D, Q and E (first-person).",
-                move |ui, app| {
-                    if ui.radio(!fp, tl!("Planar Navigation")).clicked() {
-                        let _ = app.run("map.navigation", json!({"mode": "planar"}));
-                        ui.close();
-                    }
-                    if ui.radio(fp, tl!("First-Person Navigation")).clicked() {
-                        let _ = app.run("map.navigation", json!({"mode": "firstPerson"}));
-                        ui.close();
-                    }
-                },
+                "zoom_box",
+                "Zoom Box",
+                "Drag a box to zoom into.",
+                "tool.set",
+                json!({"tool": "zoomIn"}),
+                app.session.tool == Tool::ZoomIn,
             );
-            let mode = app.session.map().popup_mode;
-            small_menu(ui, app, "popup", "Identify", "Choose which layers a click identifies.", |ui, app| {
-                for m in rustgis_engine::map::PopupMode::ALL {
-                    if ui.radio(mode == m, tl!(m.label())).clicked() {
-                        let _ = app.run("map.popupMode", json!({"mode": m.code()}));
-                        ui.close();
-                    }
-                }
-            });
+        });
+        col(ui, |ui| {
+            small(ui, app, "goto_xy", "Go To XY", "Pan to a longitude/latitude.", "ui.dialog", json!({"name": "goToXY"}), false);
             small(
                 ui,
                 app,
@@ -431,49 +438,61 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 json!({"name": "findPlace"}),
                 false,
             );
+            small(
+                ui,
+                app,
+                "directions",
+                "Directions",
+                "Plan a route between places.",
+                "ui.pane.directions",
+                Value::Null,
+                app.ui.right == Some(RightPane::Directions),
+            );
         });
-        let on = app.ui.right == Some(crate::RightPane::Directions);
-        big(
-            ui,
-            app,
-            "directions",
-            "Directions",
-            "Plan a route between places and follow it turn by turn (Valhalla, on OpenStreetMap data).",
-            "ui.pane.directions",
-            Value::Null,
-            on,
-            false,
-        );
     });
     group(ui, "Add", |ui| {
         big_menu(ui, app, "basemap", "Basemap", "Change the map's backdrop.", basemap_gallery);
-        big_menu(ui, app, "add_data", "Add\nData", "Add GeoJSON, CSV or Shapefile data to the map.", |ui, app| {
-            menu_item(ui, app, "", "Data…", "ui.addData", Value::Null);
-            menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
-            menu_item(ui, app, "", "Geocode Addresses…", "ui.dialog", json!({"name": "geocode"}));
-            menu_item(ui, app, "", "From URL…", "ui.addUrl", Value::Null);
-            menu_item(ui, app, "", "From Service…", "ui.addService", Value::Null);
-            menu_item(ui, app, "", "Zarr…", "ui.dialog", json!({"name": "zarr"}));
-            // Databases are read through DuckDB, a program the browser can't run.
-            #[cfg(not(target_arch = "wasm32"))]
-            menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
-            menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
-            // Saved connections live in the Data Sources pane, not here: one entry opens the pane
-            // (never closes it), and New Connection starts the form for a kind.
-            menu_item(ui, app, "", "Connections…", "ui.openSources", Value::Null);
-            submenu_row(ui, "", tl!("New Connection"), |ui| {
-                for (kind, label) in crate::connectionui::KINDS {
-                    // Database drivers aren't built for the browser.
-                    if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
-                        continue;
+        big_split_menu(
+            ui,
+            app,
+            "add_data",
+            "Add\nData",
+            "Add GeoJSON, CSV or Shapefile data to the map.",
+            "ui.addData",
+            Value::Null,
+            false,
+            "Add Data options",
+            "Choose a data source or create a layer.",
+            true,
+            |ui, app| {
+                menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
+                menu_item(ui, app, "", "Geocode Addresses…", "ui.dialog", json!({"name": "geocode"}));
+                menu_item(ui, app, "", "From URL…", "ui.addUrl", Value::Null);
+                menu_item(ui, app, "", "From Service…", "ui.addService", Value::Null);
+                menu_item(ui, app, "", "Zarr…", "ui.dialog", json!({"name": "zarr"}));
+                // Databases are read through DuckDB, a program the browser can't run.
+                #[cfg(not(target_arch = "wasm32"))]
+                menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
+                menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
+                // Saved connections live in the Data Sources pane, not here: one entry opens the pane
+                // (never closes it), and New Connection starts the form for a kind.
+                menu_item(ui, app, "", "Connections…", "ui.openSources", Value::Null);
+                submenu_row(ui, "", tl!("New Connection"), |ui| {
+                    for (kind, label) in crate::connectionui::KINDS {
+                        // Database drivers aren't built for the browser.
+                        if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
+                            continue;
+                        }
+                        menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
                     }
-                    menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
-                }
-            });
-            menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
-            ui.separator();
-            sample_data_gallery(ui, app);
-        });
+                });
+                menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
+                submenu_row(ui, "graphics_layer", tl!("Layer Templates"), |ui| layer_templates_gallery(ui, app));
+                menu_item(ui, app, "add_folder", "Add Folder…", "ui.addFolder", Value::Null);
+                ui.separator();
+                sample_data_gallery(ui, app);
+            },
+        );
         big_menu(ui, app, "web_data", "Web\nData", "Add data from public web services and catalogs.", web_data_menu);
     });
     group(ui, "Selection", |ui| {
@@ -507,38 +526,23 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         });
     });
     group(ui, "Inspect", |ui| {
-        big_menu(ui, app, "measure", "Measure", "Measure geodesic distances and areas on the map.", |ui, app| {
-            if ui.button(tl!("Measure Distance")).clicked() {
-                let _ = app.run("tool.set", json!({"tool": "measure"}));
-                app.map.cancel_sketch();
-                ui.close();
-            }
-            if ui.button(tl!("Measure Area")).clicked() {
-                let _ = app.run("tool.set", json!({"tool": "measureArea"}));
-                app.map.cancel_sketch();
-                ui.close();
-            }
-            ui.separator();
-            ui.label(tl!("Measurement units"));
-            for (imperial, units, label) in [(false, "metric", "Metric"), (true, "imperial", "Imperial")] {
-                if ui.radio(app.ui.measurement_imperial == imperial, tl!(label)).clicked() {
-                    let _ = app.run("ui.measurementUnits", json!({"units": units}));
-                    ui.close();
+        col(ui, |ui| {
+            for (label, code) in [("Measure Distance", "measure"), ("Measure Area", "measureArea")] {
+                if small(
+                    ui,
+                    app,
+                    "measure",
+                    label,
+                    "Measure geodesic distances or areas on the map.",
+                    "tool.set",
+                    json!({"tool": code}),
+                    app.session.tool.code() == code,
+                )
+                .clicked()
+                {
+                    app.map.cancel_sketch();
                 }
             }
-        });
-        col(ui, |ui| {
-            small(ui, app, "locate", "Locate", "Find a place by coordinates.", "ui.dialog", json!({"name": "goToXY"}), false);
-            small(
-                ui,
-                app,
-                "zoom_box",
-                "Zoom Box",
-                "Drag a box to zoom into.",
-                "tool.set",
-                json!({"tool": "zoomIn"}),
-                app.session.tool == Tool::ZoomIn,
-            );
             small(
                 ui,
                 app,
@@ -852,7 +856,6 @@ fn tile_layers(ui: &mut Ui, app: &mut RustGisApp, t: &Tokens) {
 
 fn offline_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Offline", |ui| {
-        let areas: Vec<String> = app.session.project.offline_areas.iter().map(|a| a.name.clone()).collect();
         big(
             ui,
             app,
@@ -865,65 +868,25 @@ fn offline_group(app: &mut RustGisApp, ui: &mut Ui) {
             false,
         );
         col(ui, |ui| {
-            for (icon, label, cmd, desc) in [
-                ("redo", "Sync", "offline.sync", "Send offline edits back and refresh."),
-                ("map", "Open", "offline.open", "Open an offline area to edit."),
-                ("delete", "Remove", "offline.remove", "Remove an offline area."),
-            ] {
-                let a = areas.clone();
-                small_menu(ui, app, icon, label, desc, move |ui, app| {
-                    if a.is_empty() {
-                        ui.label(egui::RichText::new(tl!("No offline areas")).weak());
-                    }
-                    for n in &a {
-                        if ui.button(n.as_str()).clicked() {
-                            let _ = app.run(cmd, json!({"name": n}));
-                            app.map.invalidate();
-                            ui.close();
+            small_menu(ui, app, "map", "Offline Areas", "Sync, open or remove a downloaded map.", |ui, app| {
+                let areas: Vec<String> = app.session.project.offline_areas.iter().map(|a| a.name.clone()).collect();
+                for (label, cmd) in [("Sync", "offline.sync"), ("Open", "offline.open"), ("Remove", "offline.remove")] {
+                    submenu_row(ui, "", tl!(label), |ui| {
+                        if areas.is_empty() {
+                            ui.label(egui::RichText::new(tl!("No offline areas")).weak());
                         }
-                    }
-                });
-            }
-        });
-    });
-}
-
-fn feature_cache_group(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Feature Cache", |ui| {
-        col(ui, |ui| {
-            small(ui, app, "add_data", "Fill", "Prepare every layer's geometry for this projection.", "cache.fill", Value::Null, false);
-            small(ui, app, "clear_sel", "Empty", "Free the prepared geometry.", "cache.empty", Value::Null, false);
-        });
-        col(ui, |ui| {
-            small(ui, app, "close", "Cancel", "Stop filling the cache.", "cache.cancel", Value::Null, false);
-            small(
-                ui,
-                app,
-                "redo",
-                "Auto Cache",
-                "Fill the cache whenever the projection changes.",
-                "cache.auto",
-                Value::Null,
-                app.session.auto_cache,
-            );
+                        for name in &areas {
+                            menu_item(ui, app, "", name, cmd, json!({"name": name}));
+                        }
+                    });
+                }
+            });
         });
     });
 }
 
 fn labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Labeling", |ui| {
-        let on = app.session.active_layer.and_then(|id| app.session.map().layer(id)).is_some_and(|l| l.labels.enabled);
-        big(
-            ui,
-            app,
-            if on { "label" } else { "label_off" },
-            "Label",
-            "Turn labels on or off for the selected layer.",
-            "labels.enable",
-            Value::Null,
-            on,
-            false,
-        );
         let d = app.session.map().label_display;
         col(ui, |ui| {
             small(
@@ -948,17 +911,18 @@ fn labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
                 d.show_unplaced,
             );
         });
-        big(
-            ui,
-            app,
-            "label_convert",
-            "Convert",
-            "Convert the selected layer's labels into an annotation layer.",
-            "labels.convert",
-            Value::Null,
-            false,
-            false,
-        );
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "label_convert",
+                "Convert",
+                "Convert the selected layer's labels into an annotation layer.",
+                "labels.convert",
+                Value::Null,
+                false,
+            );
+        });
     });
 }
 
@@ -984,72 +948,55 @@ fn publication_label(id: &str) -> Option<&'static str> {
 fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Project", |ui| {
         big(ui, app, "new_map", "New\nMap", "Add a new map to the project.", "map.new", Value::Null, false, false);
-        big(ui, app, "toolbox", "Toolbox", "Browse the geoprocessing toolbox.", "ui.pane.geoprocessing", Value::Null, false, false);
-        big(ui, app, "open", "Import\nProject", "Open a RustGIS project.", "ui.open", Value::Null, false, false);
-        big_menu(ui, app, "new_layout", "New\nLayout", "Add a page layout for printing and exporting the map.", |ui, app| {
-            for (id, label, w, h) in rustgis_engine::map::layout::PAGES {
-                let text = format!("{} ({w:.0} × {h:.0} mm)", tl!(*label));
-                if ui.button(text).clicked() {
-                    let _ = app.run("layout.new", json!({"page": id}));
-                    app.ui.tab = "Publish".into();
-                    ui.close();
-                }
-            }
-            // A finished sheet or figure of the map view, its texts to fill in on the page.
-            ui.menu_button(tl!("Publication Layout"), |ui| {
-                for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
-                    let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
-                    if ui.button(label).clicked() {
-                        // A sheet is titled with the map's name; a figure's title is its caption's.
-                        let mut p = json!({"profile": profile.id});
-                        if profile.sheet {
-                            p["title"] = json!(app.session.map().name.clone());
-                        }
-                        // The view's extent may not be known (an empty map): said, and the tab stays.
-                        match app.run("layout.publication", p) {
-                            Ok(r) => {
-                                // What the layout couldn't do as asked (a legend clipped, a layer still reading).
-                                let said: Vec<&str> = r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
-                                if !said.is_empty() {
-                                    app.session.notify(said.join("\n"), false);
-                                }
-                                app.ui.tab = "Publish".into();
-                            }
-                            Err(e) => app.session.notify(e, true),
-                        }
+        big_split_menu(
+            ui,
+            app,
+            "new_layout",
+            "New\nLayout",
+            "Add a Letter page layout.",
+            "layout.new",
+            json!({"page": "letter"}),
+            false,
+            "New Layout options",
+            "Choose a page size, publication layout or imported layout.",
+            true,
+            |ui, app| {
+                for (id, label, w, h) in rustgis_engine::map::layout::PAGES {
+                    let text = format!("{} ({w:.0} × {h:.0} mm)", tl!(*label));
+                    if ui.button(text).clicked() {
+                        let _ = app.run("layout.new", json!({"page": id}));
                         ui.close();
                     }
                 }
-            });
-            ui.separator();
-            if ui.button(tl!("Blank Letter page")).clicked() {
-                let _ = app.run("layout.new", json!({"template": "blank"}));
-                app.ui.tab = "Publish".into();
-                ui.close();
-            }
-            menu_item(ui, app, "open", "Import Layout…", "ui.importLayout", Value::Null);
-        });
-        col(ui, |ui| {
-            small(ui, app, "catalog", "Browser", "Browse the project's maps, tables and folders.", "ui.pane.catalog", Value::Null, false);
-            small(ui, app, "add_data", "Add Data", "Add vector data.", "ui.addData", Value::Null, false);
-            small(ui, app, "add_folder", "Add Folder", "Connect a folder to the Browser.", "ui.addFolder", Value::Null, false);
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "open",
-                "Import",
-                "Add the maps of a map file, map package, project or project package.",
-                "ui.openItem",
-                json!({"kind": "map"}),
-                false,
-            );
-            small_menu(ui, app, "save_as", "Templates", "Project templates: start projects from a saved setup.", |ui, app| {
-                menu_item(ui, app, "save_as", "New Custom Template…", "ui.saveItem", json!({"kind": "template"}));
-                menu_item(ui, app, "open", "Open Custom Template…", "ui.openItem", json!({"kind": "template"}));
-            });
-        });
+                // A finished sheet or figure of the map view, its texts to fill in on the page.
+                ui.menu_button(tl!("Publication Layout"), |ui| {
+                    for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
+                        let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
+                        if ui.button(label).clicked() {
+                            // A sheet is titled with the map's name; a figure's title is its caption's.
+                            let mut p = json!({"profile": profile.id});
+                            if profile.sheet {
+                                p["title"] = json!(app.session.map().name.clone());
+                            }
+                            // The view's extent may not be known (an empty map): said, and the tab stays.
+                            match app.run("layout.publication", p) {
+                                Ok(r) => {
+                                    // What the layout couldn't do as asked (a legend clipped, a layer still reading).
+                                    let said: Vec<&str> =
+                                        r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
+                                    if !said.is_empty() {
+                                        app.session.notify(said.join("\n"), false);
+                                    }
+                                }
+                                Err(e) => app.session.notify(e, true),
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+                menu_item(ui, app, "open", "Import Layout…", "ui.importLayout", Value::Null);
+            },
+        );
     });
 }
 
@@ -1066,6 +1013,28 @@ fn report_group(app: &mut RustGisApp, ui: &mut Ui) {
             false,
             false,
         );
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "open",
+                "Import Report…",
+                "Add a report file, or a report template for the selected layer.",
+                "ui.openItem",
+                json!({"kind": "report"}),
+                false,
+            );
+            small(
+                ui,
+                app,
+                "pane",
+                "Report Pane",
+                "Preview and set up the report.",
+                "ui.pane.report",
+                Value::Null,
+                app.ui.right_open.contains(&RightPane::Report),
+            );
+        });
         col(ui, |ui| {
             small_menu(
                 ui,
@@ -1125,7 +1094,7 @@ fn report_group(app: &mut RustGisApp, ui: &mut Ui) {
                 ui,
                 app,
                 "field",
-                "Data",
+                "Report Data",
                 "Fields, statistics, groups, pictures, attachments and charts in the report.",
                 |ui, app| {
                     let fields: Vec<String> = rustgis_engine::cmd::report::index(&app.session, &Value::Null)
@@ -1157,27 +1126,12 @@ fn report_group(app: &mut RustGisApp, ui: &mut Ui) {
                     field_menu(ui, app, "Chart Frame", "report.chart", "category");
                 },
             );
-            small(
-                ui,
-                app,
-                "pane",
-                "Report Pane",
-                "Preview and set up the report.",
-                "ui.pane.report",
-                Value::Null,
-                app.ui.right == Some(RightPane::Report),
-            );
+            small_menu(ui, app, "print", "Report Output", "Export the report, or save it as a report file or template.", |ui, app| {
+                menu_item(ui, app, "print", "Export Report…", "ui.exportReport", Value::Null);
+                menu_item(ui, app, "save_as", "Save As Report File…", "ui.saveItem", json!({"kind": "report"}));
+                menu_item(ui, app, "save_as", "Save As Report Template…", "ui.saveItem", json!({"kind": "reportTemplate"}));
+            });
         });
-        small(
-            ui,
-            app,
-            "open",
-            "Import Report",
-            "Add a report file, or a report template for the selected layer.",
-            "ui.openItem",
-            json!({"kind": "report"}),
-            false,
-        );
     });
 }
 
@@ -1195,17 +1149,11 @@ fn presentation_group(app: &mut RustGisApp, ui: &mut Ui) {
             false,
         );
         col(ui, |ui| {
-            small_menu(ui, app, "new_layout", "Page", "Add a page to the presentation.", |ui, app| {
-                menu_item(ui, app, "web_map", "Map (the current view)", "presentation.mapPage", Value::Null);
-                menu_item(ui, app, "new_layout", "Blank", "presentation.blankPage", json!({"title": "Title"}));
-                menu_item(ui, app, "picture", "Image…", "ui.presentationPicture", Value::Null);
-                menu_item(ui, app, "export_map", "Video…", "ui.presentationVideo", Value::Null);
-            });
             small(
                 ui,
                 app,
                 "open",
-                "Import Presentation",
+                "Import Presentation…",
                 "Add a presentation file.",
                 "ui.openItem",
                 json!({"kind": "presentation"}),
@@ -1219,49 +1167,54 @@ fn presentation_group(app: &mut RustGisApp, ui: &mut Ui) {
                 "Preview, edit and play the presentation.",
                 "ui.pane.presentation",
                 Value::Null,
-                app.ui.right == Some(RightPane::Presentation),
+                app.ui.right_open.contains(&RightPane::Presentation),
+            );
+        });
+        col(ui, |ui| {
+            small_menu(ui, app, "new_layout", "Page", "Add a page to the presentation.", |ui, app| {
+                menu_item(ui, app, "web_map", "Map (the current view)", "presentation.mapPage", Value::Null);
+                menu_item(ui, app, "new_layout", "Blank", "presentation.blankPage", json!({"title": "Title"}));
+                menu_item(ui, app, "picture", "Image…", "ui.presentationPicture", Value::Null);
+                menu_item(ui, app, "export_map", "Video…", "ui.presentationVideo", Value::Null);
+            });
+            small_menu(
+                ui,
+                app,
+                "web_map",
+                "Presentation Output",
+                "Export the presentation as a slideshow or PDF, or save it as a file.",
+                |ui, app| {
+                    menu_item(ui, app, "web_map", "Export Presentation…", "ui.exportPresentation", Value::Null);
+                    menu_item(ui, app, "save_as", "Save As Presentation File…", "ui.saveItem", json!({"kind": "presentation"}));
+                },
             );
         });
     });
 }
 
 fn notebook_group(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Notebook", |ui| {
-        big(ui, app, "python", "New\nNotebook", "A notebook of text and command cells.", "ui.newNotebook", Value::Null, false, false);
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "open",
-                "Add and Open",
-                "Open a RustGIS or Jupyter notebook.",
-                "ui.openItem",
-                json!({"kind": "notebook"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "pane",
-                "Notebook Pane",
-                "Edit and run the notebook.",
-                "ui.pane.notebook",
-                Value::Null,
-                app.ui.right == Some(RightPane::Notebook),
-            );
-        });
-    });
-}
-
-fn layer_templates_group(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Layer Templates", |ui| {
-        big_menu(
+    big(ui, app, "python", "New\nNotebook", "A notebook of text and command cells.", "ui.newNotebook", Value::Null, false, false);
+    col(ui, |ui| {
+        small(ui, app, "open", "Open Notebook…", "Open a RustGIS or Jupyter notebook.", "ui.openItem", json!({"kind": "notebook"}), false);
+        small(
             ui,
             app,
-            "graphics_layer",
-            "Layer\nTemplates",
-            "Add an empty layer with a ready-made schema, to draw into.",
-            layer_templates_gallery,
+            "pane",
+            "Notebook Pane",
+            "Edit and run the notebook.",
+            "ui.pane.notebook",
+            Value::Null,
+            app.ui.right_open.contains(&RightPane::Notebook),
+        );
+        small(
+            ui,
+            app,
+            "python",
+            "Script",
+            "Run commands from text, one per line.",
+            "ui.pane.script",
+            Value::Null,
+            app.ui.right_open.contains(&RightPane::Script),
         );
     });
 }
@@ -1302,118 +1255,97 @@ fn styles_group(app: &mut RustGisApp, ui: &mut Ui) {
 
 fn graphics_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Graphics", |ui| {
-        let tools: [&[(&str, &str, &str, &str)]; 4] = [
-            &[
-                ("g_point", "Point", "Click to place a point graphic.", "graphicPoint"),
-                ("g_line", "Line", "Click the vertices of a line; double-click to finish.", "graphicLine"),
-                ("g_curve", "Curve", "Click points a smooth curve passes through; double-click to finish.", "graphicCurve"),
-            ],
-            &[
-                ("g_freehand", "Freehand", "Drag to draw a freehand line.", "graphicFreehand"),
-                ("g_polygon", "Polygon", "Click the corners of a polygon; double-click to close it.", "graphicPolygon"),
-                ("g_lasso", "Lasso", "Drag to draw a freehand polygon.", "graphicLasso"),
-            ],
-            &[
-                ("g_rect", "Rectangle", "Drag to draw a rectangle.", "graphicRectangle"),
-                ("g_circle", "Circle", "Drag from the centre to draw a circle.", "graphicCircle"),
-                ("g_ellipse", "Ellipse", "Drag a box to draw an ellipse.", "graphicEllipse"),
-            ],
-            &[("keep_tool", "Keep Tool", "Keep the last drawing tool active after each graphic.", "")],
-        ];
-        for column in tools {
+        for tools in [
+            &[("g_point", "Point", "graphicPoint"), ("g_line", "Line", "graphicLine"), ("g_curve", "Curve", "graphicCurve")][..],
+            &[("g_freehand", "Freehand", "graphicFreehand"), ("picture", "Picture", "graphicPicture")][..],
+        ] {
             col(ui, |ui| {
-                for (icon, label, desc, code) in column {
-                    if code.is_empty() {
-                        let on = app.session.keep_tool;
-                        small(ui, app, icon, label, desc, "graphics.keepTool", Value::Null, on);
-                        continue;
-                    }
-                    let checked = app.session.tool.code() == *code;
-                    if small(ui, app, icon, label, desc, "tool.set", json!({"tool": code}), checked).clicked() {
+                for (icon, label, code) in tools {
+                    if small(
+                        ui,
+                        app,
+                        icon,
+                        label,
+                        "Draw a graphic on the map.",
+                        "tool.set",
+                        json!({"tool": code}),
+                        app.session.tool.code() == *code,
+                    )
+                    .clicked()
+                    {
                         app.map.cancel_sketch();
                     }
                 }
+                if tools.len() == 2 {
+                    small(
+                        ui,
+                        app,
+                        "keep_tool",
+                        "Keep Tool",
+                        "Keep the drawing tool active after each graphic.",
+                        "graphics.keepTool",
+                        Value::Null,
+                        app.session.keep_tool,
+                    );
+                }
             });
         }
-    });
-}
-
-fn graphics_and_text_group(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Graphics and Text", |ui| {
-        let text_tool = app.session.tool.code() == "graphicText";
-        let dynamic = app.ui.dynamic_text.is_some();
-        let text = json!({"tool": "graphicText"});
-        if big(ui, app, "g_text", "Text", "Click the map to place text.", "tool.set", text, text_tool && !dynamic, false).clicked() {
-            app.map.cancel_sketch();
-        }
-        // A menu of the values, as in Publish › Text: the one picked starts the text placed.
-        let resp = big(
+        let family = ["graphicPolygon", "graphicLasso", "graphicRectangle", "graphicCircle", "graphicEllipse"];
+        let (primary, _) = big_split_menu(
             ui,
             app,
-            "dynamic_text",
-            "Dynamic\nText",
-            "Pick a live value, such as the scale or date, then click the map to place it.",
-            "ui.menu",
-            Value::Null,
-            text_tool && dynamic,
-            true,
-        );
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(200.0);
-            for &(token, what) in rustgis_engine::map::graphics::TOKENS {
-                if ui.button(format!("{}  {token}", tl!(what))).clicked() {
-                    app.map.cancel_sketch();
-                    let _ = app.run("ui.dynamicText", json!({"text": token}));
-                    ui.close();
-                }
-            }
-        });
-        if big(
-            ui,
-            app,
-            "picture",
-            "Picture",
-            "Drag a rectangle, then pick a PNG or JPEG image to place in it.",
+            "g_polygon",
+            "Polygon",
+            "Draw a polygon graphic.",
             "tool.set",
-            json!({"tool": "graphicPicture"}),
-            app.session.tool.code() == "graphicPicture",
-            false,
-        )
-        .clicked()
-        {
+            json!({"tool": "graphicPolygon"}),
+            family.contains(&app.session.tool.code()),
+            "Polygon options",
+            "Choose a polygon drawing tool.",
+            true,
+            |ui, app| {
+                for (label, code) in [
+                    ("Lasso", "graphicLasso"),
+                    ("Rectangle", "graphicRectangle"),
+                    ("Circle", "graphicCircle"),
+                    ("Ellipse", "graphicEllipse"),
+                ] {
+                    if ui.button(tl!(label)).clicked() {
+                        app.map.cancel_sketch();
+                        let _ = app.run("tool.set", json!({"tool": code}));
+                        ui.close();
+                    }
+                }
+            },
+        );
+        if primary.clicked() {
             app.map.cancel_sketch();
         }
-    });
-}
-
-fn thumbnail_group(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Thumbnail", |ui| {
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "export_map",
-                "Create Thumbnail",
-                "The project's thumbnail, from the map view.",
-                "project.thumbnail",
-                json!({"create": true}),
-                app.session.project.thumbnail.is_some(),
-            );
-            small(ui, app, "open", "Import Thumbnail", "The project's thumbnail, from an image.", "ui.importThumbnail", Value::Null, false);
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "map",
-                "Map Thumbnail",
-                "This map's thumbnail, from the view.",
-                "map.thumbnail",
-                json!({"create": true}),
-                app.session.map().thumbnail.is_some(),
-            );
-            small(ui, app, "open", "Import", "This map's thumbnail, from an image.", "ui.importThumbnail", json!({"map": true}), false);
-        });
+        let (primary, _) = big_split_menu(
+            ui,
+            app,
+            "g_text",
+            "Text",
+            "Click the map to place text.",
+            "tool.set",
+            json!({"tool": "graphicText"}),
+            app.session.tool.code() == "graphicText",
+            "Text options",
+            "Place a live map value as text.",
+            true,
+            |ui, app| {
+                for &(token, what) in rustgis_engine::map::graphics::TOKENS {
+                    if ui.button(format!("{}  {token}", tl!(what))).clicked() {
+                        app.map.cancel_sketch();
+                        let _ = app.run("ui.dynamicText", json!({"text": token}));
+                        ui.close();
+                    }
+                }
+            },
+        );
+        if primary.clicked() {
+            app.map.cancel_sketch();
+        }
     });
 }
 
@@ -1464,23 +1396,12 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
         big(
             ui,
             app,
-            "history",
-            "History",
-            "See the tools you've run.",
-            "ui.pane.history",
-            Value::Null,
-            app.ui.right == Some(RightPane::History),
-            false,
-        );
-        big(
-            ui,
-            app,
             "toolbox",
             "Tools",
             "Find and run geoprocessing tools.",
             "ui.pane.geoprocessing",
             Value::Null,
-            app.ui.right == Some(RightPane::Geoprocessing),
+            app.ui.right_open.contains(&RightPane::Geoprocessing),
             false,
         );
         big(
@@ -1498,22 +1419,12 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
             small(
                 ui,
                 app,
-                "python",
-                "Script",
-                "Run commands from text, one per line.",
-                "ui.pane.script",
+                "history",
+                "History",
+                "See the tools you've run.",
+                "ui.pane.history",
                 Value::Null,
-                app.ui.right == Some(RightPane::Script),
-            );
-            small(
-                ui,
-                app,
-                "def_query",
-                "SQL",
-                "Query files, web addresses and databases with DuckDB Spatial; add results to the map.",
-                "ui.pane.sql",
-                Value::Null,
-                app.ui.right == Some(RightPane::Sql),
+                app.ui.right_open.contains(&RightPane::History),
             );
             small(
                 ui,
@@ -1523,35 +1434,47 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 "Limit where tools work, and the cell size of new rasters.",
                 "ui.pane.workflows",
                 json!({"section": "environments"}),
-                false,
+                app.ui.right_open.contains(&RightPane::Workflows) && app.workflow.section == "environments",
+            );
+            small(
+                ui,
+                app,
+                "def_query",
+                "SQL",
+                "Query files, web addresses and databases with DuckDB Spatial; add results to the map.",
+                "ui.pane.sql",
+                Value::Null,
+                app.ui.right_open.contains(&RightPane::Sql),
             );
         });
     });
-    // Tasks (guided steps, for teaching and repeated work) belong with the analysis tools, not on
-    // Home, which keeps what most users need.
-    group(ui, "Tasks", |ui| {
+    group(ui, "Automate", |ui| {
+        big(
+            ui,
+            app,
+            "run",
+            "Tasks",
+            "Step through a task.",
+            "ui.pane.tasks",
+            Value::Null,
+            app.ui.right_open.contains(&RightPane::Tasks),
+            false,
+        );
         col(ui, |ui| {
-            small(ui, app, "run", "Tasks", "Step through a task.", "ui.pane.tasks", Value::Null, app.ui.right == Some(RightPane::Tasks));
             small_menu(ui, app, "run", "Task", "Tasks: guided steps that each run a command.", |ui, app| {
                 let record = if app.ws.recording.is_some() { "Stop Recording" } else { "Record Task" };
                 menu_item(ui, app, "edit", record, "ui.taskRecord", json!({}));
                 menu_item(ui, app, "history", "New Task From History", "task.new", json!({"name": "Workflow", "fromHistory": true}));
                 menu_item(ui, app, "open", "Import Task…", "ui.openItem", json!({"kind": "task"}));
-                let tasks: Vec<String> = app.session.project.tasks.iter().map(|t| t.name.clone()).collect();
-                if !tasks.is_empty() {
-                    ui.separator();
-                }
-                for t in tasks {
-                    if ui.button(crate::i18n::fmt("Run {name}", &[("name", &t)])).clicked() {
-                        let _ = app.run("task.run", json!({"task": t}));
-                        app.map.invalidate();
-                        ui.close();
+                ui.menu_button(tl!("Run"), |ui| {
+                    let tasks: Vec<String> = app.session.project.tasks.iter().map(|t| t.name.clone()).collect();
+                    for task in tasks {
+                        menu_item(ui, app, "run", &task, "task.run", json!({"task": task}));
                     }
-                }
+                });
             });
         });
-    });
-    group(ui, "AI", |ui| {
+        notebook_group(app, ui);
         big(
             ui,
             app,
@@ -1560,38 +1483,9 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
             "Ask about your data, or tell the assistant what to do with the map.",
             "ui.pane.assistant",
             Value::Null,
-            app.ui.right == Some(RightPane::Assistant),
+            app.ui.right_open.contains(&RightPane::Assistant),
             false,
         );
-    });
-    group(ui, "Portal", |ui| {
-        for (kind, icon, label, desc) in [
-            ("feature", "buffer", "Feature\nAnalysis", "Tools that analyse features."),
-            ("raster", "relief", "Raster\nAnalysis", "Tools that analyse rasters."),
-        ] {
-            big_menu(ui, app, icon, label, desc, |ui, app| {
-                if let Ok(Value::Array(tools)) = rustgis_engine::cmd::workflows::gallery_list(kind) {
-                    for t in tools {
-                        let (id, name, cmd) = (
-                            t["id"].as_str().unwrap_or("").to_string(),
-                            t["name"].as_str().unwrap_or("").to_string(),
-                            t["command"].as_str().unwrap_or(""),
-                        );
-                        if cmd == "gp.run" {
-                            menu_item(ui, app, "tools", &name, "ui.gp.open", json!({"tool": id}));
-                        } else {
-                            let section = match id.as_str() {
-                                "raster.function" => "rasterFunctions",
-                                "analysis.suitability" => "suitability",
-                                "analysis.viewshed" => "visibility",
-                                _ => "interpolate",
-                            };
-                            menu_item(ui, app, "relief", &name, "ui.pane.workflows", json!({"section": section}));
-                        }
-                    }
-                }
-            });
-        }
     });
     group(ui, "Workflows", |ui| {
         big_menu(
@@ -1601,38 +1495,27 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
             "Workflows",
             "Guided analysis: suitability, visibility, networks, interpolation and more.",
             |ui, app| {
-                for (id, title) in crate::analysispane::SECTIONS
-                    .iter()
-                    .filter(|s| !matches!(s.0, "rasterFunctions" | "functionEditor" | "environments" | "models"))
-                {
+                for (id, title) in crate::analysispane::SECTIONS.iter().filter(|s| {
+                    matches!(
+                        s.0,
+                        "suitability"
+                            | "zonalStats"
+                            | "visibility"
+                            | "lineOfSight"
+                            | "interpolate"
+                            | "network"
+                            | "neighborhood"
+                            | "simulation"
+                            | "profile"
+                            | "explore"
+                            | "similar"
+                            | "interop"
+                    )
+                }) {
                     menu_item(ui, app, "geoprocessing", title, "ui.pane.workflows", json!({"section": id}));
                 }
             },
         );
-    });
-    group(ui, "Raster", |ui| {
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "relief",
-                "Raster Functions",
-                "Slope, aspect, hillshade, NDVI, band math, thresholds.",
-                "ui.pane.workflows",
-                json!({"section": "rasterFunctions"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "bands",
-                "Function Editor",
-                "Chain raster functions.",
-                "ui.pane.workflows",
-                json!({"section": "functionEditor"}),
-                false,
-            );
-        });
     });
     group(ui, "Tools", |ui| {
         let t = Tokens::get(ui.ctx());
@@ -1647,52 +1530,10 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
         });
         ui.painter().rect_stroke(r.response.rect.expand(1.0), CornerRadius::same(6), Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
     });
-    group(ui, "Selection", |ui| {
-        big(
-            ui,
-            app,
-            "select_attr",
-            "By\nAttributes",
-            "Select features with a SQL expression.",
-            "ui.dialog",
-            json!({"name": "selectByAttributes"}),
-            false,
-            false,
-        );
-        big(
-            ui,
-            app,
-            "select_loc",
-            "By\nLocation",
-            "Select features by their spatial relationship.",
-            "ui.gp.open",
-            json!({"tool": "selectByLocation"}),
-            false,
-            false,
-        );
-    });
 }
 
 fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Display", |ui| {
-        let g = app.session.map().graticule;
-        big(ui, app, "graticule", "Graticule", "Show latitude/longitude lines on the basemap.", "map.graticule", Value::Null, g, false);
-        let dark = app.ui.dark;
-        big(ui, app, "dark", "Dark\nMode", "Switch between light and dark themes.", "ui.theme", Value::Null, dark, false);
-        let gpu = app.map.gpu_enabled;
-        big(
-            ui,
-            app,
-            "map",
-            "GPU\nRendering",
-            "Draw the map on the GPU (beta; the globe, view effects and colour-vision simulation stay on the CPU renderer).",
-            "ui.map.gpu",
-            Value::Null,
-            gpu,
-            false,
-        );
-    });
-    group(ui, "View", |ui| {
+    group(ui, "Map", |ui| {
         let on = app.session.map().projection.is_globe();
         big(
             ui,
@@ -1738,296 +1579,14 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     local,
                 );
             }
+            let g = app.session.map().graticule;
+            small(ui, app, "graticule", "Graticule", "Show latitude/longitude lines on the basemap.", "map.graticule", Value::Null, g);
         });
     });
     let v = app.session.map().view.clone();
-    group(ui, "Effects", |ui| {
-        col(ui, |ui| {
-            let sun = v.effects.sun_time.is_some();
-            small_menu(ui, app, "brightness", "Illumination", "Day and night shading for a time.", move |ui, app| {
-                if ui.radio(!sun, tl!("Off")).clicked() {
-                    let _ = app.run("map.effects", json!({"sunTime": null}));
-                    ui.close();
-                }
-                if ui.button(tl!("Now")).clicked() {
-                    let _ = app.run("map.effects", json!({"sunTime": "now"}));
-                    ui.close();
-                }
-                let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-                let day = (now / 86_400.0).floor() * 86_400.0;
-                for (label, h) in [("06:00 UTC", 6.0), ("12:00 UTC", 12.0), ("18:00 UTC", 18.0), ("00:00 UTC", 0.0)] {
-                    if ui.button(label).clicked() {
-                        let _ = app.run("map.effects", json!({"sunTime": day + h * 3600.0}));
-                        ui.close();
-                    }
-                }
-            });
-            let wx = v.effects.weather;
-            small_menu(ui, app, "graticule", "Weather", "Haze, fog, rain or snow over the map.", move |ui, app| {
-                for (label, code, w) in [
-                    ("None", "none", Weather::None),
-                    ("Haze", "haze", Weather::Haze),
-                    ("Fog", "fog", Weather::Fog),
-                    ("Rain", "rain", Weather::Rain),
-                    ("Snow", "snow", Weather::Snow),
-                ] {
-                    if ui.radio(wx == w, tl!(label)).clicked() {
-                        let _ = app.run("map.effects", json!({"weather": code}));
-                        ui.close();
-                    }
-                }
-            });
-        });
-        col(ui, |ui| {
-            let (vig, edges, tilt, grain) = (v.effects.vignette, v.effects.edges, v.effects.tilt_shift, v.effects.grain);
-            let stars = v.effects.stars;
-            small_menu(ui, app, "eye", "Visual Effect", "Vignette, edge outlines and the stars around the globe.", move |ui, app| {
-                if ui.checkbox(&mut vig.clone(), tl!("Vignette")).clicked() {
-                    let _ = app.run("map.effects", json!({"vignette": !vig}));
-                }
-                if ui.checkbox(&mut edges.clone(), tl!("Edges")).clicked() {
-                    let _ = app.run("map.effects", json!({"edges": !edges}));
-                }
-                if ui.checkbox(&mut stars.clone(), tl!("Stars")).clicked() {
-                    let _ = app.run("map.effects", json!({"stars": !stars}));
-                }
-            });
-            small_menu(ui, app, "zoom_box", "Camera Effect", "Tilt-shift blur and film grain.", move |ui, app| {
-                if ui.checkbox(&mut tilt.clone(), tl!("Tilt-shift")).clicked() {
-                    let _ = app.run("map.effects", json!({"tiltShift": !tilt}));
-                }
-                if ui.checkbox(&mut grain.clone(), tl!("Film grain")).clicked() {
-                    let _ = app.run("map.effects", json!({"grain": !grain}));
-                }
-            });
-        });
-        col(ui, |ui| {
-            let fx = v.effects.clone();
-            small_menu(
-                ui,
-                app,
-                "contrast",
-                "Postprocessing",
-                "Brightness, contrast, saturation and sepia for the whole map.",
-                move |ui, app| {
-                    for (label, key, mut val, lo) in [
-                        ("Brightness", "brightness", fx.brightness, -100.0),
-                        ("Contrast", "contrast", fx.contrast, -100.0),
-                        ("Saturation", "saturation", fx.saturation, -100.0),
-                        ("Sepia", "sepia", fx.sepia, 0.0),
-                    ] {
-                        ui.horizontal(|ui| {
-                            let input_label = ui.label(tl!(label));
-                            let r = ui.add(egui::Slider::new(&mut val, lo..=100.0)).labelled_by(input_label.id);
-                            if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                                let _ = app.run("map.effects", json!({key: val}));
-                            }
-                        });
-                    }
-                    if ui.button(tl!("Reset Effects")).clicked() {
-                        let _ = app.run("map.effects", json!({"reset": true}));
-                        ui.close();
-                    }
-                },
-            );
-            let cv = v.color_vision;
-            small_menu(ui, app, "eye", "Color Vision", "See the map as people with colour vision deficiencies do.", move |ui, app| {
-                for c in rustgis_engine::map::view::ColorVision::ALL {
-                    if ui.radio(cv == c, tl!(c.label())).clicked() {
-                        let _ = app.run("map.colorVision", json!({"mode": c.code()}));
-                        ui.close();
-                    }
-                }
-            });
-        });
-    });
-    group(ui, "Scene", |ui| {
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "polygon_tool",
-                "Wireframe",
-                "Draw polygons as outlines only.",
-                "map.drawingMode",
-                json!({"mode": if v.wireframe { "standard" } else { "wireframe" }}),
-                v.wireframe,
-            );
-            let pr = app.session.active_layer.and_then(|id| app.session.map().layer(id)).map_or(0, |l| l.priority);
-            small(
-                ui,
-                app,
-                "up",
-                "Raise Priority",
-                "Draw the selected layer above others.",
-                "layer.priority",
-                json!({"value": pr + 1}),
-                pr > 0,
-            );
-            small(
-                ui,
-                app,
-                "down",
-                "Lower Priority",
-                "Draw the selected layer below others.",
-                "layer.priority",
-                json!({"value": pr - 1}),
-                pr < 0,
-            );
-        });
-        col(ui, |ui| {
-            let clip = v.clip_distance;
-            small_menu(ui, app, "scale_range", "View Clipping", "Hide features far from the view's centre.", move |ui, app| {
-                if ui.radio(clip.is_none(), tl!("None")).clicked() {
-                    let _ = app.run("map.clipping", json!({"mode": "none"}));
-                    ui.close();
-                }
-                for km in [100.0, 500.0, 1000.0, 3000.0] {
-                    if ui
-                        .radio(clip == Some(km * 1000.0), crate::measure_units::distance(km * 1000.0, app.ui.measurement_imperial))
-                        .clicked()
-                    {
-                        let _ = app.run("map.clipping", json!({"mode": "distance", "distance": km * 1000.0}));
-                        ui.close();
-                    }
-                }
-            });
-            small(
-                ui,
-                app,
-                "dra",
-                "Speed Display",
-                "Faster drawing: no antialiasing.",
-                "map.displayType",
-                json!({"mode": if v.fast { "quality" } else { "speed" }}),
-                v.fast,
-            );
-        });
-    });
-    group(ui, "Windows", |ui| {
-        big(
-            ui,
-            app,
-            "contents",
-            "Layers",
-            "Show or hide the Layers pane.",
-            "ui.pane.contents",
-            Value::Null,
-            app.ui.left == Some(crate::LeftPane::Contents),
-            false,
-        );
-        big(
-            ui,
-            app,
-            "catalog",
-            "Browser\nPane",
-            "Show or hide the Browser pane.",
-            "ui.pane.catalog",
-            Value::Null,
-            app.ui.left == Some(crate::LeftPane::Catalog),
-            false,
-        );
-        big(
-            ui,
-            app,
-            "web_map",
-            "Data\nSources",
-            "Show or hide the Data Sources pane: favourites, recent data, saved services, databases and STAC APIs, and a library of public sources.",
-            "ui.pane.sources",
-            Value::Null,
-            app.ui.left == Some(crate::LeftPane::Sources),
-            false,
-        );
-        big(
-            ui,
-            app,
-            "geoprocessing",
-            "Tools\nPane",
-            "Show or hide the Tools pane.",
-            "ui.pane.geoprocessing",
-            Value::Null,
-            app.ui.right == Some(RightPane::Geoprocessing),
-            false,
-        );
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "symbology",
-                "Symbology",
-                "Show the Symbology pane for the selected layer.",
-                "ui.pane.symbology",
-                Value::Null,
-                app.ui.right == Some(RightPane::Symbology),
-            );
-            small(
-                ui,
-                app,
-                "history",
-                "History",
-                "Geoprocessing history.",
-                "ui.pane.history",
-                Value::Null,
-                app.ui.right == Some(RightPane::History),
-            );
-            small(
-                ui,
-                app,
-                "identify",
-                "Details",
-                "Details of the selected layer.",
-                "ui.pane.details",
-                Value::Null,
-                app.ui.right == Some(RightPane::Details),
-            );
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "assistant",
-                "AI Assistant",
-                "Show or hide the AI Assistant.",
-                "ui.pane.assistant",
-                Value::Null,
-                app.ui.right == Some(RightPane::Assistant),
-            );
-            small(
-                ui,
-                app,
-                "bookmark",
-                "Bookmarks",
-                "Show or hide the Bookmarks pane: every map's bookmarks.",
-                "ui.pane.bookmarks",
-                Value::Null,
-                app.ui.right == Some(RightPane::Bookmarks),
-            );
-            small(
-                ui,
-                app,
-                "label",
-                "Labeling",
-                "Show the Labeling pane for the selected layer.",
-                "ui.pane.labeling",
-                Value::Null,
-                app.ui.right == Some(RightPane::Labeling),
-            );
-        });
-        small(
-            ui,
-            app,
-            "table",
-            "Attribute Table",
-            "Open the selected layer's table.",
-            "table.open",
-            Value::Null,
-            app.session.table_layer.is_some(),
-        );
-    });
-    labeling_group(app, ui);
     group(ui, "Navigation", |ui| {
-        big(ui, app, "zoom_world", "World", "Zoom to the whole world.", "map.zoomWorld", Value::Null, false, false);
         col(ui, |ui| {
+            small(ui, app, "zoom_world", "World", "Zoom to the whole world.", "map.zoomWorld", Value::Null, false);
             small(
                 ui,
                 app,
@@ -2048,6 +1607,8 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 json!({"name": "camera"}),
                 false,
             );
+        });
+        col(ui, |ui| {
             small(
                 ui,
                 app,
@@ -2058,8 +1619,248 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 Value::Null,
                 app.map.magnifier,
             );
+            let fp = v.first_person;
+            small_menu(ui, app, "explore", "Navigation Mode", "Move over the map, or walk and fly through it.", move |ui, app| {
+                for (label, mode, on) in [("Planar", "planar", !fp), ("First-Person", "firstPerson", fp)] {
+                    if ui.radio(on, tl!(label)).clicked() {
+                        let _ = app.run("map.navigation", json!({"mode": mode}));
+                        ui.close();
+                    }
+                }
+            });
+            let popup = app.session.map().popup_mode;
+            small_menu(ui, app, "identify", "Identify", "Which layers a click on the map identifies.", move |ui, app| {
+                for m in rustgis_engine::map::PopupMode::ALL {
+                    if ui.radio(popup == m, tl!(m.label())).clicked() {
+                        let _ = app.run("map.popupMode", json!({"mode": m.code()}));
+                        ui.close();
+                    }
+                }
+            });
         });
     });
+    group(ui, "Effects", |ui| {
+        let fx = v.effects.clone();
+        big_menu(
+            ui,
+            app,
+            "brightness",
+            "Effects",
+            "Illumination, weather, visual and camera effects, and postprocessing for the map.",
+            move |ui, app| {
+                ui.menu_button(tl!("Illumination"), |ui| {
+                    if ui.radio(fx.sun_time.is_none(), tl!("Off")).clicked() {
+                        let _ = app.run("map.effects", json!({"sunTime": null}));
+                        ui.close();
+                    }
+                    if ui.button(tl!("Now")).clicked() {
+                        let _ = app.run("map.effects", json!({"sunTime": "now"}));
+                        ui.close();
+                    }
+                    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                    let day = (now / 86_400.0).floor() * 86_400.0;
+                    for (label, h) in [("06:00 UTC", 6.0), ("12:00 UTC", 12.0), ("18:00 UTC", 18.0), ("00:00 UTC", 0.0)] {
+                        if ui.button(label).clicked() {
+                            let _ = app.run("map.effects", json!({"sunTime": day + h * 3600.0}));
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button(tl!("Weather"), |ui| {
+                    for (label, code, w) in [
+                        ("None", "none", Weather::None),
+                        ("Haze", "haze", Weather::Haze),
+                        ("Fog", "fog", Weather::Fog),
+                        ("Rain", "rain", Weather::Rain),
+                        ("Snow", "snow", Weather::Snow),
+                    ] {
+                        if ui.radio(fx.weather == w, tl!(label)).clicked() {
+                            let _ = app.run("map.effects", json!({"weather": code}));
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button(tl!("Visual Effect"), |ui| {
+                    for (label, key, on) in
+                        [("Vignette", "vignette", fx.vignette), ("Edges", "edges", fx.edges), ("Stars", "stars", fx.stars)]
+                    {
+                        if ui.checkbox(&mut on.clone(), tl!(label)).clicked() {
+                            let _ = app.run("map.effects", json!({key: !on}));
+                        }
+                    }
+                });
+                ui.menu_button(tl!("Camera Effect"), |ui| {
+                    for (label, key, on) in [("Tilt-shift", "tiltShift", fx.tilt_shift), ("Film grain", "grain", fx.grain)] {
+                        if ui.checkbox(&mut on.clone(), tl!(label)).clicked() {
+                            let _ = app.run("map.effects", json!({key: !on}));
+                        }
+                    }
+                });
+                ui.menu_button(tl!("Postprocessing"), |ui| {
+                    for (label, key, mut val, lo) in [
+                        ("Brightness", "brightness", fx.brightness, -100.0),
+                        ("Contrast", "contrast", fx.contrast, -100.0),
+                        ("Saturation", "saturation", fx.saturation, -100.0),
+                        ("Sepia", "sepia", fx.sepia, 0.0),
+                    ] {
+                        ui.horizontal(|ui| {
+                            let input_label = ui.label(tl!(label));
+                            let r = ui.add(egui::Slider::new(&mut val, lo..=100.0)).labelled_by(input_label.id);
+                            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                                let _ = app.run("map.effects", json!({key: val}));
+                            }
+                        });
+                    }
+                    if ui.button(tl!("Reset Effects")).clicked() {
+                        let _ = app.run("map.effects", json!({"reset": true}));
+                        ui.close();
+                    }
+                });
+            },
+        );
+        col(ui, |ui| {
+            let cv = v.color_vision;
+            small_menu(ui, app, "eye", "Color Vision", "See the map as people with colour vision deficiencies do.", move |ui, app| {
+                for c in rustgis_engine::map::view::ColorVision::ALL {
+                    if ui.radio(cv == c, tl!(c.label())).clicked() {
+                        let _ = app.run("map.colorVision", json!({"mode": c.code()}));
+                        ui.close();
+                    }
+                }
+            });
+            let (wireframe, fast, clip) = (v.wireframe, v.fast, v.clip_distance);
+            small_menu(ui, app, "polygon_tool", "Scene", "Wireframe drawing, faster display and view clipping.", move |ui, app| {
+                if ui
+                    .add(egui::Button::selectable(wireframe, tl!("Wireframe")))
+                    .on_hover_text(tl!("Draw polygons as outlines only."))
+                    .clicked()
+                {
+                    let _ = app.run("map.drawingMode", json!({"mode": if wireframe { "standard" } else { "wireframe" }}));
+                    ui.close();
+                }
+                if ui
+                    .add(egui::Button::selectable(fast, tl!("Speed Display")))
+                    .on_hover_text(tl!("Faster drawing: no antialiasing."))
+                    .clicked()
+                {
+                    let _ = app.run("map.displayType", json!({"mode": if fast { "quality" } else { "speed" }}));
+                    ui.close();
+                }
+                ui.menu_button(tl!("View Clipping"), |ui| {
+                    if ui.radio(clip.is_none(), tl!("None")).clicked() {
+                        let _ = app.run("map.clipping", json!({"mode": "none"}));
+                        ui.close();
+                    }
+                    for km in [100.0, 500.0, 1000.0, 3000.0] {
+                        if ui
+                            .radio(clip == Some(km * 1000.0), crate::measure_units::distance(km * 1000.0, app.ui.measurement_imperial))
+                            .clicked()
+                        {
+                            let _ = app.run("map.clipping", json!({"mode": "distance", "distance": km * 1000.0}));
+                            ui.close();
+                        }
+                    }
+                });
+            });
+        });
+    });
+    group(ui, "Windows", |ui| {
+        big(
+            ui,
+            app,
+            "contents",
+            "Layers",
+            "Show or hide the Layers pane.",
+            "ui.pane.contents",
+            Value::Null,
+            app.ui.left == Some(crate::LeftPane::Contents),
+            false,
+        );
+        big(
+            ui,
+            app,
+            "catalog",
+            "Browser",
+            "Show or hide the Browser pane.",
+            "ui.pane.catalog",
+            Value::Null,
+            app.ui.left == Some(crate::LeftPane::Catalog),
+            false,
+        );
+        big(
+            ui,
+            app,
+            "web_map",
+            "Data\nSources",
+            "Show or hide the Data Sources pane: favourites, recent data, saved services, databases and STAC APIs, and a library of public sources.",
+            "ui.pane.sources",
+            Value::Null,
+            app.ui.left == Some(crate::LeftPane::Sources),
+            false,
+        );
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "identify",
+                "Details",
+                "Details of the selected layer.",
+                "ui.pane.details",
+                Value::Null,
+                app.ui.right_open.contains(&RightPane::Details),
+            );
+        });
+        let left = |p: crate::LeftPane| app.ui.left == Some(p);
+        let right = |p: RightPane| app.ui.right_open.contains(&p);
+        let mut panes: Vec<(String, &'static str, bool)> = [
+            ("Layers", "ui.pane.contents", left(crate::LeftPane::Contents)),
+            ("Browser", "ui.pane.catalog", left(crate::LeftPane::Catalog)),
+            ("Data Sources", "ui.pane.sources", left(crate::LeftPane::Sources)),
+            ("Tools", "ui.pane.geoprocessing", right(RightPane::Geoprocessing)),
+            ("Symbology", "ui.pane.symbology", right(RightPane::Symbology)),
+            ("Labeling", "ui.pane.labeling", right(RightPane::Labeling)),
+            ("History", "ui.pane.history", right(RightPane::History)),
+            ("Details", "ui.pane.details", right(RightPane::Details)),
+            ("Bookmarks", "ui.pane.bookmarks", right(RightPane::Bookmarks)),
+            ("AI Assistant", "ui.pane.assistant", right(RightPane::Assistant)),
+            ("Tasks", "ui.pane.tasks", right(RightPane::Tasks)),
+            ("Editing", "ui.pane.editing", right(RightPane::Editing)),
+            ("Data Design", "ui.pane.design", right(RightPane::Design)),
+            ("Workflows", "ui.pane.workflows", right(RightPane::Workflows)),
+            ("Script", "ui.pane.script", right(RightPane::Script)),
+            ("SQL", "ui.pane.sql", right(RightPane::Sql)),
+            ("Notebook", "ui.pane.notebook", right(RightPane::Notebook)),
+            ("Workflow Manager", "ui.pane.jobs", right(RightPane::Jobs)),
+            ("Profile", "ui.pane.profile", right(RightPane::Profile)),
+            ("Time Series", "ui.pane.timeSeries", right(RightPane::TimeSeries)),
+            ("Diagnostic Monitor", "ui.pane.diagnostics", right(RightPane::Diagnostics)),
+            ("Infographics", "ui.pane.infographics", right(RightPane::Infographics)),
+            ("Directions", "ui.pane.directions", right(RightPane::Directions)),
+            ("Web Data", "ui.pane.webData", right(RightPane::WebData)),
+            ("Report", "ui.pane.report", right(RightPane::Report)),
+            ("Presentation", "ui.pane.presentation", right(RightPane::Presentation)),
+            ("Format", "ui.pane.format", right(RightPane::Format)),
+            ("Shared Items", "ui.pane.shares", right(RightPane::Shares)),
+        ]
+        .into_iter()
+        // A Zarr series is read by the desktop app (the web app can't read one yet).
+        .filter(|p| !(cfg!(target_arch = "wasm32") && p.1 == "ui.pane.timeSeries"))
+        .map(|(label, id, on)| (tl!(label).to_string(), id, on))
+        .collect();
+        // The plugin panel opens without an id only once a plugin's panel has been opened.
+        if app.ui.plugin_panel.plugin.is_some() {
+            panes.push((crate::pluginpanel::title(app), "ui.pane.plugin", right(RightPane::Plugin)));
+        }
+        big_menu(ui, app, "pane", "Panes", "Show or hide any pane.", move |ui, app| {
+            for (label, id, on) in panes {
+                if ui.add(egui::Button::selectable(on, label)).clicked() {
+                    let _ = app.run(id, Value::Null);
+                    ui.close();
+                }
+            }
+        });
+    });
+    labeling_group(app, ui);
     group(ui, "Link", |ui| {
         col(ui, |ui| {
             let split = crate::mapview::split_map(app).is_some();
@@ -2077,6 +1878,54 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             );
         });
     });
+    group(ui, "Time", |ui| {
+        big(
+            ui,
+            app,
+            "time_slider",
+            "Time\nSlider",
+            "Show layers through time: only the features whose date falls in the slider's window, and dated imagery for its date.",
+            "ui.timeSlider",
+            Value::Null,
+            crate::timebar::open(app),
+            false,
+        );
+        let (n, playing) = (app.session.map().animation.len(), app.ws.playing.is_some());
+        big_menu(ui, app, "run", "Animation", "Keyframes of the view, played or exported.", move |ui, app| {
+            menu_item(ui, app, "bookmark", &crate::i18n::fmt("Add Keyframe ({n})", &[("n", &n.to_string())]), "animation.add", Value::Null);
+            menu_item(ui, app, "delete", "Remove", "animation.remove", Value::Null);
+            if ui.add(egui::Button::selectable(playing, tl!("Play"))).clicked() {
+                let _ = app.run("ui.animationPlay", Value::Null);
+                ui.close();
+            }
+            menu_item(ui, app, "export", "Export…", "ui.exportAnimation", Value::Null);
+        });
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "measure",
+                "Profile",
+                "Elevation profiles along lines, cross sections and more.",
+                "ui.pane.profile",
+                Value::Null,
+                app.ui.right_open.contains(&RightPane::Profile),
+            );
+            // A Zarr series is read by the desktop app (the web app can't read one yet).
+            if !cfg!(target_arch = "wasm32") {
+                small(
+                    ui,
+                    app,
+                    "measure",
+                    "Time Series",
+                    "A Zarr variable's values through time at points clicked on the map.",
+                    "ui.pane.timeSeries",
+                    Value::Null,
+                    app.ui.right_open.contains(&RightPane::TimeSeries),
+                );
+            }
+        });
+    });
     group(ui, "Workspace", |ui| {
         col(ui, |ui| {
             small(
@@ -2089,7 +1938,6 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 Value::Null,
                 app.ws.catalog_view,
             );
-            small(ui, app, "run", "Tasks", "Step through a task.", "ui.pane.tasks", Value::Null, app.ui.right == Some(RightPane::Tasks));
             small(
                 ui,
                 app,
@@ -2098,10 +1946,8 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 "Track jobs and their status.",
                 "ui.pane.jobs",
                 Value::Null,
-                app.ui.right == Some(RightPane::Jobs),
+                app.ui.right_open.contains(&RightPane::Jobs),
             );
-        });
-        col(ui, |ui| {
             let sets: Vec<String> = app.ui.pane_sets.iter().map(|x| x.0.clone()).collect();
             small_menu(ui, app, "pane", "Pane Sets", "Save the panes you have open, and switch back to them.", move |ui, app| {
                 for n in &sets {
@@ -2118,90 +1964,18 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     }
                 }
             });
-            small(
-                ui,
-                app,
-                "identify",
-                "Item Pop-ups",
-                "Show details when hovering items in the Browser view.",
-                "ui.itemPopups",
-                Value::Null,
-                app.ws.item_popups,
-            );
         });
-    });
-    group(ui, "Animation", |ui| {
-        let n = app.session.map().animation.len();
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "bookmark",
-                &crate::i18n::fmt("Add ({n})", &[("n", &n.to_string())]),
-                "Add the current view as a keyframe.",
-                "animation.add",
-                Value::Null,
-                false,
-            );
-            small(ui, app, "delete", "Remove", "Remove the last keyframe.", "animation.remove", Value::Null, false);
-        });
-        col(ui, |ui| {
-            small(ui, app, "run", "Play", "Play the animation.", "ui.animationPlay", Value::Null, app.ws.playing.is_some());
-            small(ui, app, "export", "Export", "Export the animation as PNG frames (zip).", "ui.exportAnimation", Value::Null, false);
-        });
-    });
-    group(ui, "Time", |ui| {
-        big(
-            ui,
-            app,
-            "time_slider",
-            "Time\nSlider",
-            "Show layers through time: only the features whose date falls in the slider's window, and dated imagery for its date.",
-            "ui.timeSlider",
-            Value::Null,
-            crate::timebar::open(app),
-            false,
-        );
-    });
-    group(ui, "Profile", |ui| {
-        big(
-            ui,
-            app,
-            "measure",
-            "Profile",
-            "Elevation profiles along lines, cross sections and more.",
-            "ui.pane.profile",
-            Value::Null,
-            app.ui.right == Some(RightPane::Profile),
-            false,
-        );
-        // A Zarr series is read by the desktop app (the web app can't read one yet).
-        if !cfg!(target_arch = "wasm32") {
-            big(
-                ui,
-                app,
-                "measure",
-                "Time\nSeries",
-                "A Zarr variable's values through time at points clicked on the map.",
-                "ui.pane.timeSeries",
-                Value::Null,
-                app.ui.right == Some(RightPane::TimeSeries),
-                false,
-            );
-        }
     });
 }
 
 /// The Data tab: bringing data in, tables, fields, queries, relationships and export.
 fn data_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    layer_templates_group(app, ui);
     if active_layer(app).is_some_and(|l| l.is_raster()) {
         raster_data_groups(app, ui);
     } else {
         feature_data_groups(app, ui);
     }
     offline_group(app, ui);
-    feature_cache_group(app, ui);
 }
 
 /// The Style tab: the drawing of the layer selected in Layers (its symbology, labels and
@@ -2227,182 +2001,12 @@ fn style_tab(app: &mut RustGisApp, ui: &mut Ui) {
 /// The Analyze tab: geoprocessing, workflows, imagery and notebooks.
 fn analyze_tab(app: &mut RustGisApp, ui: &mut Ui) {
     analysis_groups(app, ui);
-    notebook_group(app, ui);
     imagery_groups(app, ui);
 }
 
-/// The Publish tab: the open layout's groups first, then reports, presentations, export and
-/// sharing.
+/// The Publish tab: map export, reports, presentations and sharing. Layouts have their own tab.
 fn publish_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    layout_groups(app, ui);
-    report_group(app, ui);
-    presentation_group(app, ui);
-    share_groups(app, ui);
-    thumbnail_group(app, ui);
-}
-
-/// The layer selected in Layers.
-fn active_layer(app: &RustGisApp) -> Option<&rustgis_engine::map::Layer> {
-    app.session.active_layer.and_then(|id| app.session.map().layer(id))
-}
-
-fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    let editing = app.session.map().editing.clone();
-    let pane = app.ui.right == Some(RightPane::Editing);
-    group(ui, "Manage Edits", |ui| {
-        big(ui, app, "edit", "Edit", "Turn editing on or off for the map.", "edit.enable", Value::Null, editing.settings.enabled, false);
-        big(ui, app, "save", "Save", "Save the project with your edits.", "ui.save", Value::Null, false, false);
-        col(ui, |ui| {
-            small(ui, app, "undo", "Undo", "Undo the last change.", "edit.undo", Value::Null, false);
-            small(ui, app, "redo", "Redo", "Redo the change you undid.", "edit.redo", Value::Null, false);
-            small(ui, app, "history", "Status", "Edits since the project was saved.", "ui.pane.editing", Value::Null, pane);
-        });
-        col(ui, |ui| {
-            small(ui, app, "settings", "Settings", "Editing settings.", "ui.pane.editing", Value::Null, pane);
-            small(
-                ui,
-                app,
-                "point_tool",
-                "Templates",
-                "Feature templates: default values for new features.",
-                "ui.pane.editing",
-                Value::Null,
-                pane,
-            );
-            small_menu(ui, app, "polygon_tool", "Topology", "Topology rules and the errors they find.", |ui, app| {
-                menu_item(ui, app, "settings", "Topology Options…", "ui.pane.editing", Value::Null);
-                if ui.button(tl!("Error Inspector (validate)")).clicked() {
-                    let _ = app.run("topology.validate", Value::Null);
-                    app.ui.open_right(RightPane::Editing);
-                    ui.close();
-                }
-            });
-        });
-    });
-    group(ui, "Snapping", |ui| {
-        big(
-            ui,
-            app,
-            "goto_xy",
-            "Snapping",
-            "Snap new vertices to nearby vertices, edges and line ends.",
-            "edit.snapping",
-            Value::Null,
-            editing.snapping.enabled,
-            false,
-        );
-    });
-    group(ui, "Features", |ui| {
-        let gt = app.session.active_layer.and_then(|id| app.session.map().layer(id)).map(|l| l.geometry_type());
-        let (tool, icon) = match gt {
-            Some(GeometryType::Polyline) => (Tool::CreateLine, "line_tool"),
-            Some(GeometryType::Polygon) => (Tool::CreatePolygon, "polygon_tool"),
-            _ => (Tool::CreatePoint, "point_tool"),
-        };
-        let checked = app.session.tool.creates();
-        let r = big(
-            ui,
-            app,
-            icon,
-            "Create",
-            "Draw new features in the selected layer. Double-click to finish lines and polygons.",
-            "tool.set",
-            json!({"tool": tool.code()}),
-            checked,
-            false,
-        );
-        if r.clicked() {
-            app.map.cancel_sketch();
-        }
-        big(ui, app, "delete", "Delete", "Delete the selected features.", "edit.delete", Value::Null, false, false);
-        let r = big(
-            ui,
-            app,
-            "vertices",
-            "Edit\nVertices",
-            "Drag the selected features' vertices to move them, click an edge to add one, Delete to remove one.",
-            "tool.set",
-            json!({"tool": "editVertices"}),
-            app.session.tool == Tool::EditVertices,
-            false,
-        );
-        if r.clicked() {
-            app.map.cancel_sketch();
-        }
-        big(
-            ui,
-            app,
-            "calc_geom",
-            "Modify",
-            "Move, rotate, scale, merge, explode, split or flip the selected features.",
-            "ui.pane.editing",
-            Value::Null,
-            pane,
-            false,
-        );
-    });
-    group(ui, "Tools", |ui| {
-        big_menu(ui, app, "tools", "Editor\nTools", "Every editing tool.", |ui, app| {
-            for (label, id, p) in [
-                ("Merge", "edit.merge", Value::Null),
-                ("Explode", "edit.explode", Value::Null),
-                ("Flip Line", "edit.flip", Value::Null),
-                ("Rotate 90°", "edit.rotate", json!({"angle": 90})),
-                ("Scale ×2", "edit.scale", json!({"factor": 2})),
-                ("Scale ×½", "edit.scale", json!({"factor": 0.5})),
-            ] {
-                menu_item(ui, app, "calc_geom", label, id, p);
-            }
-            if ui.button(tl!("Split (click the line)")).clicked() {
-                app.map.split_mode = true;
-                ui.close();
-            }
-            menu_item(ui, app, "vertices", "Edit Vertices", "tool.set", json!({"tool": "editVertices"}));
-            menu_item(ui, app, "calc_geom", "Move, Rotate, Scale…", "ui.pane.editing", Value::Null);
-        });
-    });
-    group(ui, "Elevation", |ui| {
-        let mode = match &editing.settings.elevation {
-            rustgis_engine::map::design::Elevation::None => "None",
-            rustgis_engine::map::design::Elevation::Constant(_) => "Constant",
-            rustgis_engine::map::design::Elevation::Surface(_) => "Surface",
-        };
-        small_menu(ui, app, "relief", mode, "Where new features get their elevation (the z field).", |ui, app| {
-            if ui.button(tl!("None")).clicked() {
-                let _ = app.run("edit.elevation", json!({"mode": "none"}));
-                ui.close();
-            }
-            menu_item(ui, app, "relief", "Constant…", "ui.pane.editing", Value::Null);
-            let rasters: Vec<String> = app.session.map().layers.iter().filter(|l| l.is_raster()).map(|l| l.name.clone()).collect();
-            for r in rasters {
-                if ui.button(crate::i18n::fmt("Surface: {layer}", &[("layer", &r)])).clicked() {
-                    let _ = app.run("edit.elevation", json!({"mode": "surface", "surface": r}));
-                    ui.close();
-                }
-            }
-        });
-    });
-    group(ui, "Corrections", |ui| {
-        let on = editing.settings.ground_to_grid.is_some();
-        big(
-            ui,
-            app,
-            "scale_range",
-            "Ground\nTo Grid",
-            "Scale and rotate entered distances and directions to the grid.",
-            "ui.pane.editing",
-            Value::Null,
-            on,
-            false,
-        );
-    });
-    graphics_group(app, ui);
-    graphics_and_text_group(app, ui);
-    clipboard_group(app, ui);
-}
-
-fn share_groups(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Output", |ui| {
+    group(ui, "Export", |ui| {
         big(
             ui,
             app,
@@ -2410,17 +2014,6 @@ fn share_groups(app: &mut RustGisApp, ui: &mut Ui) {
             "Export\nMap",
             "Export the map view as a PNG image (with labels and a scale bar).",
             "ui.exportMap",
-            Value::Null,
-            false,
-            false,
-        );
-        big(
-            ui,
-            app,
-            "export_layer",
-            "Export\nFeatures",
-            "Export the selected layer to GeoJSON or CSV.",
-            "ui.exportLayer",
             Value::Null,
             false,
             false,
@@ -2446,36 +2039,132 @@ fn share_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 Value::Null,
                 false,
             );
-            small_menu(ui, app, "print", "Report", "Export the report, or save it as a report file or template.", |ui, app| {
-                menu_item(ui, app, "print", "Export Report…", "ui.exportReport", Value::Null);
-                menu_item(ui, app, "save_as", "Save As Report File…", "ui.saveItem", json!({"kind": "report"}));
-                menu_item(ui, app, "save_as", "Save As Report Template…", "ui.saveItem", json!({"kind": "reportTemplate"}));
-            });
-            small_menu(
-                ui,
-                app,
-                "web_map",
-                "Presentation",
-                "Export the presentation as a slideshow or PDF, or save it as a file.",
-                |ui, app| {
-                    menu_item(ui, app, "web_map", "Export Presentation…", "ui.exportPresentation", Value::Null);
-                    menu_item(ui, app, "save_as", "Save As Presentation File…", "ui.saveItem", json!({"kind": "presentation"}));
-                },
-            );
+        });
+    });
+    report_group(app, ui);
+    presentation_group(app, ui);
+    share_groups(app, ui);
+}
+
+/// The layer selected in Layers.
+fn active_layer(app: &RustGisApp) -> Option<&rustgis_engine::map::Layer> {
+    app.session.active_layer.and_then(|id| app.session.map().layer(id))
+}
+
+fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
+    let editing = app.session.map().editing.clone();
+    group(ui, "Manage Edits", |ui| {
+        big(ui, app, "edit", "Edit", "Turn editing on or off for the map.", "edit.enable", Value::Null, editing.settings.enabled, false);
+        big(ui, app, "save", "Save", "Save the project with your edits.", "ui.save", Value::Null, false, false);
+        col(ui, |ui| {
+            small(ui, app, "undo", "Undo", "Undo the last change.", "edit.undo", Value::Null, false);
+            small(ui, app, "redo", "Redo", "Redo the change you undid.", "edit.redo", Value::Null, false);
             small(
                 ui,
                 app,
-                "export_layer",
-                "Export To 3D",
-                "Export the selected layer as a 3D model (OBJ), polygons extruded.",
-                "ui.saveItem",
-                json!({"kind": "obj"}),
-                false,
+                "pane_right",
+                "Editing Pane",
+                "Templates, topology and editing settings.",
+                "ui.pane.editing",
+                Value::Null,
+                app.ui.right == Some(RightPane::Editing),
             );
         });
+        col(ui, |ui| {
+            small(ui, app, "polygon_tool", "Validate Topology", "Validate topology rules.", "topology.validate", Value::Null, false);
+        });
     });
-    group(ui, "Package", |ui| {
+    group(ui, "Selection", |ui| {
+        tool_btn(ui, app, "select", "Select", "Click or drag a box to select features. Shift adds, Ctrl removes.", Tool::Select);
+        col(ui, |ui| {
+            small(ui, app, "clear_sel", "Clear", "Clear the selection in every layer.", "select.clear", Value::Null, false);
+        });
+    });
+    group(ui, "Options", |ui| {
         big(
+            ui,
+            app,
+            "goto_xy",
+            "Snapping",
+            "Snap new vertices to nearby vertices, edges and line ends.",
+            "edit.snapping",
+            Value::Null,
+            editing.snapping.enabled,
+            false,
+        );
+        col(ui, |ui| {
+            small_menu(ui, app, "relief", "Elevation", "Where new features get their elevation.", |ui, app| {
+                menu_item(ui, app, "", "None", "edit.elevation", json!({"mode": "none"}));
+                menu_item(ui, app, "relief", "Constant…", "ui.pane.editing", Value::Null);
+                let rasters: Vec<String> = app.session.map().layers.iter().filter(|l| l.is_raster()).map(|l| l.name.clone()).collect();
+                for name in rasters {
+                    menu_item(
+                        ui,
+                        app,
+                        "relief",
+                        &crate::i18n::fmt("Surface: {layer}", &[("layer", &name)]),
+                        "edit.elevation",
+                        json!({"mode": "surface", "surface": name}),
+                    );
+                }
+            });
+        });
+    });
+    group(ui, "Features", |ui| {
+        let gt = active_layer(app).map(|l| l.geometry_type());
+        let (tool, icon) = match gt {
+            Some(GeometryType::Polyline) => (Tool::CreateLine, "line_tool"),
+            Some(GeometryType::Polygon) => (Tool::CreatePolygon, "polygon_tool"),
+            _ => (Tool::CreatePoint, "point_tool"),
+        };
+        if big(
+            ui,
+            app,
+            icon,
+            "Create",
+            "Draw new features in the selected layer.",
+            "tool.set",
+            json!({"tool": tool.code()}),
+            app.session.tool.creates(),
+            false,
+        )
+        .clicked()
+        {
+            app.map.cancel_sketch();
+        }
+        tool_btn(
+            ui,
+            app,
+            "vertices",
+            "Edit\nVertices",
+            "Drag vertices, click an edge to add one, Delete to remove one.",
+            Tool::EditVertices,
+        );
+        big(ui, app, "delete", "Delete", "Delete the selected features.", "edit.delete", Value::Null, false, false);
+        big_menu(ui, app, "tools", "Editor\nTools", "Merge, transform or split selected features.", |ui, app| {
+            for (label, id, params) in [
+                ("Merge", "edit.merge", Value::Null),
+                ("Explode", "edit.explode", Value::Null),
+                ("Flip Line", "edit.flip", Value::Null),
+                ("Rotate 90°", "edit.rotate", json!({"angle": 90})),
+                ("Scale ×2", "edit.scale", json!({"factor": 2})),
+                ("Scale ×½", "edit.scale", json!({"factor": 0.5})),
+            ] {
+                menu_item(ui, app, "calc_geom", label, id, params);
+            }
+            if ui.button(tl!("Split (click the line)")).clicked() {
+                app.map.split_mode = true;
+                ui.close();
+            }
+        });
+    });
+    graphics_group(app, ui);
+    clipboard_group(app, ui);
+}
+
+fn share_groups(app: &mut RustGisApp, ui: &mut Ui) {
+    group(ui, "Share", |ui| {
+        big_split_menu(
             ui,
             app,
             "package",
@@ -2484,34 +2173,22 @@ fn share_groups(app: &mut RustGisApp, ui: &mut Ui) {
             "ui.saveItem",
             json!({"kind": "projectPackage"}),
             false,
-            false,
+            "Project Package options",
+            "Choose the kind of package to save.",
+            true,
+            |ui, app| {
+                for (icon, label, kind) in [
+                    ("package", "Project", "projectPackage"),
+                    ("map", "Map", "mapPackage"),
+                    ("map", "Mobile Map", "mobilePackage"),
+                    ("history", "Results", "gpPackage"),
+                    ("modelbuilder", "Deep Learning Model", "dlPackage"),
+                ] {
+                    menu_item(ui, app, icon, label, "ui.saveItem", json!({"kind": kind}));
+                }
+            },
         );
-        col(ui, |ui| {
-            small(ui, app, "map", "Map", "Bundle the active map and its data.", "ui.saveItem", json!({"kind": "mapPackage"}), false);
-            small(
-                ui,
-                app,
-                "map",
-                "Mobile Map",
-                "Bundle the visible layers, with simplified geometry for phones and tablets.",
-                "ui.saveItem",
-                json!({"kind": "mobilePackage"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "history",
-                "Results",
-                "Bundle the geoprocessing history with the layers it made.",
-                "ui.saveItem",
-                json!({"kind": "gpPackage"}),
-                false,
-            );
-        });
-    });
-    group(ui, "Share As", |ui| {
-        big(
+        big_split_menu(
             ui,
             app,
             "web_map",
@@ -2520,177 +2197,65 @@ fn share_groups(app: &mut RustGisApp, ui: &mut Ui) {
             "ui.share",
             json!({"kind": "webMap"}),
             false,
-            false,
+            "Web Map options",
+            "Choose the kind of web item to share.",
+            true,
+            |ui, app| {
+                for (icon, label, kind) in [
+                    ("web_map", "Web Map", "webMap"),
+                    ("export_layer", "Web Layer", "webLayer"),
+                    ("symbology", "Web Style", "webStyle"),
+                    ("search", "Locator", "locator"),
+                    ("package", "Geodata Service", "geodataService"),
+                    ("modelbuilder", "Web Tool", "webTool"),
+                    ("globe_view", "Web Scene", "webScene"),
+                    ("graphics_layer", "Web Link Chart", "linkChart"),
+                ] {
+                    menu_item(ui, app, icon, label, "ui.share", json!({"kind": kind}));
+                }
+            },
         );
         col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "export_layer",
-                "Web Layer",
-                "Share the selected layer as an OGC API Features collection with its style.",
-                "ui.share",
-                json!({"kind": "webLayer"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "symbology",
-                "Web Style",
-                "Share the selected layer's symbology as a MapLibre style.",
-                "ui.share",
-                json!({"kind": "webStyle"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "search",
-                "Locator",
-                "Share the selected layer's names as a place-search locator.",
-                "ui.share",
-                json!({"kind": "locator"}),
-                false,
-            );
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "package",
-                "Geodata Service",
-                "Share every layer and table as OGC API Features collections.",
-                "ui.share",
-                json!({"kind": "geodataService"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "modelbuilder",
-                "Web Tool",
-                "Share the last model as a tool file.",
-                "ui.share",
-                json!({"kind": "webTool"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "globe_view",
-                "Web Scene",
-                "Share the map in 3D (glTF), polygons extruded.",
-                "ui.share",
-                json!({"kind": "webScene"}),
-                false,
-            );
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "graphics_layer",
-                "Web Link Chart",
-                "Share the map's relationships as a link chart page.",
-                "ui.share",
-                json!({"kind": "linkChart"}),
-                false,
-            );
             small(
                 ui,
                 app,
                 "history",
-                "Jobs",
+                "Share Jobs",
                 "Shares made, with Manage tools to update them.",
                 "ui.pane.shares",
                 Value::Null,
-                app.ui.right == Some(RightPane::Shares),
-            );
-            small(
-                ui,
-                app,
-                "modelbuilder",
-                "Deep Learning",
-                "Package a trained deep learning model.",
-                "ui.saveItem",
-                json!({"kind": "dlPackage"}),
-                false,
+                app.ui.right_open.contains(&RightPane::Shares),
             );
         });
-    });
-    group(ui, "Layout", |ui| {
-        big(ui, app, "export", "Export\nLayout", "Export the open layout as PDF or PNG.", "ui.exportLayout", Value::Null, false, false);
-        big(
-            ui,
-            app,
-            "print",
-            "Print\nLayout",
-            "Print the open layout (through the system's PDF viewer).",
-            "ui.printLayout",
-            Value::Null,
-            false,
-            false,
-        );
     });
     group(ui, "Save As", |ui| {
-        big(ui, app, "save_as", "Project", "Save the project under a new name.", "ui.saveAs", Value::Null, false, false);
-        big(ui, app, "new_layout", "Layout\nFile", "Save the open layout as a layout file.", "ui.saveLayout", Value::Null, false, false);
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "map",
-                "Map File",
-                "Save the active map (with its data) as a map file.",
-                "ui.saveItem",
-                json!({"kind": "map"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "add_data",
-                "Layer File",
-                "Save the selected layer with its symbology as a layer file.",
-                "ui.saveItem",
-                json!({"kind": "layer"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "symbology",
-                "Style Items",
-                "Save the project's styles to a style file.",
-                "ui.saveItem",
-                json!({"kind": "styles"}),
-                false,
-            );
-            small(
-                ui,
-                app,
-                "symbology",
-                "Color Ramps",
-                "Save the project's custom color ramps to a color ramp file.",
-                "ui.saveItem",
-                json!({"kind": "ramps"}),
-                false,
-            );
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "save_as",
-                "Project Template",
-                "Save the project's setup, without its features, as a template.",
-                "ui.saveItem",
-                json!({"kind": "template"}),
-                false,
-            );
-            small(ui, app, "run", "Task Item", "Save the last task as a task file.", "ui.saveItem", json!({"kind": "task"}), false);
-        });
+        big_split_menu(
+            ui,
+            app,
+            "save_as",
+            "Save As",
+            "Save the project under a new name.",
+            "ui.saveAs",
+            Value::Null,
+            false,
+            "Save As options",
+            "Save a project or an item file.",
+            true,
+            |ui, app| {
+                menu_item(ui, app, "save_as", "Project…", "ui.saveAs", Value::Null);
+                menu_item(ui, app, "new_layout", "Layout File", "ui.saveLayout", Value::Null);
+                for (icon, label, kind) in [
+                    ("map", "Map File", "map"),
+                    ("add_data", "Layer File", "layer"),
+                    ("symbology", "Style Items", "styles"),
+                    ("symbology", "Color Ramps", "ramps"),
+                    ("save_as", "Project Template", "template"),
+                    ("run", "Task Item", "task"),
+                ] {
+                    menu_item(ui, app, icon, label, "ui.saveItem", json!({"kind": kind}));
+                }
+            },
+        );
     });
 }
 
@@ -2744,14 +2309,10 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
         col(ui, |ui| {
             let snap = !app.layout.no_snap;
             let desc = "Snap elements to guides, the page and each other as you move or resize them. Hold Alt to place one freely.";
-            if small(ui, app, "keep_tool", "Snap", desc, "ui.menu", Value::Null, snap).clicked() {
-                app.layout.no_snap = snap;
-            }
+            small(ui, app, "keep_tool", "Snap", desc, "ui.layoutSnap", Value::Null, snap);
             let shown = !app.layout.no_rulers;
             let desc = "Show rulers. Drag from a ruler to add a guide; drag a guide back onto it to remove it.";
-            if small(ui, app, "measure", "Rulers", desc, "ui.menu", Value::Null, shown).clicked() {
-                app.layout.no_rulers = shown;
-            }
+            small(ui, app, "measure", "Rulers", desc, "ui.layoutRulers", Value::Null, shown);
             if !layout.guides.is_empty() {
                 small(
                     ui,
@@ -2767,27 +2328,45 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
         });
     });
     group(ui, "Map Frames", |ui| {
-        big_menu(ui, app, "map", "Map\nFrame", "Add a map frame showing a map of the project.", |ui, app| {
-            for (shape, label) in [("rectangle", "Rectangle"), ("circle", "Circle"), ("ellipse", "Ellipse")] {
-                if ui.button(tl!(label)).clicked() {
-                    if let Ok(v) = app.run("layout.addFrame", json!({"layout": li, "shape": shape})) {
-                        app.layout.selected = v["element"].as_u64().map(|v| v as u32);
+        let draw_frame = app.layout.tool.is_some();
+        let (primary, _) = big_split_menu(
+            ui,
+            app,
+            "map",
+            "Map\nFrame",
+            "Add a rectangular map frame showing a map of the project.",
+            "layout.addFrame",
+            json!({"layout": li, "shape": "rectangle"}),
+            draw_frame,
+            "Map Frame options",
+            "Choose a map frame shape.",
+            true,
+            |ui, app| {
+                for (shape, label) in [("rectangle", "Rectangle"), ("circle", "Circle"), ("ellipse", "Ellipse")] {
+                    if ui.button(tl!(label)).clicked() {
+                        app.layout.cancel_tool();
+                        if let Ok(v) = app.run("layout.addFrame", json!({"layout": li, "shape": shape})) {
+                            app.layout.selected = v["element"].as_u64().map(|v| v as u32);
+                        }
+                        ui.close();
                     }
-                    ui.close();
                 }
-            }
-            for (shape, label) in [("polygon", "Polygon (draw)"), ("lasso", "Lasso (draw)")] {
-                if ui.button(tl!(label)).clicked() {
-                    let _ = app.run("ui.layoutTool", json!({"shape": shape}));
-                    ui.close();
+                for (shape, label) in [("polygon", "Polygon (draw)"), ("lasso", "Lasso (draw)")] {
+                    if ui.radio(app.layout.tool == Some(shape), tl!(label)).clicked() {
+                        app.layout.cancel_tool();
+                        let _ = app.run("ui.layoutTool", json!({"shape": shape}));
+                        ui.close();
+                    }
                 }
-            }
-        });
+            },
+        );
+        if primary.clicked() {
+            app.layout.cancel_tool();
+            app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
+        }
         let navigate = app.layout.navigate;
         let desc = "Drag inside map frames to pan their maps and turn the wheel to zoom them, instead of moving them. Esc stops.";
-        if big(ui, app, "explore", "Pan/Zoom\nMap", desc, "ui.menu", Value::Null, navigate, false).clicked() {
-            app.layout.navigate = !navigate;
-        }
+        big(ui, app, "explore", "Pan/Zoom\nMap", desc, "ui.layoutNavigate", Value::Null, navigate, false);
         col(ui, |ui| {
             let has_grid =
                 frame.and_then(|f| layout.element(f)).is_some_and(|e| matches!(&e.kind, ElementKind::MapFrame { grid: Some(_), .. }));
@@ -2797,13 +2376,13 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 "graticule",
                 "Grid",
                 "Draw a labelled latitude/longitude grid over the map frame.",
-                "ui.menu",
-                Value::Null,
+                "layout.addElement",
+                json!({"layout": li, "frame": frame, "kind": "grid", "off": has_grid}),
                 has_grid,
             )
             .clicked()
             {
-                add(app, json!({"kind": "grid", "off": has_grid}));
+                app.layout.selected = frame;
             }
             let others: Vec<(u32, String)> = layout
                 .elements
@@ -2877,28 +2456,63 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
             });
         }
     });
-    group(ui, "Map Surrounds", |ui| {
+    group(ui, "Surrounds", |ui| {
         for (icon, label, kind, desc) in [
             ("north_arrow", "North\nArrow", "northArrow", "Add a north arrow for the map frame."),
             ("scale_bar", "Scale\nBar", "scaleBar", "Add a scale bar for the map frame."),
             ("legend", "Legend", "legend", "Add a legend of the map frame's layers."),
-            ("colorbar", "Colorbar", "colorbar", "Add a colorbar of a raster layer's colour scale in the map frame."),
         ] {
-            if big(ui, app, icon, label, desc, "ui.menu", Value::Null, false, false).clicked() {
-                add(app, json!({"kind": kind}));
+            if big(ui, app, icon, label, desc, "layout.addElement", json!({"layout": li, "frame": frame, "kind": kind}), false, false)
+                .clicked()
+            {
+                app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
             }
         }
         col(ui, |ui| {
-            if small(ui, app, "table", "Table Frame", "Add the attribute table of a layer in the map frame.", "ui.menu", Value::Null, false)
-                .clicked()
+            if small(
+                ui,
+                app,
+                "colorbar",
+                "Colorbar",
+                "Add a colorbar of a raster layer's colour scale in the map frame.",
+                "layout.addElement",
+                json!({"layout": li, "frame": frame, "kind": "colorbar"}),
+                false,
+            )
+            .clicked()
             {
-                add(app, json!({"kind": "table"}));
+                app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
             }
-            if small(ui, app, "chart", "Chart Frame", "Add a bar chart of a layer's numeric field.", "ui.menu", Value::Null, false)
-                .clicked()
+            if small(
+                ui,
+                app,
+                "table",
+                "Table Frame",
+                "Add the attribute table of a layer in the map frame.",
+                "layout.addElement",
+                json!({"layout": li, "frame": frame, "kind": "table"}),
+                false,
+            )
+            .clicked()
             {
-                add(app, json!({"kind": "chart"}));
+                app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
             }
+            if small(
+                ui,
+                app,
+                "chart",
+                "Chart Frame",
+                "Add a bar chart of a layer's numeric field.",
+                "layout.addElement",
+                json!({"layout": li, "frame": frame, "kind": "chart"}),
+                false,
+            )
+            .clicked()
+            {
+                app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
+            }
+        });
+        col(ui, |ui| {
             small_menu(ui, app, "add_data", "More", "Additional surrounds.", |ui, app| {
                 if ui.button(tl!("Neatline")).clicked() {
                     add(app, json!({"kind": "rectangle"}));
@@ -2911,70 +2525,89 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
             });
         });
     });
-    group(ui, "Shapes", |ui| {
-        // In the middle of the page, ready to be moved and sized.
-        let (pw, ph) = (layout.width, layout.height);
-        let (w, h) = (pw * 0.25, ph * 0.2);
-        let desc = "Add a rectangle, to frame or highlight part of the page.";
-        if big(ui, app, "g_rect", "Rectangle", desc, "ui.menu", Value::Null, false, false).clicked() {
-            add(app, json!({"kind": "rectangle", "x": (pw - w) / 2.0, "y": (ph - h) / 2.0, "w": w, "h": h}));
-        }
-        col(ui, |ui| {
-            if small(ui, app, "g_circle", "Circle", "Add a circle.", "ui.menu", Value::Null, false).clicked() {
-                add(app, json!({"kind": "circle"}));
-            }
-            if small(ui, app, "g_ellipse", "Ellipse", "Add an ellipse.", "ui.menu", Value::Null, false).clicked() {
-                add(app, json!({"kind": "ellipse"}));
-            }
-        });
-        col(ui, |ui| {
-            small_menu(ui, app, "g_line", "Line", "Add a straight line.", |ui, app| {
-                for d in rustgis_engine::map::layout::LineDir::ALL {
-                    if ui.button(tl!(d.label())).clicked() {
-                        add(app, json!({"kind": "line", "dir": d.code()}));
+    group(ui, "Graphics", |ui| {
+        let (primary, _) = big_split_menu(
+            ui,
+            app,
+            "g_text",
+            "Text",
+            "Add a text element.",
+            "layout.addElement",
+            json!({"layout": li, "frame": frame, "kind": "text"}),
+            false,
+            "Text options",
+            "Add text that updates: page, date, scale, map and more.",
+            true,
+            |ui, app| {
+                for (token, what) in [
+                    ("{date}", "Current date"),
+                    ("{time}", "Current time"),
+                    ("{scale}", "Map scale"),
+                    ("{map}", "Map name"),
+                    ("{crs}", "Coordinate system"),
+                    ("{page} / {pages}", "Page number"),
+                    ("{pageName}", "Map series page name"),
+                    ("{layout}", "Layout name"),
+                ] {
+                    if ui.button(format!("{}  {token}", tl!(what))).clicked() {
+                        add(app, json!({"kind": "dynamicText", "text": token}));
                         ui.close();
                     }
                 }
-            });
-            // Pointing right; the round handle above it turns it any way.
-            let desc = "Add an arrow. Turn it with the round handle above it, or set its angle in its properties.";
-            if small(ui, app, "g_arrow", "Arrow", desc, "ui.menu", Value::Null, false).clicked() {
-                add(app, json!({"kind": "arrow", "angle": 0}));
-            }
-        });
-    });
-    group(ui, "Text", |ui| {
-        if big(ui, app, "g_text", "Text", "Add a text element.", "ui.menu", Value::Null, false, false).clicked() {
-            add(app, json!({"kind": "text"}));
+            },
+        );
+        if primary.clicked() {
+            app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
         }
-        big_menu(ui, app, "dynamic_text", "Dynamic\nText", "Add text that updates: page, date, scale, map and more.", |ui, app| {
-            for (token, what) in [
-                ("{date}", "Current date"),
-                ("{time}", "Current time"),
-                ("{scale}", "Map scale"),
-                ("{map}", "Map name"),
-                ("{crs}", "Coordinate system"),
-                ("{page} / {pages}", "Page number"),
-                ("{pageName}", "Map series page name"),
-                ("{layout}", "Layout name"),
-            ] {
-                if ui.button(format!("{}  {token}", tl!(what))).clicked() {
-                    add(app, json!({"kind": "dynamicText", "text": token}));
+        big(ui, app, "picture", "Picture", "Add a PNG or JPEG picture to the page.", "ui.layoutPicture", Value::Null, false, false);
+        // The default rectangle sits in the middle of the page, ready to move and size.
+        let (pw, ph) = (layout.width, layout.height);
+        let (w, h) = (pw * 0.25, ph * 0.2);
+        let (primary, _) = big_split_menu(
+            ui,
+            app,
+            "g_rect",
+            "Shapes",
+            "Add a rectangle, to frame or highlight part of the page.",
+            "layout.addElement",
+            json!({"layout": li, "kind": "rectangle", "x": (pw - w) / 2.0, "y": (ph - h) / 2.0, "w": w, "h": h}),
+            false,
+            "Shapes options",
+            "Add a rectangle, circle, ellipse, line or arrow.",
+            true,
+            |ui, app| {
+                if ui.button(tl!("Rectangle")).clicked() {
+                    add(app, json!({"kind": "rectangle", "x": (pw - w) / 2.0, "y": (ph - h) / 2.0, "w": w, "h": h}));
                     ui.close();
                 }
-            }
-        });
-        if big(ui, app, "picture", "Picture", "Add a PNG or JPEG picture to the page.", "ui.layoutPicture", Value::Null, false, false)
-            .clicked()
-        {}
+                for (kind, label) in [("circle", "Circle"), ("ellipse", "Ellipse")] {
+                    if ui.button(tl!(label)).clicked() {
+                        add(app, json!({"kind": kind}));
+                        ui.close();
+                    }
+                }
+                ui.menu_button(tl!("Line"), |ui| {
+                    for d in rustgis_engine::map::layout::LineDir::ALL {
+                        if ui.button(tl!(d.label())).clicked() {
+                            add(app, json!({"kind": "line", "dir": d.code()}));
+                            ui.close();
+                        }
+                    }
+                });
+                if ui.button(tl!("Arrow")).clicked() {
+                    add(app, json!({"kind": "arrow", "angle": 0}));
+                    ui.close();
+                }
+            },
+        );
+        if primary.clicked() {
+            app.layout.selected = app.session.project.layouts.get(li).and_then(|l| l.elements.last()).map(|e| e.id);
+        }
     });
-    group(ui, "Export", |ui| {
+    group(ui, "Output", |ui| {
         big(ui, app, "export", "Export", "Export the layout as PDF or PNG.", "ui.exportLayout", Value::Null, false, false);
         big(ui, app, "print", "Print", "Print the layout.", "ui.printLayout", Value::Null, false, false);
-        col(ui, |ui| {
-            small(ui, app, "save_as", "Save Layout File", "Save the layout as a layout file.", "ui.saveLayout", Value::Null, false);
-            small(ui, app, "map", "Show Map", "Close the layout and show the map.", "layout.close", Value::Null, false);
-        });
+        big(ui, app, "map", "Close\nLayout", "Close the layout and show the map.", "layout.close", Value::Null, false, false);
     });
 }
 
@@ -2996,20 +2629,10 @@ fn plugins_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 ui,
                 app,
                 "plugin_add",
-                "Install From File",
+                "Install From File…",
                 "Install a plugin from a .rgplugin file.",
                 "ui.installPlugin",
                 Value::Null,
-                false,
-            );
-            small(
-                ui,
-                app,
-                "search",
-                "Browse Plugins",
-                "Find plugins in the RustGIS plugin registry.",
-                "ui.plugins",
-                json!({"open": true, "tab": "browse"}),
                 false,
             );
         });
@@ -3128,7 +2751,7 @@ fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
         let hidden = app.ui.hidden_tabs.clone();
         // RustGIS's tabs and plugins' tabs.
         let mut all: Vec<(String, String)> =
-            TABS.iter().filter(|t| !FIXED_TABS.contains(*t)).map(|t| (t.to_string(), tl!(*t).to_string())).collect();
+            TABS.iter().filter(|t| **t != "Layout" && !FIXED_TABS.contains(*t)).map(|t| (t.to_string(), tl!(*t).to_string())).collect();
         all.extend(plugin_tabs(app));
         big_menu(ui, app, "settings", "Ribbon", "Choose which tabs the ribbon shows.", move |ui, app| {
             for (tab, caption) in &all {
@@ -3146,6 +2769,41 @@ fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     let _ = app.run("ui.quickAccess", json!({"command": id}));
                 }
             }
+        });
+    });
+    group(ui, "Display", |ui| {
+        col(ui, |ui| {
+            small(ui, app, "dark", "Dark Mode", "Switch between the light and dark theme.", "ui.theme", Value::Null, app.ui.dark);
+            small(ui, app, "globe_view", "GPU Rendering", "Draw the map with the GPU.", "ui.map.gpu", Value::Null, app.map.gpu_enabled);
+            small(
+                ui,
+                app,
+                "identify",
+                "Item Pop-ups",
+                "Show details when hovering items in the Browser view.",
+                "ui.itemPopups",
+                Value::Null,
+                app.ws.item_popups,
+            );
+        });
+        col(ui, |ui| {
+            small_menu(ui, app, "measure", "Measurement Units", "Choose the units for measurements and the map scale bar.", |ui, app| {
+                for (units, label, imperial) in [("metric", "Metric", false), ("imperial", "Imperial", true)] {
+                    if ui.radio(app.ui.measurement_imperial == imperial, tl!(label)).clicked() {
+                        let _ = app.run("ui.measurementUnits", json!({"units": units}));
+                        ui.close();
+                    }
+                }
+            });
+            small_menu(ui, app, "add_data", "Feature Cache", "Prepare geometry for the current projection.", |ui, app| {
+                menu_item(ui, app, "add_data", "Fill", "cache.fill", Value::Null);
+                menu_item(ui, app, "clear_sel", "Empty", "cache.empty", Value::Null);
+                menu_item(ui, app, "close", "Cancel", "cache.cancel", Value::Null);
+                let mut auto = app.session.auto_cache;
+                if ui.checkbox(&mut auto, tl!("Auto Cache")).clicked() {
+                    let _ = app.run("cache.auto", Value::Null);
+                }
+            });
         });
     });
     group(ui, "Language", |ui| {
@@ -3285,39 +2943,34 @@ fn start_projection_menu(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 fn help_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Performance", |ui| {
-        big(
-            ui,
-            app,
-            "dra",
-            "Diagnostic\nMonitor",
-            "Frame rate, draw time, data size and memory.",
-            "ui.pane.diagnostics",
-            Value::Null,
-            app.ui.right == Some(RightPane::Diagnostics),
-            false,
-        );
-    });
-    group(ui, "Learn", |ui| {
-        big(ui, app, "help", "Learning\nResources", "Open the RustGIS user guide.", "ui.learn", Value::Null, false, false);
-    });
     group(ui, "Help", |ui| {
-        big(ui, app, "help", "About", "About RustGIS.", "ui.about", Value::Null, false, false);
-        if !cfg!(target_arch = "wasm32") {
-            big(
+        big(ui, app, "help", "Learning\nResources", "Open the RustGIS user guide.", "ui.learn", Value::Null, false, false);
+        big(ui, app, "command", "Command\nSearch", "Find any command by name (Ctrl+K).", "ui.commandSearch", Value::Null, false, false);
+        col(ui, |ui| {
+            small(ui, app, "settings", "Shortcuts", "Keyboard shortcuts.", "ui.shortcuts", Value::Null, false);
+            small(
                 ui,
                 app,
-                "update",
-                "Check for\nUpdates",
-                "See whether a newer RustGIS has been released.",
-                "ui.checkUpdate",
+                "dra",
+                "Diagnostic Monitor",
+                "Frame rate, draw time, data size and memory.",
+                "ui.pane.diagnostics",
                 Value::Null,
-                false,
-                false,
+                app.ui.right_open.contains(&RightPane::Diagnostics),
             );
-        }
-        big(ui, app, "command", "Command\nSearch", "Find any command by name (Ctrl+K).", "ui.commandSearch", Value::Null, false, false);
-        big(ui, app, "settings", "Shortcuts", "Keyboard shortcuts.", "ui.shortcuts", Value::Null, false, false);
+            if !cfg!(target_arch = "wasm32") {
+                small(
+                    ui,
+                    app,
+                    "update",
+                    "Check for Updates",
+                    "See whether a newer RustGIS has been released.",
+                    "ui.checkUpdate",
+                    Value::Null,
+                    false,
+                );
+            }
+        });
     });
 }
 
@@ -3382,7 +3035,7 @@ fn mask_menu(ui: &mut Ui, app: &mut RustGisApp, layer: &rustgis_engine::map::Lay
 /// Masking, display filters, aggregation and extrusion for feature layers.
 fn effects_groups(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map::Layer) {
     let gt = layer.geometry_type();
-    group(ui, "Drawing Effects", |ui| {
+    group(ui, "Effects", |ui| {
         col(ui, |ui| {
             mask_menu(ui, app, layer);
             let filters = layer.display_filters.len();
@@ -3428,9 +3081,9 @@ fn effects_groups(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map
     if gt == GeometryType::Polygon {
         let x = layer.extrusion.clone();
         let numeric: Vec<String> = layer.dataset.fields.iter().filter(|f| f.ty.is_numeric()).map(|f| f.name.clone()).collect();
-        group(ui, "Extrusion", |ui| {
+        group(ui, "3D", |ui| {
             let cur = x.clone();
-            big_menu(ui, app, "polygon_layer", "Type", "Raise polygons by a height or a field.", move |ui, app| {
+            big_menu(ui, app, "polygon_layer", "Extrusion", "Raise polygons by a height or a field.", move |ui, app| {
                 if ui.radio(cur.is_none(), tl!("None")).clicked() {
                     let _ = app.run("layer.extrusion", json!({"type": "none"}));
                     ui.close();
@@ -3469,10 +3122,6 @@ fn effects_groups(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map
                         }
                     });
                 });
-            }
-        });
-        if let Some(xx) = x {
-            group(ui, "Faces", |ui| {
                 col(ui, |ui| {
                     small(
                         ui,
@@ -3494,20 +3143,6 @@ fn effects_groups(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map
                         json!({"lighting": !xx.lighting}),
                         xx.lighting,
                     );
-                });
-            });
-            group(ui, "Light and Shadow", |ui| {
-                col(ui, |ui| {
-                    small(
-                        ui,
-                        app,
-                        "brightness",
-                        "Enable Lighting",
-                        "Light the extruded shapes from the north-west.",
-                        "layer.lightShadow",
-                        json!({"lighting": !xx.lighting}),
-                        xx.lighting,
-                    );
                     small(
                         ui,
                         app,
@@ -3519,156 +3154,67 @@ fn effects_groups(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map
                         xx.shadows,
                     );
                 });
-            });
-        }
+            }
+        });
     }
 }
 
 fn imagery_groups(app: &mut RustGisApp, ui: &mut Ui) {
-    let wf = |section: &str| json!({"section": section});
-    group(ui, "Ortho Mapping", |ui| {
-        big(
-            ui,
-            app,
-            "raster_layer",
-            "New\nWorkspace",
-            "Mosaic the visible rasters into an orthomosaic.",
-            "ui.pane.workflows",
-            wf("ortho"),
-            false,
-            false,
-        );
-        small(ui, app, "settings", "Options", "Workspace cell size and blending.", "ui.pane.workflows", wf("ortho"), false);
-    });
-    group(ui, "Reality Mapping", |ui| {
-        big(
+    group(ui, "Imagery", |ui| {
+        let raster_functions = app.ui.right_open.contains(&RightPane::Workflows)
+            && matches!(app.workflow.section, "rasterFunctions" | "functionEditor" | "indices" | "process" | "pixels");
+        big_split_menu(
             ui,
             app,
             "relief",
-            "New\nWorkspace",
-            "Merge elevation rasters into a surface model and export a 3D mesh.",
+            "Raster\nFunctions",
+            "Slope, aspect, hillshade, NDVI, band math, thresholds.",
             "ui.pane.workflows",
-            wf("reality"),
-            false,
-            false,
+            json!({"section": "rasterFunctions"}),
+            raster_functions,
+            "Raster Functions options",
+            "Raster function editing, indices, processing and pixel editing.",
+            true,
+            |ui, app| {
+                for (icon, label, section) in [
+                    ("bands", "Function Editor", "functionEditor"),
+                    ("stretch", "Indices", "indices"),
+                    ("resample", "Process", "process"),
+                    ("edit", "Pixel Editor", "pixels"),
+                ] {
+                    menu_item(ui, app, icon, label, "ui.pane.workflows", json!({"section": section}));
+                }
+            },
         );
-        small(ui, app, "settings", "Options", "Workspace cell size and blending.", "ui.pane.workflows", wf("reality"), false);
-    });
-    group(ui, "Alignment", |ui| {
-        big(
-            ui,
-            app,
-            "goto_xy",
-            "Georeference",
-            "Place a raster on the map from control points or the view.",
-            "ui.pane.workflows",
-            wf("georeference"),
-            false,
-            false,
-        );
-    });
-    group(ui, "Image Analysis", |ui| {
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "relief",
-                "Raster Functions",
-                "Slope, hillshade, NDVI and more.",
-                "ui.pane.workflows",
-                wf("rasterFunctions"),
-                false,
-            );
-            small(ui, app, "bands", "Function Editor", "Chain raster functions.", "ui.pane.workflows", wf("functionEditor"), false);
+        big_menu(ui, app, "classify", "Classify", "Classify imagery with unsupervised, supervised or deep learning tools.", |ui, app| {
+            for (icon, label, section) in [
+                ("classify", "Classification Wizard", "classify"),
+                ("unique", "Classification Tools", "supervised"),
+                ("modelbuilder", "Deep Learning Tools", "deepLearning"),
+            ] {
+                menu_item(ui, app, icon, label, "ui.pane.workflows", json!({"section": section}));
+            }
         });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "contrast",
-                "Change Detection",
-                "Difference, ratio or percent change between two rasters.",
-                "ui.pane.workflows",
-                wf("change"),
-                false,
-            );
-            small(ui, app, "graduated", "Spectral Analysis", "Every band's value at a pixel.", "ui.pane.workflows", wf("spectral"), false);
-        });
-    });
-    group(ui, "Image Classification", |ui| {
-        big(
-            ui,
-            app,
-            "classify",
-            "Classification\nWizard",
-            "Unsupervised classes (k-means).",
-            "ui.pane.workflows",
-            wf("classify"),
-            false,
-            false,
-        );
-        big(
-            ui,
-            app,
-            "unique",
-            "Classification\nTools",
-            "Classes from training polygons.",
-            "ui.pane.workflows",
-            wf("supervised"),
-            false,
-            false,
-        );
-        big(
-            ui,
-            app,
-            "modelbuilder",
-            "Deep Learning\nTools",
-            "Train a neural network on training polygons and classify every pixel.",
-            "ui.pane.workflows",
-            wf("deepLearning"),
-            false,
-            false,
-        );
-    });
-    group(ui, "Imagery Sharing", |ui| {
-        big(
-            ui,
-            app,
-            "raster_layer",
-            "Create Hosted\nImagery",
-            "Cut a raster into web map tiles (XYZ PNG) with a viewer page.",
-            "ui.pane.workflows",
-            wf("hosted"),
-            false,
-            false,
-        );
-    });
-    group(ui, "Mensuration", |ui| {
-        big(
-            ui,
-            app,
-            "measure",
-            "Mensuration",
-            "Distances along the surface, heights, areas and volumes.",
-            "ui.pane.workflows",
-            wf("mensuration"),
-            false,
-            false,
-        );
-        small(ui, app, "history", "Results", "Measurements so far.", "ui.pane.workflows", wf("mensuration"), false);
-    });
-    group(ui, "Imagery Tools", |ui| {
-        col(ui, |ui| {
-            small(ui, app, "resample", "Process", "Clip a raster to the view, or resample it.", "ui.pane.workflows", wf("process"), false);
-            small(ui, app, "stretch", "Indices", "NDVI, NDWI, SAVI, NBR, NDBI, EVI.", "ui.pane.workflows", wf("indices"), false);
-            small(ui, app, "edit", "Pixel Editor", "Set the pixels inside a polygon.", "ui.pane.workflows", wf("pixels"), false);
+        big_menu(ui, app, "raster_layer", "Imagery\nWorkflows", "Georeference, compare, measure and publish imagery.", |ui, app| {
+            for (icon, label, section) in [
+                ("goto_xy", "Georeference", "georeference"),
+                ("contrast", "Change Detection", "change"),
+                ("graduated", "Spectral Analysis", "spectral"),
+                ("history", "Trend Analysis", "trend"),
+                ("raster_layer", "Ortho Mapping", "ortho"),
+                ("relief", "Reality Mapping", "reality"),
+                ("measure", "Mensuration", "mensuration"),
+                ("raster_layer", "Create Hosted Imagery", "hosted"),
+            ] {
+                menu_item(ui, app, icon, label, "ui.pane.workflows", json!({"section": section}));
+            }
         });
     });
 }
 
-/// The Visibility Range and Effects groups shared by feature and raster layers.
+/// The Visibility group (scale range and transparency) shared by feature and raster layers.
 fn visibility_and_effects(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map::Layer) {
-    group(ui, "Visibility Range", |ui| {
+    group(ui, "Visibility", |ui| {
         ui.vertical(|ui| {
             ui.add_space(6.0);
             for (label, cur, key) in [("Out Beyond", layer.min_scale, "min"), ("In Beyond", layer.max_scale, "max")] {
@@ -3698,8 +3244,6 @@ fn visibility_and_effects(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_eng
             }
         });
         big(ui, app, "scale_range", "Clear\nLimits", "Draw the layer at every scale.", "layer.scaleRange", json!({}), false, false);
-    });
-    group(ui, "Effects", |ui| {
         ui.vertical(|ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -3860,11 +3404,16 @@ fn layer_group(app: &mut RustGisApp, ui: &mut Ui, layer: &rustgis_engine::map::L
                     Value::Null,
                     app.ui.right == Some(RightPane::Symbology),
                 );
-            } else {
-                small(ui, app, "table", "Attribute Table", "Open the layer's table.", "table.open", Value::Null, false);
             }
             small(ui, app, "eye", "Visible", "Show or hide the layer.", "layer.visibility", Value::Null, layer.visible);
             small(ui, app, "delete", "Remove", "Remove the layer from the map.", "layer.remove", Value::Null, false);
+        });
+        col(ui, |ui| {
+            let pr = layer.priority;
+            small_menu(ui, app, "up", "Draw Priority", "Draw the selected layer above or below others.", move |ui, app| {
+                menu_item(ui, app, "up", "Raise Priority", "layer.priority", json!({"value": pr + 1}));
+                menu_item(ui, app, "down", "Lower Priority", "layer.priority", json!({"value": pr - 1}));
+            });
         });
     });
 }
@@ -4178,6 +3727,69 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
             app.ui.right == Some(RightPane::Labeling),
             false,
         );
+        let cur = layer.labels.default.placement;
+        ui.vertical(|ui| {
+            ui.add_space(8.0);
+            let fields: Vec<String> = layer.dataset.fields.iter().map(|f| f.name.clone()).collect();
+            if let Some(f) = crate::widgets::ribbon_combo(ui, "label_field", "Field", &layer.labels.default.field, &fields, 140.0) {
+                let _ = app.run("labels.field", json!({"field": f}));
+            }
+        });
+        big_menu(ui, app, "placement", "Placement", "Where labels sit relative to their features.", |ui, app| {
+            for pl in rustgis_engine::map::LabelPlacement::ALL {
+                if ui.radio(cur == pl, tl!(pl.label())).clicked() {
+                    let _ = app.run("labels.placement", json!({"position": pl.code()}));
+                    ui.close();
+                }
+            }
+        });
+    });
+    group(ui, "Label Text", |ui| {
+        col(ui, |ui| {
+            // The whole range `labels.style` accepts (#457), so a larger label isn't cut back.
+            let mut size = f64::from(layer.labels.default.size);
+            ui.horizontal(|ui| {
+                let input_label = ui.label(egui::RichText::new(tl!("Size")).size(11.5));
+                let range = rustgis_engine::map::symbology::LABEL_SIZE;
+                // Another layer gets a distinct widget, so an in-flight drag cannot move to it.
+                ui.push_id(("label_size", layer.id), |ui| {
+                    if ui.add(egui::DragValue::new(&mut size).range(range).speed(0.1).suffix(" pt")).labelled_by(input_label.id).changed() {
+                        label_size_drag(app, ui, &layer, size);
+                    }
+                });
+            });
+            let mut c = crate::theme::c32(layer.labels.default.color);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("Color")).size(11.5));
+                ui.push_id(("label_color", layer.id), |ui| {
+                    if crate::widgets::color_button(ui, &mut c).changed() {
+                        crate::labelpane::color_drag(app, ui, &layer, None, crate::theme::rgba(c));
+                    }
+                });
+            });
+        });
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "label",
+                "Bold",
+                "Bold label text.",
+                "labels.style",
+                json!({"bold": !layer.labels.default.bold}),
+                layer.labels.default.bold,
+            );
+            small(
+                ui,
+                app,
+                "single",
+                "Halo",
+                "Draw a halo around label text.",
+                "labels.style",
+                json!({"halo": !layer.labels.default.halo}),
+                layer.labels.default.halo,
+            );
+        });
     });
     group(ui, "Label Range", |ui| {
         ui.vertical(|ui| {
@@ -4233,78 +3845,12 @@ fn label_groups(app: &mut RustGisApp, ui: &mut Ui) {
             );
         });
     });
-    group(ui, "Label Placement", |ui| {
-        let cur = layer.labels.default.placement;
-        big_menu(ui, app, "placement", "Placement", "Where labels sit relative to their features.", |ui, app| {
-            for pl in rustgis_engine::map::LabelPlacement::ALL {
-                if ui.radio(cur == pl, tl!(pl.label())).clicked() {
-                    let _ = app.run("labels.placement", json!({"position": pl.code()}));
-                    ui.close();
-                }
-            }
-        });
-    });
-    group(ui, "Label Class", |ui| {
-        ui.vertical(|ui| {
-            ui.add_space(8.0);
-            let fields: Vec<String> = layer.dataset.fields.iter().map(|f| f.name.clone()).collect();
-            if let Some(f) = crate::widgets::ribbon_combo(ui, "label_field", "Field", &layer.labels.default.field, &fields, 140.0) {
-                let _ = app.run("labels.field", json!({"field": f}));
-            }
-        });
-    });
-    group(ui, "Text Symbol", |ui| {
-        col(ui, |ui| {
-            // The whole range `labels.style` accepts (#457), so a larger label isn't cut back.
-            let mut size = f64::from(layer.labels.default.size);
-            ui.horizontal(|ui| {
-                let input_label = ui.label(egui::RichText::new(tl!("Size")).size(11.5));
-                let range = rustgis_engine::map::symbology::LABEL_SIZE;
-                // Another layer gets a distinct widget, so an in-flight drag cannot move to it.
-                ui.push_id(("label_size", layer.id), |ui| {
-                    if ui.add(egui::DragValue::new(&mut size).range(range).speed(0.1).suffix(" pt")).labelled_by(input_label.id).changed() {
-                        label_size_drag(app, ui, &layer, size);
-                    }
-                });
-            });
-            let mut c = crate::theme::c32(layer.labels.default.color);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Color")).size(11.5));
-                ui.push_id(("label_color", layer.id), |ui| {
-                    if crate::widgets::color_button(ui, &mut c).changed() {
-                        crate::labelpane::color_drag(app, ui, &layer, None, crate::theme::rgba(c));
-                    }
-                });
-            });
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "label",
-                "Bold",
-                "Bold label text.",
-                "labels.style",
-                json!({"bold": !layer.labels.default.bold}),
-                layer.labels.default.bold,
-            );
-            small(
-                ui,
-                app,
-                "single",
-                "Halo",
-                "Draw a halo around label text.",
-                "labels.style",
-                json!({"halo": !layer.labels.default.halo}),
-                layer.labels.default.halo,
-            );
-        });
-    });
 }
 
 fn feature_data_groups(app: &mut RustGisApp, ui: &mut Ui) {
-    group(ui, "Definition Query", |ui| {
-        let has = app.session.active_layer.and_then(|id| app.session.map().layer(id)).is_some_and(|l| l.definition_query.is_some());
+    group(ui, "Table", |ui| {
+        big(ui, app, "table", "Attribute\nTable", "Open the layer's attribute table.", "table.open", Value::Null, false, false);
+        let has = active_layer(app).is_some_and(|l| l.definition_query.is_some());
         big(
             ui,
             app,
@@ -4316,9 +3862,6 @@ fn feature_data_groups(app: &mut RustGisApp, ui: &mut Ui) {
             has,
             false,
         );
-    });
-    group(ui, "Table", |ui| {
-        big(ui, app, "table", "Attribute\nTable", "Open the layer's attribute table.", "table.open", Value::Null, false, false);
     });
     group(ui, "Selection", |ui| {
         col(ui, |ui| {
@@ -4338,78 +3881,59 @@ fn feature_data_groups(app: &mut RustGisApp, ui: &mut Ui) {
             false,
         );
     });
-    group(ui, "Data Design", |ui| {
-        big(ui, app, "field", "Fields", "Add a field.", "ui.dialog", json!({"name": "addField"}), false, false);
+    group(ui, "Fields", |ui| {
+        big(ui, app, "field", "Add Field", "Add a field.", "ui.dialog", json!({"name": "addField"}), false, false);
         big(ui, app, "calculate", "Calculate", "Calculate field values.", "ui.dialog", json!({"name": "calculateField"}), false, false);
-        let open = app.ui.right == Some(RightPane::Design);
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "unique",
-                "Subtypes",
-                "Group features by an integer code, each with default values.",
-                "ui.pane.design",
-                Value::Null,
-                open,
-            );
-            small(ui, app, "filter", "Domains", "Limit a field to coded values or a range.", "ui.pane.design", Value::Null, open);
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "calculate",
-                "Attribute Rules",
-                "Calculate fields and enforce conditions on every edit.",
-                "ui.pane.design",
-                Value::Null,
-                open,
-            );
-            small(
-                ui,
-                app,
-                "table",
-                "Contingent Values",
-                "Allow only certain combinations of values across fields.",
-                "ui.pane.design",
-                Value::Null,
-                open,
-            );
-        });
-    });
-    let layer = app.session.active_layer.and_then(|id| app.session.map().layer(id)).cloned();
-    group(ui, "Archiving", |ui| {
-        let on = layer.as_ref().is_some_and(|l| l.design.archive.is_some());
         big(
             ui,
             app,
-            "history",
-            "Archive",
-            "Keep a history of every edit to the layer, to look back or restore.",
-            "data.archive",
-            json!({"on": !on}),
-            on,
+            "table",
+            "Data\nDesign",
+            "Subtypes, domains, attribute rules, contingent values and relationships.",
+            "ui.pane.design",
+            Value::Null,
+            app.ui.right == Some(RightPane::Design),
             false,
         );
-    });
-    group(ui, "Relationship", |ui| {
-        big_menu(ui, app, "select_loc", "Related\nData", "Select the rows related to the selection.", |ui, app| {
-            let rels: Vec<String> = app.session.map().editing.relationships.iter().map(|r| r.name.clone()).collect();
-            if rels.is_empty() {
-                ui.label(egui::RichText::new(tl!("No relationships yet")).weak());
-            }
-            for r in rels {
-                menu_item(ui, app, "select_loc", &r, "data.related", json!({"name": r}));
-            }
-            ui.separator();
-            menu_item(ui, app, "add_data", "New Relationship…", "ui.pane.design", Value::Null);
+        col(ui, |ui| {
+            let on = active_layer(app).is_some_and(|l| l.design.archive.is_some());
+            small(ui, app, "history", "Archive", "Keep a history of every edit to the layer.", "data.archive", json!({"on": !on}), on);
+            small_menu(ui, app, "select_loc", "Related Data", "Select the rows related to the selection.", |ui, app| {
+                let rels: Vec<String> = app.session.map().editing.relationships.iter().map(|r| r.name.clone()).collect();
+                if rels.is_empty() {
+                    ui.label(egui::RichText::new(tl!("No relationships yet")).weak());
+                }
+                for name in rels {
+                    menu_item(ui, app, "select_loc", &name, "data.related", json!({"name": name}));
+                }
+                ui.separator();
+                menu_item(ui, app, "add_data", "New Relationship…", "ui.pane.design", Value::Null);
+            });
         });
     });
     group(ui, "Export", |ui| {
-        small_menu(ui, app, "export_layer", "Export", "Export the layer.", |ui, app| {
-            menu_item(ui, app, "", "Export Features…", "ui.exportLayer", Value::Null);
-            menu_item(ui, app, "", "Export Features (tool)", "ui.gp.open", json!({"tool": "exportFeatures"}));
+        big(
+            ui,
+            app,
+            "export_layer",
+            "Export\nFeatures",
+            "Export the selected layer to GeoJSON or CSV.",
+            "ui.exportLayer",
+            Value::Null,
+            false,
+            false,
+        );
+        col(ui, |ui| {
+            small(
+                ui,
+                app,
+                "export_layer",
+                "Export To 3D…",
+                "Export the layer as a 3D model (OBJ).",
+                "ui.saveItem",
+                json!({"kind": "obj"}),
+                false,
+            );
         });
     });
 }

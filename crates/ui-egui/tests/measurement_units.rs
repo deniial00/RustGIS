@@ -256,6 +256,8 @@ fn distance_controls_follow_display_units_and_keep_metre_command_values() {
     for _ in 0..3 {
         h.step();
     }
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Scene").click();
+    h.run_steps(2);
     h.get_by_role_and_label(egui::accesskit::Role::Button, "View Clipping").click();
     h.step();
     // What it opened shows on the next frame.
@@ -266,6 +268,8 @@ fn distance_controls_follow_display_units_and_keep_metre_command_values() {
 
     h.state_mut().run("ui.measurementUnits", json!({"units": "metric"})).unwrap();
     h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Scene").click();
+    h.run_steps(2);
     h.get_by_role_and_label(egui::accesskit::Role::Button, "View Clipping").click();
     h.step();
     // What it opened shows on the next frame.
@@ -275,7 +279,7 @@ fn distance_controls_follow_display_units_and_keep_metre_command_values() {
 }
 
 #[test]
-fn measure_menu_switches_live_distance_and_area_readouts_to_imperial() {
+fn display_units_menu_switches_live_distance_and_area_readouts_to_imperial() {
     let mut h = harness();
     h.state_mut().run("map.goToXY", json!({"lon": 0, "lat": 0, "scale": 1000})).unwrap();
     h.state_mut().run("tool.set", json!({"tool": "measure"})).unwrap();
@@ -286,7 +290,9 @@ fn measure_menu_switches_live_distance_and_area_readouts_to_imperial() {
     click_map(&mut h, center - egui::vec2(50.0, 0.0));
     click_map(&mut h, center + egui::vec2(50.0, 0.0));
     assert!(painted_text(&h).iter().any(|s| s.starts_with("Total ") && s.contains(" m")));
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Measure").click();
+    h.state_mut().run("ui.tab", json!({"tab": "Settings"})).unwrap();
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Measurement Units").click();
     for _ in 0..3 {
         h.step();
     }
@@ -370,7 +376,9 @@ fn measurement_unit_choice_is_saved_restored_and_available_to_scripts() {
     for _ in 0..3 {
         h.step();
     }
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Measure").click();
+    h.state_mut().run("ui.tab", json!({"tab": "Settings"})).unwrap();
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Measurement Units").click();
     for _ in 0..3 {
         h.step();
     }

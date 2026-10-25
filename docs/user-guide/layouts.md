@@ -3,14 +3,16 @@
 ## Layouts
 
 <figure markdown="span">
-  ![A landscape A4 page layout with a map frame, title, legend, north arrow and scale bar, and the Publish tab open](https://assets.rustgis.app/images/layout.webp)
+  ![A landscape A4 page layout with a map frame, title, legend, north arrow and scale bar](https://assets.rustgis.app/images/layout.webp)
   <figcaption>A page layout with a map frame, title, legend, north arrow and scale bar.</figcaption>
 </figure>
 
-Home › New Layout adds a page layout (Letter, Legal, Tabloid or A5 to A0, landscape or portrait)
-with a map frame, title, legend, north arrow, scale bar and a dynamic credits line. The command
-`layout.new` also accepts custom `width` and `height` in millimetres and `"template": "blank"`.
-Layouts open as tabs next to the maps; while one is open, its groups lead the Publish tab:
+**Home › Project › New Layout** creates a Letter page from its split-button face; its menu offers
+Letter, Legal, Tabloid or A5 to A0, landscape or portrait, publication layouts and **Import
+Layout…**. A new layout has a map frame, title, legend, north arrow, scale bar and a dynamic
+credits line. The command `layout.new` also accepts custom `width` and `height` in millimetres
+and `"template": "blank"`. Layouts open as tabs next to the maps. Opening one shows and selects
+the contextual **Layout** ribbon tab, with Page, Map Frames, Surrounds, Graphics and Output groups:
 
 - **Publication layouts**: Home › New Layout › **Publication Layout** builds a finished sheet or
   figure of the map view in one step, with `layout.publication` behind it:
@@ -88,9 +90,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     "note": "Only cells with a significant trend (p < 0.05) are coloured."}
   ```
 
-- **Map frames**: rectangle, circle and ellipse frames, or polygon and lasso frames drawn on the
-  page. Each frame shows a map of the project at its own centre and scale. Turn on **Pan/Zoom
-  Map** (Map Frames group, or a frame's properties) to drag inside frames to pan their maps and
+- **Layout › Map Frames › Map Frame** adds a rectangular frame from its split-button face; its menu
+  offers circle and ellipse frames, or polygon and lasso frames drawn on the page. Each frame shows
+  a map of the project at its own centre and scale. Turn on **Pan/Zoom Map** (Map Frames group,
+  or a frame's properties) to drag inside frames to pan their maps and
   turn the wheel to zoom them about the pointer; Esc turns it off. Without it, Shift-drag a frame
   to pan its map. Double-click a frame to match the map view, or set the scale in its properties.
   A frame can be turned and tilted like the map view: a new frame, or one matched to the view,
@@ -113,8 +116,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   `layout.addElement={"kind":"grid","step":0.5,"style":"ticks","format":"dms","edges":["top","bottom","left","right"],"labelOrientation":"vertical"}`
   (given again, it changes only the options it names), or `layout.update` with
   `"grid": {…}` (`false` removes the grid).
-- **Map surrounds**: north arrow, scale bar, legend, colorbar, table frame (a layer's attribute table) and
-  chart frame (a bar chart of a numeric field), plus a neatline or backdrop. A north arrow's
+- **Layout › Surrounds**: north arrow, scale bar, legend, colorbar, table frame (a layer's attribute
+  table) and chart frame (a bar chart of a numeric field), plus a neatline or backdrop in **More**. A north arrow's
   properties pick its **Style** (classic arrow, compass rose, triangle or star) and its **Fill**
   and **Outline** colours (`"style":"compass","fill":"#B91C1C"`). A scale bar's pick its
   **Style** (alternating bar, stepped line or single line), its **Units** (metres or kilometres
@@ -145,9 +148,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   renamed or removed (it is kept by name, like a table or chart frame's layer) until another is
   picked. From a command:
   `layout.addElement={"kind":"colorbar","layer":"DEM","title":"Elevation (m)","orientation":"vertical","ticks":3}`.
-- **Shapes**: **Rectangle**, **Circle**, **Ellipse** and **Line** add a shape in the middle of
-  the page, to frame, highlight or divide parts of it. The Line menu starts a horizontal, vertical
-  or diagonal line; turn it to any angle with its rotation handle or properties.
+- **Layout › Graphics › Shapes** adds a rectangle from its split-button face; the menu offers
+  **Circle**, **Ellipse**, **Line** and **Arrow**, to frame, highlight or divide parts of the page.
+  The Line submenu starts a horizontal, vertical or diagonal line; turn it to any angle with its rotation handle or properties.
   A circle is an ellipse in a square box. The properties set a shape's fill, outline and
   outline width (0 for none; a fill with no opacity leaves only the outline), a rectangle's
   rounded corners (`"radius"`, in mm), and a line's colour, width, arrowheads and angle. From a
@@ -160,7 +163,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   be an arrow. From a command:
   `layout.addElement={"kind":"arrow","angle":30,"length":60}`, or
   `layout.update={"element":7,"angle":-90}` to turn one.
-- **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
+- **Layout › Graphics › Text** adds plain text from its split-button face; its menu inserts
+  **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn; the Format pane's
   **Insert Dynamic Text** menu, under the text, lists each with what it shows. The text, its
   size (2 to 400 points, as text graphics on the map), colour, bold, **Italic** (slanted, as water
@@ -200,22 +204,23 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
 - **Snap** starts on: a dragged or resized element snaps to the guides, the page's edges and centre, and
   the other elements' edges and centres, and the line it snapped to is highlighted. Hold Alt to
   place an element freely, or turn **Snap** off in the Page group.
-- **Export** writes PDF (every map series page by default, up to 500), or PNG or SVG of the current page.
+- **Layout › Output › Export** writes PDF (every map series page by default, up to 500), or PNG or SVG of the current page.
   In SVG each element is a group (an Inkscape layer) named after it: text stays text and rectangles,
   ellipses and lines stay shapes, while map frames and the other surrounds are pictures at the export
   resolution, so the page can be finished in a vector editor. SVG text uses the viewer's
   serif or sans-serif font, so its alignment and line widths can differ from PNG/PDF and can
   change when edited. Embedded pictures are clipped to their element boxes;
   `layout.export` accepts `dpi` and `"allPages": false` for just the current PDF
-  page. **Print** opens the PDF in the system viewer on desktop; **Save Layout File** and
-  **Import Layout** move layouts between projects (`.rgislayout`).
+  page. **Layout › Output › Print** opens the PDF in the system viewer on desktop; **Publish ›
+  Save As › Layout File** and **Home › New Layout › Import Layout…** move layouts between projects
+  (`.rgislayout`). **Layout › Output › Close Layout** returns to the map.
 
 ## Reports
 
-**Publish › New Report** lists the selected layer's records page after page; the **Report** pane
+**Publish › Report › New Report** lists the selected layer's records page after page; the **Report** pane
 previews it and sets it up.
 
-- **Data**: pick the detail **Fields** (or **Autofill Fields**), **Group** records by up to four
+- **Report Data**: pick the detail **Fields** (or **Autofill Fields**), **Group** records by up to four
   fields (each group gets a heading and its own statistics), add **Statistics** (count, sum,
   mean, minimum, maximum), a **Dynamic Picture** per record (a field holding a PNG/JPEG path relative to the saved
   project's folder, or base64 image data), **Attachments** (a field listing each record's files,
@@ -227,26 +232,26 @@ previews it and sets it up.
   relationship, listed beneath it).
 - A where clause or the layer's selection limits the records; a sort field orders them within
   their groups.
-- **Publish › Report**: **Export Report** writes a PDF (or the first page as PNG); **Save As Report
-  File** keeps the report, and **Report Template** its design without the data source, to start
-  reports on other layers (**Publish › Import Report**).
+- **Publish › Report › Report Output**: **Export Report** writes a PDF (or the first page as PNG);
+  **Save As Report File** keeps the report, and **Save As Report Template** its design without the
+  data source, to start reports on other layers (**Publish › Report › Import Report…**).
 
 ## Presentations and notebooks
 
-**Publish › New Presentation** starts a presentation with a title page; the **Presentation** pane
+**Publish › Presentation › New Presentation** starts a presentation with a title page; the **Presentation** pane
 previews, edits and plays it.
 
 - **Page**: a **Map** page shows the map view as it is now, a **Blank** page shows text on a
   coloured page, an **Image** page a picture with a caption, and a **Video** page a video file or
   URL with an optional poster picture.
 - Each page has a title, speaker notes and a duration (for **Play**), and can move up or down.
-- **Publish › Output › Presentation › Export Presentation** writes an HTML slideshow (arrow
+- **Publish › Presentation › Presentation Output › Export Presentation** writes an HTML slideshow (arrow
   keys, `N` for notes, `P` to play; videos play in place), a PDF, or the first page as PNG.
   Video sources remain file paths or URLs, so keep them accessible beside the exported slideshow.
   **Save As Presentation File** in the same menu keeps it to import into other projects (`.rgispres`).
 
-**Analyze › New Notebook** starts a notebook of text and command cells; **Add and Open** opens a
-RustGIS (`.rgisnb`) or Jupyter (`.ipynb`) notebook. A command cell runs one command per line
+**Analyze › Automate › New Notebook** starts a notebook of text and command cells; **Open Notebook…**
+in the same group opens a RustGIS (`.rgisnb`) or Jupyter (`.ipynb`) notebook. A command cell runs one command per line
 (`id {json}`, as in scripts) and shows each command's result beneath it. Notebooks save in
 either format.
 The cells contain RustGIS commands, not Python, even in an `.ipynb` file. Notebooks opened from

@@ -280,10 +280,10 @@ databases](data.md#sql-queries-and-duckdb-databases).
 | KML, KMZ, GPX | Data › Export to `.kml`, `.kmz` or `.gpx` | Placemarks named by a `name` field, if there is one; features without geometry are left out. |
 | GeoJSON, KML, GPX, CSV, CSV with WKT | Analyze › Workflows › Data Interop (`data.convert`; `"format": "geojson"`, `"kml"`, `"gpx"`, `"csv"` or `"wkt"`) | Returns text when `"path"` is omitted; writes a file on desktop when it is given. |
 | GeoTIFF / Cloud-optimised GeoTIFF | Data › Export Raster (`share.exportRaster`) | Untiled GeoTIFF by default; `"cog": true` writes 512-pixel tiles, Deflate compression and overviews. Writes the loaded raster's resolution (an overview when that is what was opened), the selected band or its colour bands. The web app's Export Raster downloads an ordinary GeoTIFF. |
-| PNG | Publish › Export Map (`share.exportMap`) | Configurable DPI, with labels, scale bar and tile credits. |
+| PNG | Publish › Export › Export Map (`share.exportMap`) | Configurable DPI, with labels, scale bar and tile credits. |
 | PDF | Layouts, reports and presentations | |
-| Wavefront OBJ, glTF | Publish › Export To 3D, Share As › Web Scene | Polygons extruded by a field. |
-| Web map, OGC API Features, MapLibre style | Publish › Share As | Open-format files that need no server: see [Sharing](sharing.md). |
+| Wavefront OBJ, glTF | Data › Export › Export To 3D, Publish › Share › Web Map › Web Scene | Polygons extruded by a field. |
+| Web map, OGC API Features, MapLibre style | Publish › Share › Web Map split button | Open-format files that need no server: see [Sharing](sharing.md). |
 | Raster tiles | `imagery.hostedImagery` | A zip of `tiles/z/x/y.png` tiles, `tiles.json` and a viewer page; at most 5,000 tiles and 256 MiB of tile data. |
 
 GeoPackage, Shapefile and FlatGeobuf exports default to the layer's original coordinate system
