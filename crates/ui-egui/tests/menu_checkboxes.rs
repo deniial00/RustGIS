@@ -175,3 +175,14 @@ fn basemap_tile_actions_still_dismiss_the_gallery() {
     }
     assert!(h.state().session.map().tiles.is_empty(), "Remove All still removes the layers");
 }
+
+#[test]
+fn celestial_body_choices_dismiss_the_basemap_gallery() {
+    let mut h = harness(empty_app());
+    for body in rustgis_engine::geom::BODIES {
+        click(&mut h, "Basemap");
+        click(&mut h, body.name);
+        assert_eq!(h.state().session.map().body().id, body.id, "the selected body is applied");
+        assert!(!egui::Popup::is_any_open(&h.ctx), "{} must dismiss the gallery", body.name);
+    }
+}

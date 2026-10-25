@@ -713,6 +713,7 @@ fn planet_basemaps(ui: &mut Ui, app: &mut RustGisApp) {
             let tip = tl!("Measure on this body, with one of its basemaps.");
             if ui.add(egui::Button::selectable(b.id == body.id, tl!(b.name))).on_hover_text(tip).clicked() {
                 let _ = app.run("map.body", json!({"name": b.id}));
+                ui.close();
             }
         }
     });
