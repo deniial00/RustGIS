@@ -20,7 +20,7 @@ fn replacement(p: &Value) -> Result<String, String> {
     if !rustgis_map::paths::is_local(path) {
         return Err(format!("{path}: give a file or folder on this computer (web addresses and databases aren't repaired here)"));
     }
-    let path = path.strip_prefix("file://").unwrap_or(path);
+    let path = rustgis_map::paths::local_path(path);
     let full = std::path::absolute(path).map_err(|e| format!("{path}: {e}"))?.display().to_string();
     if !std::path::Path::new(&full).exists() {
         return Err(format!("{full}: there's no such file or folder"));

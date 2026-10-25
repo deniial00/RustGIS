@@ -75,7 +75,7 @@ impl std::fmt::Debug for RasterLayer {
 }
 
 impl RasterLayer {
-    /// Reads a replacement without silently clamping the renderer's band selection.
+    /// Reads a replacement without silently changing the renderer or resetting its style.
     pub fn relinked(&self, path: &str, subdataset: Option<&str>) -> Result<RasterLayer, String> {
         if self.embedded.is_some() {
             return Err("the raster's data is kept in the project: there's no file to repair".into());
@@ -89,6 +89,11 @@ impl RasterLayer {
             return Err(format!(
                 "{path} has {} band(s); the layer's style draws band {need}: choose a raster with at least {need} bands",
                 r.band_count()
+            ));
+        }
+        if matches!(self.style.renderer, RasterRenderer::Colormap) && !matches!(r.color, ColorHint::Palette(_)) {
+            return Err(format!(
+                "{path} has no color palette; the layer's Colormap style uses the file's palette: choose a raster with a color palette"
             ));
         }
         let mut style = self.style.clone();

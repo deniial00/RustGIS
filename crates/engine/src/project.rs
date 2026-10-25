@@ -401,6 +401,18 @@ impl Default for Project {
     }
 }
 
+/// Resolve linked files and explicitly relative provenance against their containing document.
+pub(crate) fn resolve_file_paths<'a>(dir: &str, paths: impl IntoIterator<Item = (&'a mut String, bool)>) {
+    for (p, record) in paths {
+        if (!record || ["./", "../", ".\\", "..\\"].iter().any(|prefix| p.starts_with(prefix)))
+            && rustgis_map::paths::is_project_relative(p)
+            && let Some(full) = rustgis_map::paths::resolve(dir, p)
+        {
+            *p = full;
+        }
+    }
+}
+
 impl Project {
     fn file_paths_mut(&mut self) -> Vec<(&mut String, bool)> {
         let mut paths = Vec::new();
@@ -421,14 +433,7 @@ impl Project {
     }
 
     fn resolve_paths(&mut self, dir: &str) {
-        for (p, record) in self.file_paths_mut() {
-            if (!record || ["./", "../", ".\\", "..\\"].iter().any(|prefix| p.starts_with(prefix)))
-                && rustgis_map::paths::is_project_relative(p)
-                && let Some(full) = rustgis_map::paths::resolve(dir, p)
-            {
-                *p = full;
-            }
-        }
+        resolve_file_paths(dir, self.file_paths_mut());
     }
 
     pub fn new(name: impl Into<String>) -> Self {

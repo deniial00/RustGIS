@@ -134,6 +134,11 @@ Saved web addresses drop passwords, keys and tokens. A project package (`.rgispk
 embeds linked rasters within a size limit, while large files read in place, database and web
 layers stay linked; it opens as a new, unsaved project.
 
+Relative linked paths, including bare paths in older or hand-written files, are interpreted
+against the project's folder, never the process's working directory. Resolution is lexical:
+it does not follow symbolic links. Avoid `..` after a symlinked directory; choose the direct
+data location instead.
+
 On the backstage's **Start** or **New** page, choose a blank **Map**, the **World Atlas** sample or
 **Open…**. **Save** and **Save As** write the project, named after its file; a project opened
 from a file is named after that file too. See [Project items](data.md#project-items) for the
@@ -148,9 +153,12 @@ Exports and other files already written are not undone.
 If a linked file moved or was renamed, right-click its layer or local PMTiles/MBTiles tile
 archive and choose **Repair Data Source…**. For the selected layer, use **Data › Data Source ›
 Repair Source**, or find **Repair Data Source** (or **Repair Tile Archive**) in Command Search.
-Choose the replacement file or folder; when a container such as a GeoPackage holds several
-datasets, choose its table. The existing table is retained when available. Repair keeps the
-layer's identity and configuration, marks the project unsaved and can be undone or redone.
+Choose the replacement file or folder. For a container such as a GeoPackage, **List Datasets**
+reads its tables in the background; choose a table when there is more than one. The existing
+table is retained when available. Repair keeps the layer's identity and configuration, marks
+the project unsaved and can be undone or redone. A raster drawn with its own color table
+requires a replacement with a color table; incompatible rasters are rejected without changing
+the saved style.
 If a tile archive is removed or reordered out of its captured slot while the dialog is open,
 the dialog closes rather than applying the replacement to another archive.
 It does not change embedded data, databases or web links. The web app cannot link to files

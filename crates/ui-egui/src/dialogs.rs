@@ -1287,7 +1287,9 @@ fn select_by_attributes(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> 
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn pick_open(exts: &[&str], label: &str) -> Option<String> {
-    rfd::FileDialog::new().add_filter(label, exts).add_filter("All files", &["*"]).pick_file().map(|p| p.display().to_string())
+    let dialog = rfd::FileDialog::new();
+    let dialog = if exts.is_empty() { dialog } else { dialog.add_filter(label, exts) };
+    dialog.add_filter("All files", &["*"]).pick_file().map(|p| p.display().to_string())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

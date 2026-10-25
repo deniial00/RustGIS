@@ -21,7 +21,7 @@ impl Fixture {
     }
 
     pub fn file(&self, relative: &str) -> PathBuf {
-        let path = self.root.join(relative);
+        let path = native_join(&self.root, relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         path
     }
@@ -31,6 +31,12 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+pub fn native_join(root: &Path, relative: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    path.extend(relative.split('/'));
+    path
 }
 
 pub fn session() -> Session {

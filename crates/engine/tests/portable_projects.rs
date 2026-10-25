@@ -59,24 +59,29 @@ fn assert_stream(s: &Session, id: u32, path: &Path) {
 }
 
 fn assert_other_sources(s: &Session, layers: &Layers, root: &Path) {
-    assert_stream(s, layers.countries, &root.join(COUNTRIES));
+    assert_stream(s, layers.countries, &native_join(root, COUNTRIES));
     let l = s.map().layer(layers.dem).unwrap();
     let raster = l.raster.as_ref().unwrap();
     assert_eq!(raster.error, None);
     assert!(raster.data.is_some());
-    assert_eq!(raster.path.as_deref(), root.join(DEM).to_str());
-    assert_eq!(l.linked_file(), root.join(DEM).to_str());
+    assert_eq!(raster.path.as_deref(), native_join(root, DEM).to_str());
+    assert_eq!(l.linked_file(), native_join(root, DEM).to_str());
     assert_eq!(s.map().tiles.len(), 1);
     let tile = &s.map().tiles[0];
     assert_eq!(tile.error, None);
-    assert_eq!(tile.url, root.join(TILES).to_str().unwrap());
+    assert_eq!(tile.url, native_join(root, TILES).to_str().unwrap());
     assert!(tile.draws());
 }
 
 fn assert_all_sources(s: &Session, layers: &Layers, root: &Path) {
     assert_eq!(s.map().layers.len(), 3);
-    assert_stream(s, layers.cities, &root.join(CITIES));
+    assert_stream(s, layers.cities, &native_join(root, CITIES));
     assert_other_sources(s, layers, root);
+}
+
+fn assert_no_root(text: &str, root: &Path) {
+    let serialized = serde_json::to_string(root).unwrap();
+    assert!(!text.contains(&serialized[1..serialized.len() - 1]), "saved links must not retain the old root");
 }
 
 fn save(s: &mut Session, f: &Fixture) -> String {
@@ -88,7 +93,7 @@ fn save(s: &mut Session, f: &Fixture) -> String {
     for (relative, _) in LINKS {
         assert!(text.contains(relative), "missing {relative}");
     }
-    assert!(!text.contains(f.root.to_str().unwrap()), "saved links must not retain the old root");
+    assert_no_root(&text, &f.root);
     text
 }
 
@@ -130,7 +135,7 @@ fn save_as_recomputes_links_without_changing_live_paths_or_original() {
     for relative in ["../survey/data/cities.fgb", "../survey/data/my dem ü.tif", "../survey/tiles/t.pmtiles", "../shared/countries.fgb"] {
         assert!(text.contains(relative), "missing {relative}");
     }
-    assert!(!text.contains(f.root.to_str().unwrap()));
+    assert_no_root(&text, &f.root);
     assert_eq!(std::fs::read_to_string(f.file("survey/map.rgis")).unwrap(), original);
     for path in [f.file("survey/map.rgis"), copy] {
         let reopened = open(&path);
@@ -147,7 +152,7 @@ fn absolute_path_projects_open_and_save_relative_without_restyling() {
     let mut text = save(&mut s, &f);
     // Hand-write the old format using absolute strings, including record-only provenance.
     for (relative, file) in LINKS {
-        text = text.replace(&serde_json::to_string(relative).unwrap(), &serde_json::to_string(&f.root.join(file)).unwrap());
+        text = text.replace(&serde_json::to_string(relative).unwrap(), &serde_json::to_string(&native_join(&f.root, file)).unwrap());
     }
     let path = f.file("survey/absolute.rgis");
     std::fs::write(&path, text).unwrap();
@@ -161,7 +166,7 @@ fn absolute_path_projects_open_and_save_relative_without_restyling() {
     for (relative, _) in LINKS {
         assert!(saved.contains(relative), "missing {relative}");
     }
-    assert!(!saved.contains(f.root.to_str().unwrap()));
+    assert_no_root(&saved, &f.root);
     let again = open(&path);
     assert_all_sources(&again, &layers, &f.root);
     assert_eq!(configuration(&again), config);
@@ -266,4 +271,47 @@ fn overly_long_relative_spelling_preserves_absolute_provenance_and_restoration_o
     let saved: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(saved["maps"][0]["layers"][0]["dataset"]["source"], first);
     assert_eq!(saved["maps"][0]["layers"][1]["dataset"]["source"], "./countries.fgb");
+}
+
+#[test]
+fn imported_map_resolves_bare_relative_links_against_its_folder() {
+    let f = Fixture::new("import-map");
+    let (mut s, layers) = populated(&f);
+    let text = save(&mut s, &f);
+    let mut saved: Value = serde_json::from_str(&text).unwrap();
+    let map = &mut saved["maps"][0];
+    for layer in map["layers"].as_array_mut().unwrap() {
+        for key in ["source", "raster"] {
+            if let Some(path) = layer.get_mut(key).and_then(|source| source.get_mut("path"))
+                && let Some(bare) = path.as_str().and_then(|p| p.strip_prefix("./"))
+            {
+                *path = json!(bare);
+            }
+        }
+    }
+    for tile in map["tiles"].as_array_mut().unwrap() {
+        if let Some(bare) = tile["url"].as_str().and_then(|p| p.strip_prefix("./")) {
+            tile["url"] = json!(bare);
+        }
+    }
+    let path = f.file("survey/import.rgismap");
+    std::fs::write(&path, serde_json::to_vec(map).unwrap()).unwrap();
+    let mut imported = session();
+    imported.run("map.import", &json!({"path": path})).unwrap();
+    assert_all_sources(&imported, &layers, &f.root);
+}
+
+#[test]
+fn repair_source_accepts_a_local_file_uri() {
+    let f = Fixture::new("repair-file-uri");
+    let original = f.file("cities.fgb");
+    let replacement = f.file("data/renamed cities.fgb");
+    sample_file(&original, "Cities");
+    std::fs::copy(&original, &replacement).unwrap();
+    let mut s = session();
+    let id = add_stream(&mut s, &original, None);
+    let path = replacement.to_str().unwrap();
+    let uri = if cfg!(windows) { format!("file:///{}", path.replace('\\', "/")) } else { format!("file://{path}") };
+    s.run("layer.repairSource", &json!({"layer": id, "path": uri})).unwrap();
+    assert_stream(&s, id, &replacement);
 }

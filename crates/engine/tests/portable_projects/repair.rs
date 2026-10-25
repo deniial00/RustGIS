@@ -68,7 +68,9 @@ fn renamed_raster_repairs_with_its_renderer_and_data_intact() {
     s.map_mut().layer_mut(id).unwrap().raster.as_mut().unwrap().style.renderer = RasterRenderer::Rgb { red: 2, green: 0, blue: 1 };
     let style = serde_json::to_value(&s.map().layer(id).unwrap().raster.as_ref().unwrap().style).unwrap();
     s.run("project.saveAs", &json!({"path": project})).unwrap();
+    drop(s);
     std::fs::rename(&original, &renamed).unwrap();
+    let mut s = session();
     s.run("project.open", &json!({"path": project})).unwrap();
     let raster = s.map().layer(id).unwrap().raster.as_ref().unwrap();
     assert!(raster.error.is_some());
@@ -95,7 +97,9 @@ fn renamed_tile_archive_is_kept_unavailable_until_repaired() {
     s.run("layer.addData", &json!({"path": original})).unwrap();
     assert_eq!(s.map().tiles.len(), 1);
     s.run("project.saveAs", &json!({"path": project})).unwrap();
+    drop(s);
     std::fs::rename(&original, &renamed).unwrap();
+    let mut s = session();
     s.run("project.open", &json!({"path": project})).unwrap();
     assert_eq!(s.map().tiles.len(), 1);
     assert!(s.map().tiles[0].error.is_some());
@@ -156,7 +160,10 @@ fn geopackage_repair_preserves_or_explicitly_selects_the_table() {
     let id = add_stream(&mut s, &original, Some("b"));
     assert_eq!(s.map().layer(id).unwrap().linked_table(), Some("b"));
     s.run("project.saveAs", &json!({"path": project})).unwrap();
+    // Closing the session releases the source and undo snapshots before moving the file.
+    drop(s);
     std::fs::rename(&original, &renamed).unwrap();
+    let mut s = session();
     s.run("project.open", &json!({"path": project})).unwrap();
     assert!(s.map().layer(id).unwrap().source.as_ref().unwrap().error.is_some());
 
@@ -180,4 +187,75 @@ fn geopackage_repair_preserves_or_explicitly_selects_the_table() {
     assert_eq!(layer.linked_file(), renamed.to_str());
     assert!(layer.source.as_ref().unwrap().is_open());
     assert!(layer.source.as_ref().unwrap().error.is_none());
+}
+
+#[test]
+fn colormap_repair_refuses_a_raster_without_a_palette_without_losing_style_or_data() {
+    use rustgis_engine::{data::raster::ColorHint, map::RasterLayer};
+    use std::sync::Arc;
+
+    let f = Fixture::new("repair-colormap-rejection");
+    let original = f.file("original.tif");
+    let gray = f.file("gray.tif");
+    raster_file(&original, 1);
+    raster_file(&gray, 1);
+    let mut s = session();
+    s.run("layer.addData", &json!({"path": original})).unwrap();
+    let id = s.active_layer.unwrap();
+    // The GeoTIFF exporter writes band values, not palettes; supply the original decoded
+    // palette in memory while keeping a real linked file for the repair command.
+    let mut pixels = rustgis_engine::data::raster::read_path(&original).unwrap();
+    pixels.color = ColorHint::Palette(vec![[0, 0, 0, 255], [30, 120, 240, 255]]);
+    let mut raster = RasterLayer::from_path(pixels, original.to_str().unwrap());
+    assert!(matches!(raster.style.renderer, RasterRenderer::Colormap));
+    raster.style.mask.values = vec![0.0];
+    raster.style.mask.min = Some(1.0);
+    raster.style.mask.max = Some(12.0);
+    raster.style.mask.inside = true;
+    raster.style.brightness = 17.0;
+    raster.style.contrast = -23.0;
+    raster.style.gamma = 1.8;
+    raster.style.rotation = 29.0;
+    raster.style.dra = true;
+    let data = Arc::clone(raster.data.as_ref().unwrap());
+    let style = serde_json::to_value(&raster.style).unwrap();
+    s.map_mut().layer_mut(id).unwrap().raster = Some(raster);
+
+    reject_source(&mut s, id, gray.to_str().unwrap(), "choose a raster with a color palette");
+    let raster = s.map().layer(id).unwrap().raster.as_ref().unwrap();
+    assert_eq!(serde_json::to_value(&raster.style).unwrap(), style);
+    assert!(Arc::ptr_eq(raster.data.as_ref().unwrap(), &data));
+    assert!(matches!(raster.data.as_ref().unwrap().color, ColorHint::Palette(_)));
+}
+
+#[test]
+fn compatible_raster_repair_keeps_nondefault_display_settings() {
+    let f = Fixture::new("repair-raster-display-settings");
+    let original = f.file("original.tif");
+    let replacement = f.file("replacement.tif");
+    raster_file(&original, 3);
+    raster_file(&replacement, 3);
+    let mut s = session();
+    s.run("layer.addData", &json!({"path": original})).unwrap();
+    let id = s.active_layer.unwrap();
+    let raster = s.map_mut().layer_mut(id).unwrap().raster.as_mut().unwrap();
+    raster.style.renderer = RasterRenderer::Rgb { red: 2, green: 0, blue: 1 };
+    raster.style.mask.values = vec![0.0, 2.0];
+    raster.style.mask.min = Some(3.0);
+    raster.style.mask.max = Some(12.0);
+    raster.style.mask.inside = true;
+    raster.style.brightness = 17.0;
+    raster.style.contrast = -23.0;
+    raster.style.gamma = 1.8;
+    raster.style.rotation = 29.0;
+    raster.style.dra = true;
+    raster.style.resampling = rustgis_engine::map::Resampling::Bilinear;
+    let style = serde_json::to_value(&raster.style).unwrap();
+
+    s.run("layer.repairSource", &json!({"layer": id, "path": replacement})).unwrap();
+    let raster = s.map().layer(id).unwrap().raster.as_ref().unwrap();
+    assert_eq!(raster.path.as_deref(), replacement.to_str());
+    assert_eq!(serde_json::to_value(&raster.style).unwrap(), style);
+    assert_eq!(raster.data.as_ref().unwrap().band_count(), 3);
+    assert!(raster.error.is_none());
 }

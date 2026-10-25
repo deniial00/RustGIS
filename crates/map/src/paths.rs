@@ -1,7 +1,15 @@
 //! Lexical local paths for portable projects; never touches the filesystem.
 
-fn bare(p: &str) -> &str {
-    p.strip_prefix("file://").unwrap_or(p)
+/// Strip a local file URI prefix, including the URI's extra slash before a Windows drive.
+pub fn local_path(p: &str) -> &str {
+    let Some(path) = p.strip_prefix("file://") else { return p };
+    if let Some(disk) = path.strip_prefix('/')
+        && drive(disk)
+        && disk.as_bytes().get(2).is_some_and(|b| matches!(b, b'/' | b'\\'))
+    {
+        return disk;
+    }
+    path
 }
 
 fn drive(p: &str) -> bool {
@@ -14,7 +22,7 @@ pub fn is_local(p: &str) -> bool {
     if p.is_empty() || p != p.trim() || p.len() > 4096 || p.chars().any(char::is_control) {
         return false;
     }
-    let p = bare(p);
+    let p = local_path(p);
     if p.is_empty() {
         return false;
     }
@@ -24,7 +32,7 @@ pub fn is_local(p: &str) -> bool {
 
 /// Absolute POSIX or drive path, excluding network shares.
 pub fn is_absolute_local(p: &str) -> bool {
-    let b = bare(p);
+    let b = local_path(p);
     is_local(p)
         && ((b.starts_with('/') && !b.starts_with("//")) || (drive(b) && b.as_bytes().get(2).is_some_and(|c| matches!(c, b'/' | b'\\'))))
 }
@@ -42,7 +50,7 @@ fn parts(p: &str) -> Option<(String, Vec<&str>)> {
     if !is_absolute_local(p) {
         return None;
     }
-    let p = bare(p);
+    let p = local_path(p);
     let (root, rest) = if drive(p) { (p.get(..2)?.to_ascii_uppercase(), p.get(2..)?) } else { ("/".to_string(), p) };
     let mut result = Vec::new();
     for c in components(rest, cfg!(windows) || root != "/") {
@@ -106,6 +114,7 @@ mod tests {
             ("/p/survey", "/p/./survey/data/../t.tif", "./t.tif", "/p/survey/t.tif"),
             ("/p", "/p", ".", "/p"),
             (r"C:\p", r"c:\p\d\x.tif", "./d/x.tif", r"C:\p\d\x.tif"),
+            (r"C:\p", "file:///C:/p/x.tif", "./x.tif", r"C:\p\x.tif"),
         ] {
             let r = relative_to(d, p);
             assert_eq!(r.as_deref(), Some(expected));

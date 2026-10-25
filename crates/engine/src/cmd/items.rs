@@ -431,7 +431,12 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     let dir = ps(p, "path").and_then(|path| std::path::absolute(path).ok()).and_then(|p| p.parent().map(Path::to_path_buf));
     super::connections::clear_active();
     let maps: Vec<Map> = match serde_json::from_str::<Map>(&text) {
-        Ok(m) => vec![m],
+        Ok(mut m) => {
+            if let Some(d) = dir.as_deref().and_then(Path::to_str) {
+                crate::project::resolve_file_paths(d, m.file_paths_mut());
+            }
+            vec![m]
+        }
         Err(_) => match Project::from_import_json(&text, dir.as_deref()) {
             Ok(project) => project.maps,
             Err(_) => {
