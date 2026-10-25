@@ -193,9 +193,10 @@ impl Config {
         }
     }
 
-    /// Uses a signed-in account's access token.
+    /// Uses a signed-in account. The key only says that it is signed in, never a token:
+    /// `chatgpt::send` puts the current access token on each request.
     pub fn sign_in(&mut self, c: &crate::chatgpt::Credentials) {
-        self.key = if c.plan_allowed() { c.access_token.clone() } else { String::new() };
+        self.key = if c.plan_allowed() && c.signed_in() { crate::chatgpt::SIGNED_IN.to_string() } else { String::new() };
         self.client_id = c.client_id.clone();
         self.account = c.subject.clone();
         self.session = c.session.clone();

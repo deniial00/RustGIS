@@ -1273,6 +1273,7 @@ fn chatgpt_credentials(expires_at: i64) -> chatgpt::Credentials {
         saved_at: "2026-10-14T00:00:00Z".into(),
         session: "session-1".into(),
         rev: String::new(),
+        in_keychain: false,
         kept: chatgpt::Kept::Nowhere,
     }
 }
@@ -1305,7 +1306,8 @@ fn responses_request_shape() {
     let Step::Send(req) = a.ask("Zoom to Paris", &s) else { panic!("expected a request") };
     assert_eq!(req.url, "https://api.openai.com/v1/responses");
     let h = |k: &str| req.headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
-    assert!(h("Authorization").is_some_and(|v| v.starts_with("Bearer ey")));
+    // No token: `chatgpt::send` authorizes each request with the current one.
+    assert_eq!(h("Authorization").map(str::to_string), Some(format!("Bearer {}", chatgpt::SIGNED_IN)));
     assert_eq!(req.headers.iter().filter(|(k, _)| !["Content-Type", "Accept", "Authorization"].contains(&k.as_str())).count(), 0);
     let b = body(&req);
     assert_eq!(b["model"], "gpt-6.1-sol");

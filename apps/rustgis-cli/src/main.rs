@@ -269,7 +269,14 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--logout") {
         use rustgis_assistant::chatgpt;
-        if let Some(r) = chatgpt::sign_out()?
+        let out = chatgpt::sign_out()?;
+        if let Some(e) = &out.unrevoked {
+            eprintln!(
+                "signed out on this computer, but OpenAI wasn't asked to end the session ({e}); disconnect RustGIS in ChatGPT's settings if needed"
+            );
+            return Ok(());
+        }
+        if let Some(r) = out.revocation
             && let Err(e) = chatgpt::revoke(&r)
         {
             eprintln!(
