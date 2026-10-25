@@ -74,6 +74,13 @@ browser and the CLI, where callers keep a secret for the session only, as before
   the requested bucket's explicit-grant status. Copy only that login and grant boolean, not
   the grant list; parse and validate addresses and prepare signatures outside the lock.
   Keychain calls and network I/O never run under the registry lock.
+- **ChatGPT sign-in.** The desktop app gives its store to `chatgpt::set_secret_store` at start;
+  each registration's tokens are one secret, `chatgpt/<client_id>/<subject>`, carrying the `rev`
+  its entry in `chatgpt-auth.json` names (any other is out of date and never used). The file's
+  `store-lock` covers every keychain read and write too, so a rotating refresh token is never used
+  twice. Keychain tokens are read again for each use; only those it couldn't keep stay in memory,
+  for the session. Tokens from an earlier version's file leave it only after the keychain has
+  taken them.
 - **macOS.** The system asks again for access when the app's code signature changes, which
   happens with unsigned or re-signed builds.
 - **Tests.** Use `MemorySecrets`, and `MemorySecrets::failing(..)` for error paths. The desktop

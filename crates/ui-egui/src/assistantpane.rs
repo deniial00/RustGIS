@@ -942,9 +942,7 @@ fn provider_settings(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Co
     let preset = provider::preset(&cfg.provider);
     let mut notes = Vec::new();
     if cfg.login() {
-        notes.push(
-            tl!("The sign-in is kept in the app's settings folder, for your user account only, and never in a project file.").to_string(),
-        );
+        notes.push(sign_in_storage_note(app.assistant.account.as_ref().filter(|_| !cfg.key.is_empty())));
         notes.push(tl!("Requests go to the OpenAI API and use your ChatGPT plan.").to_string());
     } else {
         ui.checkbox(&mut app.assistant.remember_key, tl!("Remember the key on this computer"));
@@ -971,6 +969,20 @@ fn provider_settings(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Co
     if let Some(e) = &app.assistant.login_error {
         show_error(ui, e, t);
     }
+}
+
+/// Where the ChatGPT sign-in is kept, as truthfully as is known.
+fn sign_in_storage_note(account: Option<&chatgpt::Account>) -> String {
+    match account.map(|a| a.kept) {
+        Some(chatgpt::Kept::SettingsFile) => tl!(
+            "The sign-in is still kept in the app's settings folder, readable by your user account: the system keychain is unavailable, so it hasn't been moved there yet."
+        ),
+        Some(chatgpt::Kept::Session) => tl!(
+            "The system keychain is unavailable, so this sign-in won't be remembered: it lasts until RustGIS closes."
+        ),
+        _ => tl!("The sign-in is kept in the system keychain, never in the app's settings or a project file."),
+    }
+    .to_string()
 }
 
 /// Describes actual storage, including a legacy key retained after a failed migration.
@@ -1072,38 +1084,37 @@ fn account_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Config) 
         start_login(app, cfg, true);
         return;
     }
+    let selected = active.map(|c| (c.client_id.clone(), c.subject.clone()));
+    if let Some((client_id, subject)) = selected
+        && ui
+            .small_button(tl!("Remove account"))
+            .on_hover_text(tl!("Signs this account out and forgets it on this computer, with its saved sign-in."))
+            .clicked()
+    {
+        match chatgpt::remove(&client_id, &subject) {
+            Ok(revocation) => {
+                revoke_later(app, revocation, ui.ctx());
+                forget_sign_in(app, cfg);
+                cfg.client_id.clear();
+                cfg.account.clear();
+                cfg.session.clear();
+            }
+            Err(e) => app.assistant.login_error = Some(e.auth_context()),
+        }
+        return;
+    }
     if !cfg.key.is_empty() {
         let who = app.assistant.account.as_ref().map(|a| a.email.clone()).filter(|e| !e.is_empty());
         ui.label(RichText::new(who.unwrap_or_else(|| tl!("signed in").to_string())).small());
         if ui.small_button(tl!("Sign out")).clicked() {
             match chatgpt::sign_out_selected(&cfg.binding()) {
-                Ok(revocation) => {
-                    // Revoking the session at OpenAI is network I/O: off the frame.
-                    if let Some(r) = revocation {
-                        let slot: Slot<Result<(), rustgis_assistant::Error>> = Slot::default();
-                        let (out, ctx) = (slot.clone(), ui.ctx().clone());
-                        std::thread::spawn(move || {
-                            let result = chatgpt::revoke(&r);
-                            if let Ok(mut s) = out.lock() {
-                                *s = Some(result);
-                            }
-                            ctx.request_repaint();
-                        });
-                        app.assistant.signout = Some(slot);
-                    }
-                }
+                Ok(revocation) => revoke_later(app, revocation, ui.ctx()),
                 Err(e) => {
                     app.assistant.login_error = Some(e.auth_context());
                     return;
                 }
             }
-            app.assistant.models_slot = None;
-            cfg.key.clear();
-            app.assistant.account = None;
-            app.assistant.models.clear();
-            app.assistant.catalog.clear();
-            app.assistant.welcome = false;
-            app.assistant.accounts = None;
+            forget_sign_in(app, cfg);
         }
         if app.assistant.duplicate {
             ui.label(
@@ -1117,6 +1128,34 @@ fn account_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, cfg: &mut Config) 
     if ui.button(tl!("Continue with ChatGPT")).clicked() {
         start_login(app, cfg, false);
     }
+}
+
+/// Revokes a signed-out session at OpenAI: network I/O, off the frame.
+#[cfg(not(target_arch = "wasm32"))]
+fn revoke_later(app: &mut RustGisApp, revocation: Option<chatgpt::Revocation>, ctx: &egui::Context) {
+    let Some(r) = revocation else { return };
+    let slot: Slot<Result<(), rustgis_assistant::Error>> = Slot::default();
+    let (out, ctx) = (slot.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let result = chatgpt::revoke(&r);
+        if let Ok(mut s) = out.lock() {
+            *s = Some(result);
+        }
+        ctx.request_repaint();
+    });
+    app.assistant.signout = Some(slot);
+}
+
+/// After signing out or removing the account: no tokens, no catalog.
+#[cfg(not(target_arch = "wasm32"))]
+fn forget_sign_in(app: &mut RustGisApp, cfg: &mut Config) {
+    app.assistant.models_slot = None;
+    cfg.key.clear();
+    app.assistant.account = None;
+    app.assistant.models.clear();
+    app.assistant.catalog.clear();
+    app.assistant.welcome = false;
+    app.assistant.accounts = None;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2284,10 +2323,17 @@ mod tests {
         let b = chatgpt::Credentials { client_id: "test-workspace".into(), ..a.clone() };
         let path = chatgpt::auth_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // As versions before the keychain saved them, with their tokens; this run has no keychain,
+        // so they stay there.
+        let saved = |c: &chatgpt::Credentials| {
+            let mut v = c.to_json();
+            v["access_token"] = c.access_token.clone().into();
+            v
+        };
         std::fs::write(
             &path,
             serde_json::json!({"version":2, "active":{"client_id":a.client_id,"subject":a.subject},
-            "accounts":[a.to_json(),b.to_json()]})
+            "accounts":[saved(&a),saved(&b)]})
             .to_string(),
         )
         .unwrap();
