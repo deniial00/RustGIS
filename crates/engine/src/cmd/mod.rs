@@ -31,6 +31,7 @@ pub mod presentation;
 pub mod project;
 pub mod qgis;
 pub mod raster;
+pub mod repair;
 pub mod report;
 pub mod s3;
 pub mod search;
@@ -70,6 +71,7 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(group::commands());
     v.extend(layer_copy::commands());
     v.extend(raster::commands());
+    v.extend(repair::commands());
     v.extend(zarr::commands());
     v.extend(cube::commands());
     v.extend(select::commands());

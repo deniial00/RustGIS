@@ -105,7 +105,7 @@ ribbon, arrows at its ends scroll it.
 | Tab | Groups |
 | --- | --- |
 | **Home** | Project (New Map, Toolbox, Import Project, New Layout, Browser, Add Data, Add Folder, Import, Templates), Navigate (Pan, Bookmarks, Full Extent, Zoom In/Out, Previous/Next, Go To XY, Planar/First-Person, Identify, Find Place, Directions), Add (Basemap, Add Data, [Web Data](web-data.md)), Selection (Select, Select By Attributes, Select By Location, Clear, Zoom To, Attributes), Inspect (Measure, Locate, Zoom Box, Infographics) |
-| **Data** | Layer Templates; for a feature layer: Definition Query, Table, Selection, Data Design, Archiving, Relationship and Export; for a raster layer: Information and Export; then Offline and Feature Cache |
+| **Data** | Layer Templates, Data Source (Repair Source); for a feature layer: Definition Query, Table, Selection, Data Design, Archiving, Relationship and Export; for a raster layer: Information and Export; then Offline and Feature Cache |
 | **Style** | For the layer selected in Layers. A feature layer: Visibility Range, Effects, Drawing, Drawing Effects, Extrusion for polygons (with Faces and Light and Shadow once on), Layer, Labels, Label Range, Label Placement, Label Class and Text Symbol. A raster layer: Visibility Range, Effects, Compare, Raster Effects, Rendering, Enhancement and Layer. Both: Styles |
 | **Edit** | Manage Edits (Edit, Save, Undo, Redo, Status, Settings, Templates, Topology), Snapping, Features (Create, Delete, Edit Vertices, Modify), Tools, Elevation, Corrections, Graphics, Graphics and Text, Clipboard |
 | **Analyze** | Geoprocessing (History, Tools, Model Builder, Script, SQL, Environments), Tasks (the Tasks pane; Task: Record Task, New Task From History, Import Task, run a task), AI (AI Assistant), Portal (Feature Analysis, Raster Analysis), Workflows, Raster (Raster Functions, Function Editor), Tools (the tool gallery), Selection, Notebook, the imagery groups (Ortho Mapping, Reality Mapping, Alignment, Image Analysis, Image Classification, Imagery Sharing, Mensuration, Imagery Tools) |
@@ -124,11 +124,15 @@ the menu to dismiss it. The time slider's Layers menu likewise stays open while 
 ## Projects
 
 A project (`.rgis`) holds maps, layouts, reports, presentations, notebooks, styles, tasks and
-models. Vector data loaded whole is stored inside the project. On the desktop, large files read
-in place, rasters and live databases are referenced by path or address; files uploaded in the
-web app are embedded. Saved web addresses drop passwords, keys and tokens. A project package
-(`.rgispkg`) also embeds linked rasters within a size limit, while large files read in place,
-database and web layers stay linked; it opens as a new, unsaved project.
+models. Vector data loaded whole is stored inside the project. On the desktop, linked local
+files (large vector files read in place, rasters and tile archives) are saved relative to the
+project's folder: moving the folder whole keeps the links. **Save As** recomputes those paths
+for the new location. Files on another drive or a network share stay absolute. Web addresses,
+databases and embedded data are unchanged; files uploaded in the web app are embedded. A
+project opened as text, as in the web app, has no folder against which to resolve local links.
+Saved web addresses drop passwords, keys and tokens. A project package (`.rgispkg`) also
+embeds linked rasters within a size limit, while large files read in place, database and web
+layers stay linked; it opens as a new, unsaved project.
 
 On the backstage's **Start** or **New** page, choose a blank **Map**, the **World Atlas** sample or
 **Open…**. **Save** and **Save As** write the project, named after its file; a project opened
@@ -138,6 +142,24 @@ other files RustGIS reads and writes.
 Changes to the project are commands, and each can be undone (++ctrl+z++) and redone
 (++ctrl+y++). Undo keeps the last 40 changes; starting or opening another project clears it.
 Exports and other files already written are not undone.
+
+### Repair Data Source
+
+If a linked file moved or was renamed, right-click its layer or local PMTiles/MBTiles tile
+archive and choose **Repair Data Source…**. For the selected layer, use **Data › Data Source ›
+Repair Source**, or find **Repair Data Source** (or **Repair Tile Archive**) in Command Search.
+Choose the replacement file or folder; when a container such as a GeoPackage holds several
+datasets, choose its table. The existing table is retained when available. Repair keeps the
+layer's identity and configuration, marks the project unsaved and can be undone or redone.
+If a tile archive is removed or reordered out of its captured slot while the dialog is open,
+the dialog closes rather than applying the replacement to another archive.
+It does not change embedded data, databases or web links. The web app cannot link to files
+on your computer: add the file again with **Add Data**.
+
+CLI and Python use the same commands: `layer.repairSource` with
+`{"layer":"Cities","path":"/data/towns.fgb"}` (and optional `"table"`), or `map.repairTiles`
+with `{"index":0,"path":"/data/tiles.pmtiles"}`. Tile archives can also be selected by
+`"name"` or catalog `"id"`.
 
 ## Keyboard shortcuts
 
