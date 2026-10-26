@@ -180,7 +180,7 @@ opt-in to the operating system's password store; see [Named connections](#named-
 for reconnect, selection and forgetting rules. Opening a project can use a remembered password
 only for a unique, exact saved-address match, or an explicit session selection. Otherwise a
 waiting layer offers **Log In…**, or a chooser when several remembered connections match.
-Without a matching connection, connect again with **Add Data › Database…**.
+Without a matching connection, connect again with **Home › Add › Add Data › Database…**.
 `PGPASSWORD` or libpq's password file (`~/.pgpass`, or
 `%APPDATA%\postgresql\pgpass.conf`) can serve when you explicitly add a table without a password;
 opening a project never newly authorizes these ambient credentials. A small table's features
@@ -297,7 +297,7 @@ remembered reconnects and explicit selection. Secret-named query values such as 
 `access_token` are removed from saved connection addresses. `SQLCMDPASSWORD` serves only when
 explicitly adding a database, not when opening a project. Windows integrated sign-in still
 requires that same address to have been added this session: opening a project does not
-authorize Windows identity. Reconnect with **Add Data › Database…** when needed. SQL queries
+authorize Windows identity. Reconnect with **Home › Add › Add Data › Database…** when needed. SQL queries
 (`layer.addSql`, the SQL pane) do not run on SQL Server connections.
 
 ## Web Data
@@ -331,8 +331,8 @@ it geocodes, and plugins need the network permission.
 
 ## S3 buckets
 
-An `s3://bucket/key` address works wherever data is added by its address: **Add Data › From
-URL…** and `layer.addUrl` (a cloud-optimised GeoTIFF is read in place by range, other files are
+An `s3://bucket/key` address works wherever data is added by its address: **Home › Add › Add Data ›
+From URL…** and `layer.addUrl` (a cloud-optimised GeoTIFF is read in place by range, other files are
 downloaded), PMTiles archives, `?data=` links, and STAC assets whose address is an `s3://` one.
 A public bucket needs nothing more: it is read anonymously from AWS.
 

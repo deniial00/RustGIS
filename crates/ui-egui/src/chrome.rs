@@ -630,7 +630,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.stac.sentinel2", "Sentinel-2 Explorer…", "Home › Web Data"),
     ("ui.stac.vantor", "Vantor…", "Home › Web Data"),
     ("ui.stac.usgsLidar", "USGS LiDAR…", "Home › Web Data › United States"),
-    ("ui.pane.sources", "Data Sources", "Home › Add / View › Windows"),
+    ("ui.pane.sources", "Data Sources", "Home › Add"),
     ("ui.plugins", "Plugin Manager…", "Plugins"),
     ("ui.mcpRelay", "MCP Relay", "Help › Help"),
     ("ui.pane.geoprocessing", "Tools Pane", "View › Windows"),

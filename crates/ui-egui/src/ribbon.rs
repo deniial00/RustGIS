@@ -486,7 +486,17 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 sample_data_gallery(ui, app);
             },
         );
-        big(ui, app, "web_map", "Data\nSources", "Open the Data Sources pane.", "ui.pane.sources", Value::Null, false, false);
+        big(
+            ui,
+            app,
+            "web_map",
+            "Data\nSources",
+            "Show or hide the Data Sources pane.",
+            "ui.pane.sources",
+            Value::Null,
+            app.ui.left == Some(crate::LeftPane::Sources),
+            false,
+        );
         big_menu(ui, app, "web_data", "Web\nData", "Add data from public web services and catalogs.", web_data_menu);
     });
     group(ui, "Selection", |ui| {

@@ -56,7 +56,7 @@ height, with the labels of extruded features on their roofs. While a tilted map 
 picture drawn last is laid over the ground and the extrusions and markers are moved with it, and the map is
 drawn again once it settles. `map.setBearing` sets the bearing (`{"bearing": 90}`
 puts east at the top; `{"by": 15}` turns it further), `map.setPitch` the pitch (`{"pitch": 60}`,
-or `{"by": 10}`), `map.resetNorth` faces north and looks straight down, and **Go To XY** takes a
+or `{"by": 10}`), `map.resetNorth` faces north and looks straight down, and `map.goToXY` takes a
 `bearing` and a `pitch` too. Page layout map frames take their own bearing and pitch (see
 [Layouts](layouts.md)), and the globe turns and tilts the same way: tilted, its camera swings
 back about the centre of view, so the horizon comes into sight past the curve of the Earth.

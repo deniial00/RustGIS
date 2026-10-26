@@ -180,8 +180,8 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
       cloud-optimised GeoTIFF a file per date with `layer.addUrl`, giving its `start` and `end`.
       For example NASA GIBS daily MODIS imagery:
       `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/{date:YYYY-MM-DD}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`.
-    - A Zarr variable added with **Follow the time slider** (Add Data › Zarr…) shows the step the
-      slider is at; see [Zarr stores](data.md#zarr-stores).
+    - A Zarr variable added with **Follow the time slider** (Home › Add › Add Data › Zarr…) shows
+      the step the slider is at; see [Zarr stores](data.md#zarr-stores).
     - From scripts: `time.bind` (`"layer"`, `"field"`, `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`), `time.set` (the
       window: `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`, `"speed"`, `"loop"`,
       `"format"`…), `time.goTo` (`"date"`, or `"step"` from 0), `time.step` (`"by"`, negative goes
