@@ -474,6 +474,7 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
                 submenu_row(ui, "", tl!("New Connection"), |ui| {
                     for (kind, label) in crate::connectionui::KINDS {
+                        // Database drivers aren't built for the browser.
                         if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
                             continue;
                         }
