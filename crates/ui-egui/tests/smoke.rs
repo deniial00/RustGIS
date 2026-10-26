@@ -2924,6 +2924,7 @@ fn popup_titles_leave_room_for_controls() {
     for title in ["Oak".to_string(), "HIDDEN INTERSECTION Tab Sign (Oversized) ".repeat(4), "長い地物名".repeat(30)] {
         for count in [1, 2] {
             let mut h = harness();
+            h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
             let features: Vec<_> = (0..count)
                 .map(|_| json!({"type": "Feature", "properties": {"name": title}, "geometry": {"type": "Point", "coordinates": [0, 0]}}))
                 .collect();
