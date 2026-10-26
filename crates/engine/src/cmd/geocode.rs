@@ -272,5 +272,5 @@ fn lookup(g: &Geocoder, distinct: &[String]) -> Result<Lookup, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn lookup(_: &Geocoder, _: &[String]) -> Result<Lookup, String> {
-    Err("in the web app, geocode addresses with Home › Add Data › Geocode Addresses".into())
+    Err("in the web app, geocode addresses with Home › Add › Add Data › Geocode Addresses".into())
 }

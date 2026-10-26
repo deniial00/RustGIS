@@ -12865,7 +12865,7 @@ fn postgis_layers_reopen_without_secrets() {
     }))
     .unwrap();
     let e = src.open().unwrap_err();
-    assert!(e.contains("connect again with Add Data › Database"), "{e}");
+    assert!(e.contains("connect again with Home › Add › Add Data › Database"), "{e}");
     assert!(!src.is_open());
     // Saved again, it keeps its table and never a password.
     let saved = serde_json::to_string(&src).unwrap();
@@ -12923,7 +12923,7 @@ fn mysql_layers_reopen_without_secrets() {
     }))
     .unwrap();
     let e = src.open().unwrap_err();
-    assert!(e.contains("connect again with Add Data › Database"), "{e}");
+    assert!(e.contains("connect again with Home › Add › Add Data › Database"), "{e}");
     assert!(!src.is_open());
     let saved = serde_json::to_string(&src).unwrap();
     assert!(saved.contains("\"mysql\":{") && saved.contains("\"table\":\"roads\"") && !saved.contains("password"), "{saved}");
@@ -12989,7 +12989,7 @@ fn sqlserver_layers_reopen_without_secrets() {
     }))
     .unwrap();
     let e = src.open().unwrap_err();
-    assert!(e.contains("connect again with Add Data › Database"), "{e}");
+    assert!(e.contains("connect again with Home › Add › Add Data › Database"), "{e}");
     assert!(!src.is_open());
     let saved = serde_json::to_string(&src).unwrap();
     assert!(saved.contains("\"sqlserver\":{") && saved.contains("\"table\":\"roads\"") && !saved.contains("password"), "{saved}");
