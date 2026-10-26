@@ -13,6 +13,7 @@ which every package ships next to LICENSE. They are generated from `Cargo.lock` 
 | Sample data (`countries`, `countries_chn`, `cities`, `rivers`, `lakes` GeoJSON), embedded at build time from [rustgis-assets](https://github.com/opengeos/rustgis-assets/tree/main/data) | Natural Earth 1:110m, attributes trimmed; `countries_chn` is Natural Earth's China point of view (1:10m, simplified) | Public domain |
 | QGIS screenshot (`qgis-world-atlas.webp` in [rustgis-assets](https://github.com/opengeos/rustgis-assets/tree/main/images)), on the [RustGIS and QGIS](docs/comparison/qgis.md) page | Taken by the RustGIS project: [QGIS](https://qgis.org) 4.2 showing the Natural Earth sample data above | QGIS is GPL-2.0-or-later; the data is public domain |
 | QGIS test corpus (`crates/map/testdata/qgis/generated/`: styles, projects and their sample data) | Dominik Strebel ([@pick2510](https://github.com/pick2510)) for the RustGIS project: written by [QGIS](https://qgis.org) 4.2.3 through its API, from `generate.py` there; the data is made up | Apache-2.0 |
+| Analysis reference corpus (`crates/analysis/tests/reference/`: layers and expected results) | Written for the RustGIS project from `generate.py` there: the layers are made up; the expected results were computed by [GEOS](https://libgeos.org) 3.13.1 through [Shapely](https://shapely.readthedocs.io) 2.1.2, and distances by GeographicLib in [PROJ](https://proj.org) 9.5.1 through [pyproj](https://pyproj4.github.io/pyproj/) 3.7.2, run only to write them (GEOS is LGPL-2.1, Shapely BSD-3-Clause, PROJ and pyproj MIT; none is included in or linked into RustGIS) | Apache-2.0 |
 
 Raster coordinate systems are looked up by EPSG code in the PROJ definitions of the
 [crs-definitions](https://crates.io/crates/crs-definitions) crate (CC0-1.0), compiled into the
@@ -46,7 +47,11 @@ Copyright 2019 Google LLC (Apache-2.0); Batlow, Vik, Roma and Oleron from Fabio 
 [Scientific colour maps](https://www.fabiocrameri.ch/colourmaps/), Copyright (c) 2020 Fabio
 Crameri (MIT, through [cmcrameri](https://github.com/callumrollo/cmcrameri)); and Balance,
 Haline, Deep and Topo from [cmocean](https://matplotlib.org/cmocean/), Copyright (c) 2015
-Kristen M. Thyng (MIT). The MIT licence's terms: permission is granted, free of charge, to use,
+Kristen M. Thyng (MIT). The Matplotlib group's colour maps (`crates/map/src/color/matplotlib.rs`)
+are sampled from [rio-tiler](https://github.com/cogeotiff/rio-tiler)'s tables, Copyright (c) 2021
+cogeotiff (BSD-3-Clause): matplotlib's own maps (matplotlib licence; its
+ColorBrewer maps, such as Blues and RdYlBu, by Cynthia Brewer, Apache-2.0), cmocean's (MIT, as
+above) and rio-tiler's cfastie, rplumbo and schwarzwald. The MIT licence's terms: permission is granted, free of charge, to use,
 copy, modify, merge, publish, distribute, sublicense and sell copies, provided the copyright
 notice and permission notice are included; the software is provided "as is", without warranty
 of any kind.

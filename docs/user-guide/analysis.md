@@ -104,6 +104,13 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | IDW Interpolation | `idwInterpolation` | Analysis › Interpolation |
 | Ordinary Kriging | `kriging` | Analysis › Interpolation |
 
+**Simplify** uses Douglas–Peucker with a tolerance in kilometres. Each polygon ring keeps at
+least three different, non-collinear corners (plus the closing vertex), so a tolerance larger
+than a polygon produces a small ring instead of restoring its original vertices. Holes and
+multipart rings are retained. This is not a topology-preserving simplifier: check the result
+where holes or neighbouring polygons must stay aligned. The default tolerance remains 25 km;
+use a smaller value for local boundaries.
+
 Most feature tools process only the selected rows when an input has a selection. Selection tools
 instead replace the input's selection; Select Layer By Location honours the selecting layer's
 selection. Summarize Within counts the selected points against **all** input polygons, and
@@ -116,9 +123,16 @@ projection. Each feature is buffered in an azimuthal equidistant projection on t
 centred on it, so a point's buffer is exact; long lines and large polygon outlines are
 buffered in stretches of a few hundred kilometres to limit projection error. Negative Buffer
 distances shrink polygons. Buffer and Select Layer By Location limit distances to 5,000 km.
-Lengths and areas (Calculate Geometry Attributes, and Spatial Join's **Largest overlap**) are
-still measured on a sphere of radius 6,371 km: on the ellipsoid, lengths differ by up to about
-0.6 % and areas by up to about 0.9 % (a small area near a pole).
+**Calculate Geometry Attributes** measures polygon areas and perimeters, and line lengths,
+on the WGS 84 ellipsoid, independently of the map's display projection. Holes are subtracted
+regardless of ring winding, and multipart measurements are summed. Ring directions are
+normalized in continuous longitude space, so non-polar regions larger than half the Earth
+keep their full area and small antimeridian crossings stay small. Rings winding around a pole
+use the smaller polar region in either direction; reversing a ring does not select its global
+complement. Edges follow the shortest geodesics between vertices. The output fields remain
+`area_km2`, `perimeter_km` and `length_km`; point coordinates are unchanged.
+Spatial Join's **Largest overlap** still measures area on a sphere of radius 6,371 km; it can
+differ from the ellipsoid by up to about 0.9 % (a small area near a pole).
 
 **IDW Interpolation** works like the QGIS tool of the same name: every point weighs on every
 cell by 1/distanceᴾ, where P is the distance coefficient (2 by default). Lines and polygons

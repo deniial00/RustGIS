@@ -233,7 +233,7 @@ pub(crate) fn page_size(p: &Value, current: Option<(f64, f64)>) -> Result<(f64, 
 fn view_frame(s: &Session, w_mm: f64) -> (Coord, f64) {
     let m = s.map();
     let ground_w = s.view_size.0 * m.ground_res();
-    (m.center_lonlat(), (ground_w / (w_mm / 1000.0)).clamp(100.0, 1e10))
+    (m.center_lonlat(), (ground_w / (w_mm / 1000.0)).clamp(rustgis_map::layout::MIN_FRAME_SCALE, rustgis_map::layout::MAX_FRAME_SCALE))
 }
 
 /// The active map's bearing and pitch, for a frame showing its view.
@@ -635,7 +635,11 @@ fn globe_scale(map: &rustgis_map::Map, center: Coord, d_mm: f64) -> f64 {
     let cam = rustgis_map::layout::frame_camera(map, center, PROBE, 0.0, 0.0);
     let side = d_mm.max(1.0) * rustgis_map::layout::PT_PER_MM;
     let radius = rustgis_map::globe::Globe::new(&cam, side, side).disc_radius();
-    if radius.is_finite() && radius > 0.0 { (PROBE * 2.0 * radius / side).clamp(100.0, 1e10) } else { PROBE }
+    if radius.is_finite() && radius > 0.0 {
+        (PROBE * 2.0 * radius / side).clamp(rustgis_map::layout::MIN_FRAME_SCALE, rustgis_map::layout::MAX_FRAME_SCALE)
+    } else {
+        PROBE
+    }
 }
 
 /// Whether a sheet `short` × `long` mm suits an area `aspect` times as tall as it is wide better
@@ -1439,10 +1443,26 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             // Each polygon simplified to a tenth of a millimetre on the disc (its scale in metres),
             // so the project keeps a sketch of the layers for it, not a second full copy of them.
             let tolerance_m = globe * 1e-4;
-            // A polygon too small for that (an island) would collapse to a ring of under four
-            // points: it keeps its own shape, already small.
+            // On the locator, sub-tolerance rings keep their outline rather than becoming triangles.
             let sketch = |g: &rustgis_data::Geometry| {
-                let simple = rustgis_analysis::simplify_geometry(g, tolerance_m);
+                let mut simple = rustgis_analysis::simplify_geometry(g, tolerance_m);
+                if let (rustgis_data::Geometry::Polygon(original), rustgis_data::Geometry::Polygon(reduced)) = (g, &mut simple) {
+                    for (original, reduced) in original.iter().flatten().zip(reduced.iter_mut().flatten()) {
+                        let mut extent = Extent::EMPTY;
+                        // Keep the extent continuous across the antimeridian.
+                        let mut longitude = original.iter().find(|c| c.is_finite()).map_or(0.0, |c| c.x);
+                        for &c in original.iter().filter(|c| c.is_finite()) {
+                            longitude += (c.x - longitude + 180.0).rem_euclid(360.0) - 180.0;
+                            extent.expand(Coord::new(longitude, c.y));
+                        }
+                        let projected = rustgis_geom::extent_to_merc(&extent);
+                        let size_m =
+                            projected.width().hypot(projected.height()) * extent.center().y.clamp(-85.0, 85.0).to_radians().cos().max(0.01);
+                        if size_m < tolerance_m {
+                            *reduced = original.clone();
+                        }
+                    }
+                }
                 match &simple {
                     rustgis_data::Geometry::Polygon(polys) if polys.iter().flatten().all(|ring| ring.len() >= 4) => simple,
                     _ => g.clone(),
@@ -2745,7 +2765,7 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
             if let Some(g) = new_grid {
                 *grid = g;
             }
-            if let Some(v) = num("scale", 100.0, 1e10) {
+            if let Some(v) = num("scale", rustgis_map::layout::MIN_FRAME_SCALE, rustgis_map::layout::MAX_FRAME_SCALE) {
                 *scale = v;
             }
             if let Some(c) = new_center {
@@ -2816,7 +2836,10 @@ fn frame_zoom(s: &mut Session, p: &Value) -> CmdResult {
         "view" => {
             let w = l.element(frame).map(|e| e.w).unwrap_or(100.0);
             let ground_w = s.view_size.0 * m.ground_res();
-            let (c, sc) = (m.center_lonlat(), (ground_w / (w / 1000.0)).clamp(100.0, 1e10));
+            let (c, sc) = (
+                m.center_lonlat(),
+                (ground_w / (w / 1000.0)).clamp(rustgis_map::layout::MIN_FRAME_SCALE, rustgis_map::layout::MAX_FRAME_SCALE),
+            );
             let (b, t) = view_turn(s);
             if let Some(ElementKind::MapFrame { center, scale, bearing, pitch, .. }) =
                 s.project.layouts.get_mut(li).and_then(|l| l.element_mut(frame)).map(|e| &mut e.kind)

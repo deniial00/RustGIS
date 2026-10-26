@@ -26,7 +26,7 @@ pub struct PageInfo {
 /// Largest page drawn, in pixels per side and in all (less in the browser, where memory is
 /// tighter): a larger page is drawn at a lower resolution.
 const MAX_SIDE: f64 = 12_000.0;
-const MAX_PIXELS: f64 = if cfg!(target_arch = "wasm32") { 25_000_000.0 } else { 60_000_000.0 };
+pub(crate) const MAX_PIXELS: f64 = if cfg!(target_arch = "wasm32") { 25_000_000.0 } else { 60_000_000.0 };
 
 /// Whether skipping a failed frame would omit required complete-source content.
 pub(crate) fn frame_requires_complete(map: &Map, view: &View) -> bool {
@@ -382,9 +382,7 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
     // A layout with a decimal comma prints its scale with points between thousands: put in first,
     // so a page or layout name holding "{scale}" isn't read as the token.
     let t = match scale {
-        Some(scale) if layout.decimal_comma => {
-            t.replace("{scale}", &format!("1:{}", decimal(rustgis_map::graphics::thousands(scale), true)))
-        }
+        Some(scale) if layout.decimal_comma => t.replace("{scale}", &decimal(rustgis_map::graphics::scale_ratio(scale), true)),
         _ => t.to_string(),
     };
     let t = t

@@ -25,6 +25,8 @@
 //! positive, with physical dimensions from 1 pixel through the GPU's maximum 2D texture size.
 //! `"dt": seconds` sets each frame's length, default 0.25; a short one such as 0.016 catches the map mid-motion.
 //! The window opens the World Atlas sample.
+//! `"recovery": "/abs/dir"` on the first line gives the run that recovery folder, as the desktop
+//! app has one (Settings › Autosave; a copy left there is offered by the recovery dialog).
 //!
 //! Add `"ribbonSplit": true` to the first line for a compact reusable split-button showcase
 //! instead of the app. Its "Disable arrows", "Disable enclosing UI", and "Long two-line labels"
@@ -146,6 +148,10 @@ fn main() {
     let ribbon_split = lines.first().and_then(|l| l.get("ribbonSplit")).and_then(Value::as_bool).unwrap_or(false);
     let mut split_showcase = RibbonSplitShowcase::default();
     let mut app = RustGisApp::with_sample();
+    if let Some(dir) = lines.first().and_then(|l| l.get("recovery")).and_then(Value::as_str) {
+        let store = rustgis_ui_egui::FolderStore::open(std::path::Path::new(dir)).expect("recovery folder");
+        app = app.with_services(rustgis_ui_egui::Services { recovery: Some(Box::new(store)), ..Default::default() });
+    }
     // One shared wgpu render state: the app's GPU map backend and the harness's renderer must
     // live on the same device for the map's paint callback to be valid.
     let rs = {

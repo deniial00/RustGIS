@@ -3,7 +3,7 @@
 use geo::{BooleanOps, Contains, ConvexHull, InteriorPoint, Intersects, MultiPolygon, Orient, Simplify, orient::Direction};
 use rustgis_data::raster::Crs;
 use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value};
-use rustgis_geom::{Extent, geodesic_length_m, geodesic_ring_area_m2};
+use rustgis_geom::Extent;
 use serde_json::Value as Json;
 
 use crate::convert::{from_line, from_multipolygon, from_point, to_geo, to_multiline, to_multipolygon};
@@ -892,11 +892,54 @@ fn xy_table_to_point(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     Ok(ToolResult { output: Output::Layer(out), messages })
 }
 
+// Three fixed non-collinear anchors prevent ring collapse and keep vertex counts monotonic.
+fn simplify_ring(ring: &geo::LineString<f64>, eps: f64) -> geo::LineString<f64> {
+    use geo::{Distance, Euclidean};
+    if ring.0.len() <= 4 || ring.0.iter().any(|c| !c.x.is_finite() || !c.y.is_finite()) {
+        return ring.clone();
+    }
+    let Some(&first) = ring.0.first() else { return ring.clone() };
+    let Some((b, _)) = ring.0.iter().enumerate().map(|(i, c)| (i, Euclidean.distance(first, *c))).max_by(|a, b| a.1.total_cmp(&b.1)) else {
+        return ring.clone();
+    };
+    let Some(&second) = ring.0.get(b) else { return ring.clone() };
+    let Some((c, _)) = ring
+        .0
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, ((second.x - first.x) * (c.y - first.y) - (second.y - first.y) * (c.x - first.x)).abs()))
+        .filter(|(_, area)| area.is_finite() && *area > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+    else {
+        return ring.clone();
+    };
+    let mut stops = [0, b, c, ring.0.len() - 1];
+    stops.sort_unstable();
+    let mut corners = Vec::new();
+    for bounds in stops.windows(2) {
+        let [start, end] = bounds else { return ring.clone() };
+        let Some(arc) = ring.0.get(*start..=*end) else { return ring.clone() };
+        let simple = geo::LineString::new(arc.to_vec()).simplify(eps);
+        corners.extend(simple.0.into_iter().skip(usize::from(!corners.is_empty())));
+    }
+    geo::LineString::new(corners)
+}
+
 /// A geometry simplified (Douglas–Peucker) to a tolerance in metres.
 pub fn simplify_geometry(g: &Geometry, tol_m: f64) -> Geometry {
     let eps = tol_m * merc_scale(feature_lat(g));
     let sg = match g {
-        Geometry::Polygon(_) => to_multipolygon(g).and_then(|m| from_multipolygon(&m.simplify(eps))),
+        Geometry::Polygon(_) => to_multipolygon(g).and_then(|mut m| {
+            for p in &mut m.0 {
+                p.exterior_mut(|r| *r = simplify_ring(r, eps));
+                p.interiors_mut(|rings| {
+                    for r in rings {
+                        *r = simplify_ring(r, eps);
+                    }
+                });
+            }
+            from_multipolygon(&m)
+        }),
         Geometry::Line(_) => to_multiline(g).and_then(|m| from_line(&m.simplify(eps))),
         _ => None,
     };
@@ -912,14 +955,9 @@ fn simplify(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         let Some(f) = ds.features.get(r) else { continue };
         let Some(g) = &f.geometry else { continue };
         before += g.coord_count();
-        let eps = tol * merc_scale(feature_lat(g));
-        let sg = match g {
-            Geometry::Polygon(_) => to_multipolygon(g).and_then(|m| from_multipolygon(&m.simplify(eps))),
-            Geometry::Line(_) => to_multiline(g).and_then(|m| from_line(&m.simplify(eps))),
-            other => Some(other.clone()),
-        };
-        after += sg.as_ref().map(|g| g.coord_count()).unwrap_or(0);
-        out.push(sg, f.attrs.clone());
+        let sg = simplify_geometry(g, tol);
+        after += sg.coord_count();
+        out.push(Some(sg), f.attrs.clone());
     }
     result(out, format!("Simplify: {before} → {after} vertices"))
 }
@@ -1198,6 +1236,8 @@ fn count_points(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
 }
 
 fn calculate_geometry(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
+    use geo::{Geodesic, GeodesicArea, Length};
+    let line = |coords: &[Coord]| geo::LineString::new(coords.iter().map(|c| geo::Coord { x: c.x, y: c.y }).collect());
     let ds = input(inp, p, "input")?;
     let mut out = ds.clone();
     match ds.geometry_type {
@@ -1209,9 +1249,26 @@ fn calculate_geometry(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
                 if let Some(Geometry::Polygon(polys)) = &f.geometry {
                     for rings in polys {
                         for (i, r) in rings.iter().enumerate() {
-                            let ra = geodesic_ring_area_m2(r);
+                            let mut ring = line(r);
+                            ring.close();
+                            // Orient in continuous longitude space, including small dateline crossings.
+                            let mut longitude = ring.0.first().map_or(0.0, |c| c.x);
+                            for c in &mut ring.0 {
+                                longitude += (c.x - longitude + 180.0).rem_euclid(360.0) - 180.0;
+                                c.x = longitude;
+                            }
+                            let polar = ring.0.first().zip(ring.0.last()).is_some_and(|(a, b)| (a.x - b.x).abs() > 180.0);
+                            let orientable = !polar && ring.0.iter().all(|c| c.x.is_finite() && (-90.0..=90.0).contains(&c.y));
+                            let polygon = geo::Polygon::new(ring, vec![]);
+                            let (rp, ra) = if orientable {
+                                polygon.orient(Direction::Default).geodesic_perimeter_area_unsigned()
+                            } else {
+                                // Keep smaller polar caps; invalid coordinates bypass planar orientation.
+                                let (perimeter, area) = polygon.geodesic_perimeter_area_signed();
+                                (perimeter, area.abs())
+                            };
                             a += if i == 0 { ra } else { -ra };
-                            per += geodesic_length_m(r);
+                            per += rp;
                         }
                     }
                 }
@@ -1227,7 +1284,7 @@ fn calculate_geometry(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
             let fl = out.ensure_field("length_km", FieldType::Double);
             for f in &mut out.features {
                 let len: f64 = match &f.geometry {
-                    Some(Geometry::Line(parts)) => parts.iter().map(|p| geodesic_length_m(p)).sum(),
+                    Some(Geometry::Line(parts)) => parts.iter().map(|p| Geodesic.length(&line(p))).sum(),
                     _ => 0.0,
                 };
                 if let Some(v) = f.attrs.get_mut(fl) {
@@ -2082,6 +2139,82 @@ mod tests {
     }
 
     #[test]
+    fn simplify_rings_do_not_grow_with_tolerance() {
+        use geo::{Distance, Euclidean};
+        let ring = |x: f64, y: f64, radius: f64| {
+            (0..=80)
+                .map(|i| {
+                    let angle = (i % 80) as f64 * std::f64::consts::TAU / 80.0;
+                    let r = radius * (1.0 + 0.1 * (7.0 * angle).sin());
+                    Coord::new(x + r * angle.cos(), y + r * angle.sin())
+                })
+                .collect::<Vec<_>>()
+        };
+        let original = Geometry::Polygon(vec![vec![ring(10.5, 46.5, 0.1), ring(10.5, 46.52, 0.001)], vec![ring(11.0, 46.5, 0.05)]]);
+        let mut ds = Dataset::new("zones", GeometryType::Polygon, vec![]);
+        ds.push(Some(original.clone()), vec![]);
+        let inputs = Map(HashMap::from([("zones".into(), ds)]));
+        let mut previous = original.coord_count();
+        for tolerance in [0.0, 100.0, 500.0, 1000.0, 2000.0, 5000.0, 25000.0, 100000.0] {
+            let simple = simplify_geometry(&original, tolerance);
+            assert!(simple.coord_count() <= previous, "{tolerance} m: {} > {previous}", simple.coord_count());
+            previous = simple.coord_count();
+            let Geometry::Polygon(parts) = &simple else { panic!("polygon required") };
+            assert_eq!(parts.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+            for rings in parts {
+                for r in rings {
+                    assert!(r.len() >= 4);
+                    assert_eq!(r.first(), r.last());
+                    assert!(rustgis_data::geometry::ring_area(r).abs() > 1e-14);
+                }
+            }
+            let source = to_multipolygon(&original).unwrap();
+            let target = to_multipolygon(&simple).unwrap();
+            for (a, b) in source.0.iter().zip(&target.0) {
+                for (a, b) in std::iter::once(a.exterior()).chain(a.interiors()).zip(std::iter::once(b.exterior()).chain(b.interiors())) {
+                    let deviation = a.0.iter().map(|c| Euclidean.distance(&geo::Point::from(*c), b)).fold(0.0_f64, f64::max);
+                    assert!(deviation <= tolerance * merc_scale(feature_lat(&original)) + 1e-6, "{tolerance} m: {deviation}");
+                }
+            }
+            let out =
+                layer(crate::run("simplify", &inputs, &serde_json::json!({"input":"zones", "tolerance":tolerance / 1000.0})).unwrap());
+            assert_eq!(out.features[0].geometry.as_ref(), Some(&simple));
+        }
+        assert_eq!(previous, 12, "three closed triangle rings at a very large tolerance");
+    }
+
+    #[test]
+    fn simplify_keeps_points_lines_and_degenerate_rings() {
+        use geo::Area;
+        let point = Geometry::Point(Coord::new(10.0, 46.0));
+        assert_eq!(simplify_geometry(&point, 1e6), point);
+        let line = Geometry::Line(vec![vec![Coord::new(10.0, 46.0), Coord::new(10.1, 46.0), Coord::new(10.2, 46.0)]]);
+        assert_eq!(simplify_geometry(&line, 1e6).coord_count(), 2);
+        let repeated = geo::LineString::new(vec![geo::Coord { x: 1.0, y: 1.0 }; 6]);
+        assert_eq!(simplify_ring(&repeated, 1e6), repeated);
+        let collinear = geo::LineString::from(vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(simplify_ring(&collinear, 1e6), collinear);
+        let both_sides = geo::LineString::from(vec![(0.0, 0.0), (3.0, 0.0), (-3.0, 0.0), (0.0, 0.0), (1.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(simplify_ring(&both_sides, 1e6), both_sides);
+        let concave = geo::LineString::from(vec![(0.0, 0.0), (3.0, 0.0), (2.0, 1.0), (-2.0, 1.0), (-3.0, 0.0), (-2.0, -1.0), (0.0, 0.0)]);
+        let mut previous = concave.0.len();
+        for tolerance in [0.1, 1.1, 2.5, 1e6] {
+            use geo::{Distance, Euclidean};
+            let reduced = simplify_ring(&concave, tolerance);
+            assert!((4..=previous).contains(&reduced.0.len()));
+            previous = reduced.0.len();
+            let deviation = concave.0.iter().map(|c| Euclidean.distance(&geo::Point::from(*c), &reduced)).fold(0.0_f64, f64::max);
+            assert!(deviation <= tolerance + 1e-12);
+            assert!(geo::Polygon::new(reduced, vec![]).unsigned_area() > 0.0);
+        }
+        assert_eq!(previous, 4);
+        let triangle = geo::LineString::from(vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)]);
+        assert_eq!(simplify_ring(&triangle, 1e6), triangle);
+        let nonfinite = geo::LineString::from(vec![(0.0, 0.0), (f64::INFINITY, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]);
+        assert_eq!(simplify_ring(&nonfinite, 1e6), nonfinite);
+    }
+
+    #[test]
     fn all_tools_run() {
         let m = inputs();
         let j = |v: serde_json::Value| v;
@@ -2127,6 +2260,155 @@ mod tests {
             let radius = on_wgs84_m(center, *vertex);
             assert!((radius - 152.4).abs() < 1e-6, "radius: {radius}");
         }
+    }
+
+    // Reference values from PROJ / pyproj 3.7.2 Geod(ellps="WGS84"), in km² and km.
+    #[test]
+    fn calculate_geometry_uses_wgs84_for_polygons() {
+        let rectangle = |x: f64, y: f64, w: f64, h: f64| {
+            vec![Coord::new(x, y), Coord::new(x + w, y), Coord::new(x + w, y + h), Coord::new(x, y + h), Coord::new(x, y)]
+        };
+        for (lat, area, perimeter) in [
+            (0.0, 132.93794889680612, 68.77959742996498),
+            (46.5, 92.07715389612198, 58.58311003354862),
+            (60.0, 67.04587460470582, 52.371257858418176),
+        ] {
+            let parts = vec![
+                vec![rectangle(10.5, lat, 0.1, 0.1), rectangle(10.52, lat + 0.02, 0.02, 0.02)],
+                vec![rectangle(11.0, lat, 0.03, 0.04)],
+            ];
+            for reverse in [false, true] {
+                let mut parts = parts.clone();
+                if reverse {
+                    for ring in parts.iter_mut().flatten() {
+                        ring.reverse();
+                    }
+                }
+                let mut ds = Dataset::new("zones", GeometryType::Polygon, vec![Field::new("code", FieldType::Text)]);
+                ds.push(Some(Geometry::Polygon(parts)), vec![Value::Text("Z1".into())]);
+                let inputs = Map(HashMap::from([("zones".into(), ds.clone())]));
+                let out = layer(crate::run("calculateGeometry", &inputs, &serde_json::json!({"input":"zones"})).unwrap());
+                assert_eq!(out.features[0].geometry, ds.features[0].geometry);
+                assert_eq!(out.value(0, 0), &Value::Text("Z1".into()));
+                let measured_area = out.value(0, out.field_index("area_km2").unwrap()).as_f64().unwrap();
+                let measured_perimeter = out.value(0, out.field_index("perimeter_km").unwrap()).as_f64().unwrap();
+                assert!((measured_area - area).abs() < 1e-6, "{lat}, reversed={reverse}: {measured_area} vs {area}");
+                assert!((measured_perimeter - perimeter).abs() < 1e-6, "{lat}: {measured_perimeter} vs {perimeter}");
+                assert_eq!(inputs.0["zones"], ds);
+            }
+        }
+        let ring = vec![
+            Coord::new(179.9, 10.0),
+            Coord::new(-179.9, 10.0),
+            Coord::new(-179.9, 10.1),
+            Coord::new(179.9, 10.1),
+            Coord::new(179.9, 10.0),
+        ];
+        let mut ds = Dataset::new("island", GeometryType::Polygon, vec![]);
+        ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![]);
+        let inputs = Map(HashMap::from([("island".into(), ds)]));
+        let out = layer(crate::run("calculateGeometry", &inputs, &serde_json::json!({"input":"island"})).unwrap());
+        assert!((out.value(0, out.field_index("area_km2").unwrap()).as_f64().unwrap() - 242.50305444813918).abs() < 1e-6);
+        assert!((out.value(0, out.field_index("perimeter_km").unwrap()).as_f64().unwrap() - 65.97062684618793).abs() < 1e-6);
+    }
+
+    #[test]
+    fn calculate_geometry_keeps_large_regions_and_reversed_small_rings() {
+        let ring = |points: &[(f64, f64)]| points.iter().map(|&(x, y)| Coord::new(x, y)).collect::<Vec<_>>();
+        let band = ring(&[
+            (-170.0, -60.0),
+            (-85.0, -60.0),
+            (0.0, -60.0),
+            (85.0, -60.0),
+            (170.0, -60.0),
+            (170.0, 60.0),
+            (85.0, 60.0),
+            (0.0, 60.0),
+            (-85.0, 60.0),
+            (-170.0, 60.0),
+            (-170.0, -60.0),
+        ]);
+        let hole = ring(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]);
+        // GeographicLib 2.1 WGS84 Polygon.Compute: unsigned for the band, signed absolute for caps.
+        let cases = [
+            ("large", vec![band, hole], 435312377.1122553 - 12308.778361469453, 61868.48818267019 + 443.77091724830194),
+            (
+                "north",
+                vec![ring(&[(-135.0, 80.0), (-45.0, 80.0), (45.0, 80.0), (135.0, 80.0), (-135.0, 80.0)])],
+                2507270.031169875,
+                6301.599963614222,
+            ),
+            (
+                "south",
+                vec![ring(&[(-135.0, -80.0), (-45.0, -80.0), (45.0, -80.0), (135.0, -80.0), (-135.0, -80.0)])],
+                2507270.031169875,
+                6301.599963614222,
+            ),
+            (
+                "dateline",
+                vec![ring(&[(179.9, 10.0), (-179.9, 10.0), (-179.9, 10.1), (179.9, 10.1), (179.9, 10.0)])],
+                242.50305444813918,
+                65.97062684618793,
+            ),
+        ];
+        for (name, rings, area, perimeter) in cases {
+            for reverse in [false, true] {
+                let mut rings = rings.clone();
+                if reverse {
+                    for ring in &mut rings {
+                        ring.reverse();
+                    }
+                }
+                let geometry = Geometry::Polygon(vec![rings]);
+                let mut ds = Dataset::new(name, GeometryType::Polygon, vec![]);
+                ds.push(Some(geometry.clone()), vec![]);
+                let inputs = Map(HashMap::from([(name.into(), ds)]));
+                let out = layer(crate::run("calculateGeometry", &inputs, &serde_json::json!({"input":name})).unwrap());
+                let measured = out.value(0, out.field_index("area_km2").unwrap()).as_f64().unwrap();
+                let per = out.value(0, out.field_index("perimeter_km").unwrap()).as_f64().unwrap();
+                assert!((measured - area).abs() < 1e-6, "{name}, reversed={reverse}: {measured} vs {area}");
+                assert!((per - perimeter).abs() < 1e-6, "{name}, reversed={reverse}: {per} vs {perimeter}");
+                assert_eq!(out.features[0].geometry.as_ref(), Some(&geometry));
+            }
+        }
+    }
+
+    #[test]
+    fn calculate_geometry_does_not_orient_invalid_coordinates() {
+        for bad in [Coord::new(f64::NAN, 0.0), Coord::new(f64::INFINITY, 0.0), Coord::new(0.0, f64::NAN), Coord::new(0.0, 100.0)] {
+            let mut ds = Dataset::new("invalid", GeometryType::Polygon, vec![]);
+            ds.push(
+                Some(Geometry::Polygon(vec![vec![vec![
+                    Coord::new(0.0, 0.0),
+                    Coord::new(1.0, 0.0),
+                    bad,
+                    Coord::new(0.0, 1.0),
+                    Coord::new(0.0, 0.0),
+                ]]])),
+                vec![],
+            );
+            let inputs = Map(HashMap::from([("invalid".into(), ds)]));
+            assert!(crate::run("calculateGeometry", &inputs, &serde_json::json!({"input":"invalid"})).is_ok());
+        }
+    }
+
+    #[test]
+    fn calculate_geometry_uses_wgs84_for_lines() {
+        let mut ds = Dataset::new("routes", GeometryType::Polyline, vec![]);
+        let parts = vec![
+            vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0)],
+            vec![Coord::new(10.0, 60.0), Coord::new(10.0, 61.0)],
+            vec![Coord::new(179.9, 10.0), Coord::new(-179.9, 10.0)],
+        ];
+        ds.push(Some(Geometry::Line(parts)), vec![]);
+        ds.push(None, vec![]);
+        let inputs = Map(HashMap::from([("routes".into(), ds.clone())]));
+        let out = layer(crate::run("calculateGeometry", &inputs, &serde_json::json!({"input":"routes"})).unwrap());
+        let length = out.field_index("length_km").unwrap();
+        let expected = 111.31949079327356 + 111.42072786973769 + 21.92787247793737;
+        assert!((out.value(0, length).as_f64().unwrap() - expected).abs() < 1e-6);
+        assert_eq!(out.value(1, length).as_f64(), Some(0.0));
+        assert_eq!(out.features[0].geometry, ds.features[0].geometry);
     }
 
     /// Calculate Geometry stores full-precision values (#513): rounding to 0.01 km² gave every

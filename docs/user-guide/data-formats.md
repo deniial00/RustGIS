@@ -190,6 +190,30 @@ format and bounds; `service.coverage` gives the GetCoverage address alone). Movi
 ask for it again: add it again for another area. The server reprojects it to EPSG:4326 (WCS 2.0
 through its CRS extension); one that can't answers with an error, which is shown.
 
+A WFS, OGC API Features or ArcGIS feature layer comes whole, as in other GIS programs. A large
+one (a country's municipalities, hundreds of megabytes) can be asked for over an area instead:
+tick **Only the map's area** in the dialog, or give `service.add` a `"bbox"`
+(`[west, south, east, north]` in longitude/latitude, or `"view"`). The service then sends only
+the features that cross the area, whole, not clipped. `service.add` then zooms to the box given
+(not to the whole layer's bounds), and leaves the view as it is for `"view"`. The box is asked in
+each service's own terms:
+
+- **WFS 1.1 and 2.0:** `BBOX`, in CRS84 when the feature type offers it, else in
+  `urn:ogc:def:crs:EPSG::4326`, latitude first as that name fixes.
+- **OGC API Features:** `bbox`, longitude first; the `next` pages keep it.
+- **ArcGIS:** an envelope in EPSG:4326 the features intersect; the pages past the record limit
+  keep it.
+
+A WFS 1.0 service reads its box in the feature type's own coordinate system, so it is asked for
+the whole layer, as is an area across the antimeridian; a note says so. When a whole layer takes
+longer than `service.add` waits (a minute), the error suggests `"bbox"`:
+
+```sh
+rustgis-cli run --cmd 'service.add={"url":"https://geoservicos.ibge.gov.br/geoserver/wfs","layer":"CGMAT:qg_2024_030_munic","bbox":[-45.99,-10.93,-40.37,-2.74]}'
+```
+
+The layer holds the features of the area it was added for: moving the map doesn't ask for more.
+
 For callers that fetch documents themselves (including the web app), `service.layers` accepts
 `text` for the initial document and `documents: [{"url": "…", "text": "…"}]` for subsequent
 responses. It returns `next` while another collections document is needed; supplied documents
@@ -197,6 +221,38 @@ never cause a blocking capabilities fetch. Each listed layer includes `source_ur
 and the same documents to `service.add` to distinguish layers with the same name. Discovery
 follows at most four documents and rejects loops and disallowed addresses. Collection lists
 aren't paged. On the desktop, feature downloads follow their `next` pages (see the table above).
+
+### Secured ArcGIS services
+
+A secured ArcGIS service answers error 499, "Token Required". There are two ways in:
+
+- **Sign in to ArcGIS** (in Add From Service, shown for ArcGIS addresses; `arcgis.signIn`) signs in
+  to ArcGIS Online, an ArcGIS Online organization (`https://myorg.maps.arcgis.com`) or an ArcGIS
+  Enterprise portal (`https://gis.example.org/portal`) on the portal's own page, with its single
+  sign-on and multi-factor checks: RustGIS never sees the password. It uses OAuth 2.0 with PKCE.
+  ArcGIS Online needs no setup: leave **Client ID** blank and RustGIS's own app is used. An
+  Enterprise portal needs the client ID of an app registered on it (**Content › New item ›
+  Developer credentials › OAuth 2.0 credentials**) whose redirect URLs list RustGIS's callback:
+  `http://127.0.0.1:7290/arcgis/callback` for the desktop app and the command line (give
+  `"port"` to `arcgis.signIn` for another port, and register that address instead), and
+  `oauth-callback.html` next to the web app's page for the browser (for example
+  `https://web.rustgis.app/oauth-callback.html`), where the sign-in opens in a pop-up window.
+  ArcGIS accepts only an address the app registers, port and path included. The portal and
+  client ID are remembered; the session is not.
+- **A token with the address**: a service address given with `?token=…` (from the portal, or
+  `arcgis.token` with `"url"` and `"token"`) keeps the token for that ArcGIS Server and takes it
+  out of the address the layer keeps.
+
+A token is sent (in the `X-Esri-Authorization` header; in the browser, as the request's `token`
+parameter, since ArcGIS's query endpoints refuse the header from web pages) only where its session
+reaches: the portal
+and, for ArcGIS Online, the organization's own hosted services (`services*.arcgis.com/<org id>/…`,
+`tiles.arcgis.com/tiles/<org id>/…`), or, for ArcGIS Enterprise, the portal's host and its
+federated servers; a token given with an address goes to that server alone. Its layers, tiles and
+feature pages are then read with it. Tokens live in memory for the session, never in a project or
+a connection, and a sign-in renews itself until the portal's session ends (two weeks at most).
+**Sign out** (`arcgis.signOut`) forgets it (and, on the desktop, revokes it with the portal); `arcgis.status` lists
+the sessions.
 
 ### Catalogues
 
