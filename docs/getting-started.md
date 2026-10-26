@@ -50,7 +50,7 @@ including delimited text, URLs and services. Shapefiles work in the browser too:
 the `.shp` and `.dbf` together, with `.shx` and `.prj` if available, or use a ZIP containing
 them. **Home › Add › Data Sources** opens saved data connections and recent sources.
 
-**Project › New Map** starts a blank project. **Home › Web Data** finds public satellite imagery,
+**Project › New Map** starts a blank project. **Home › Add › Web Data** finds public satellite imagery,
 Overture Maps, OpenStreetMap, NASA Earthdata, open-data portals and more
 (see [Web Data](user-guide/web-data.md)). Desktop database connections include PostGIS,
 MySQL/MariaDB and SQL Server/Azure SQL. See [Data](user-guide/data.md) and

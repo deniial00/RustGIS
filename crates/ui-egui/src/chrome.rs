@@ -620,16 +620,16 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
 /// The `ui.*` commands Command Search lists: (id, label, ribbon location).
 pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.addData", "Add Data…", "Home › Add"),
-    ("ui.addDelimited", "Add Delimited Text…", "Home › Add"),
-    ("ui.addUrl", "Add Data From URL…", "Home › Add"),
-    ("ui.addZarr", "Add Zarr Variable…", "Home › Add"),
-    ("ui.addService", "Add From Service…", "Home › Add"),
-    ("ui.searchOpenData", "Search Open Data…", "Home › Web Data"),
-    ("ui.stac.planet", "Planet Open Data…", "Home › Web Data"),
-    ("ui.stac.portolan", "Portolan…", "Home › Web Data"),
-    ("ui.stac.sentinel2", "Sentinel-2 Explorer…", "Home › Web Data"),
-    ("ui.stac.vantor", "Vantor…", "Home › Web Data"),
-    ("ui.stac.usgsLidar", "USGS LiDAR…", "Home › Web Data › United States"),
+    ("ui.addDelimited", "Add Delimited Text…", "Home › Add › Add Data"),
+    ("ui.addUrl", "Add Data From URL…", "Home › Add › Add Data"),
+    ("ui.addZarr", "Add Zarr Variable…", "Home › Add › Add Data"),
+    ("ui.addService", "Add From Service…", "Home › Add › Add Data"),
+    ("ui.searchOpenData", "Search Open Data…", "Home › Add › Web Data"),
+    ("ui.stac.planet", "Planet Open Data…", "Home › Add › Web Data"),
+    ("ui.stac.portolan", "Portolan…", "Home › Add › Web Data"),
+    ("ui.stac.sentinel2", "Sentinel-2 Explorer…", "Home › Add › Web Data"),
+    ("ui.stac.vantor", "Vantor…", "Home › Add › Web Data"),
+    ("ui.stac.usgsLidar", "USGS LiDAR…", "Home › Add › Web Data › United States"),
     ("ui.pane.sources", "Data Sources", "Home › Add"),
     ("ui.plugins", "Plugin Manager…", "Plugins"),
     ("ui.mcpRelay", "MCP Relay", "Help › Help"),
@@ -789,6 +789,18 @@ fn search_action(id: &str) -> Option<SearchAction> {
     })
 }
 
+/// Desktop-only interactive actions stay visible but disabled in web Command Search.
+fn search_platform_disabled(id: &str, web: bool) -> Option<&'static str> {
+    if !web {
+        return None;
+    }
+    match id {
+        "project.addFolder" => Some("folder connections need the desktop app"),
+        "layer.addDatabase" => Some("databases are read through DuckDB, a program the browser can't run"),
+        _ => None,
+    }
+}
+
 /// Availability of the interactive entry point, not the parameterized engine operation.
 fn search_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
     if id.starts_with("gp:") || id.starts_with("panel:") || id.starts_with("pane:") {
@@ -797,9 +809,8 @@ fn search_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
     if matches!(search_action(id), Some(SearchAction::Workflow(_))) {
         return None; // The workflow lets the user choose its inputs, including the layer.
     }
-    // The ribbon hides the Database dialog in the browser for the same reason.
-    if id == "layer.addDatabase" && cfg!(target_arch = "wasm32") {
-        return Some("databases are read through DuckDB, a program the browser can't run");
+    if let Some(reason) = search_platform_disabled(id, cfg!(target_arch = "wasm32")) {
+        return Some(reason);
     }
     why_disabled(app, id).or_else(|| {
         (search_action(id).is_none() && app.session.registry.get(id).is_some_and(rustgis_engine::CommandSpec::needs_input))
@@ -1166,6 +1177,15 @@ pub fn notices(app: &mut RustGisApp, ctx: &egui::Context) {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_only_search_actions_are_disabled_only_on_the_web() {
+        for id in ["project.addFolder", "layer.addDatabase"] {
+            assert!(search_platform_disabled(id, true).is_some(), "{id} must explain its web restriction");
+            assert_eq!(search_platform_disabled(id, false), None, "{id} stays available on desktop");
+        }
+        assert_eq!(search_platform_disabled("ui.addData", true), None, "browser file uploads remain available");
+    }
 
     #[test]
     fn typed_scales_read_as_people_write_them() {

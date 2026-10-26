@@ -38,6 +38,8 @@ file picker opens formats listed on [Supported Data Formats](data-formats.md), i
 cloud-optimised GeoTIFF, GeoParquet and FlatGeobuf (read in place, a view at a time; see [Files
 on the web](data-formats.md#files-on-the-web)). **Home › Add › Data Sources** opens the pane with
 saved connections, favourites, recent data and the public-source library.
+On the desktop, **Home › Add › Add Data › Add Folder…** connects a folder to the Browser; the web
+app does not offer folder connections.
 **Home › Add › Add Data › Delimited Text…** asks for a CSV or a spreadsheet first, then lists its columns to pick the x and y (or WKT)
 ones from, with the coordinate system (such as `EPSG:2263`) and the separator (changing it reads
 the columns again); `info.fileColumns` lists them for scripts. Add Data finds them itself
@@ -302,7 +304,7 @@ authorize Windows identity. Reconnect with **Home › Add › Add Data › Datab
 
 ## Web Data
 
-**Home › Web Data** gathers public web services and catalogs: STAC imagery catalogs, Overture
+**Home › Add › Web Data** gathers public web services and catalogs: STAC imagery catalogs, Overture
 Maps, OpenStreetMap, NASA Earthdata, open-data portals, satellite embeddings and more. They have a
 page of their own: [Web Data](web-data.md).
 

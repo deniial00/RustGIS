@@ -481,6 +481,7 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     }
                 });
                 menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
+                #[cfg(not(target_arch = "wasm32"))]
                 menu_item(ui, app, "add_folder", "Add Folder…", "ui.addFolder", Value::Null);
                 ui.separator();
                 sample_data_gallery(ui, app);
@@ -594,6 +595,7 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         );
     });
 }
+
 /// The Web Data menu: public web services and catalogs, the ones covering the world in one
 /// alphabetical list (a service fits one place, where a list by topic would leave it in several).
 /// Services covering one country go in a submenu named after it.
@@ -1083,6 +1085,7 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                 for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
                     let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
                     if profile.sheet {
+                        // A sheet is arranged in one of the styles; a figure leaves that to its caption.
                         ui.menu_button(label, |ui| {
                             for (style, name) in rustgis_engine::cmd::layout::PUBLICATION_STYLES {
                                 let (name, about) = publication_style(style).unwrap_or_else(|| (tl!(*name), ""));

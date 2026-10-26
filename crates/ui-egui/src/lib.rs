@@ -436,7 +436,7 @@ pub enum RightPane {
     Format,
     /// The selected feature layer's labels (#617).
     Labeling,
-    /// A Home › Web Data service: the one `UiState::web_data` names.
+    /// A Home › Add › Web Data service: the one `UiState::web_data` names.
     WebData,
     /// A plugin's panel: the one `UiState::plugin_panel` names.
     Plugin,
@@ -2277,7 +2277,7 @@ impl RustGisApp {
                     "arcgis" => "arcgis",
                     _ => "auto",
                 };
-                // Opened from a menu (Home › Web Data): the dialog with it.
+                // Opened from a menu (Home › Add › Web Data): the dialog with it.
                 if self.dialogs.open != Some("addService") {
                     self.run("ui.dialog", json!({"name": "addService"}))?;
                 }
