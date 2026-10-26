@@ -15,7 +15,7 @@ not every EPSG code; azimuthal equidistant systems such as Equi7 need the deskto
 
 | Format | Extensions or source | How to add it | Notes |
 | --- | --- | --- | --- |
-| GeoJSON | `.geojson`, `.json` | Home › Add Data, or drop the file | Features with typed attributes; a `GeometryCollection` keeps its first readable member. Desktop FeatureCollections larger than 32 MiB use an in-place reader; layers with more than 100,000 features stream a view at a time. Other GeoJSON files load whole, up to 256 MiB. |
+| GeoJSON | `.geojson`, `.json` | Home › Add › Add Data, or drop the file | Features with typed attributes; a `GeometryCollection` keeps its first readable member. Desktop FeatureCollections larger than 32 MiB use an in-place reader; layers with more than 100,000 features stream a view at a time. Other GeoJSON files load whole, up to 256 MiB. |
 | Delimited text | `.csv`, `.tsv`, `.txt` | Add Data, or Add Data › Delimited Text… to choose the columns from the file's header | Comma, semicolon, tab or pipe separated (found from the header, or `"delimiter"`); `info.fileColumns` lists the columns and the ones found. Points from x/y columns (named like longitude/latitude or easting/northing, or chosen with `"x"` and `"y"`), or any geometry from a WKT/EWKT column (named like `wkt` or `geometry`, or `"wkt"`). Coordinates in another system are converted from `"crs"` (`EPSG:2263`, or WKT) or an EWKT `SRID=`; without either, coordinates outside longitude/latitude are pointed out. A file without coordinates opens as a standalone table. |
 | Shapefile | `.shp` with `.dbf` (and `.shx`), or zipped (`.zip`) | Add Data or drop the file; in the web app, pick or drop the `.shp` and `.dbf` together, with the `.shx` and `.prj` if there are (they open as one layer), or the zip | A zip may hold several Shapefiles, in folders, and other vector files (GeoJSON, CSV, GeoParquet, FlatGeobuf); each becomes a layer, at most 32 for the whole archive (Shapefiles first, so other files are left out when Shapefiles fill it). `.txt` files and macOS `__MACOSX` entries are passed over, and a member that can't be read is skipped and named in a notice. Converted to longitude/latitude from the coordinate system in its `.prj` (EPSG, Esri or OGC WKT, or WKT2 as PROJ and QGIS write it; Web Mercator, UTM, State Plane and other common projections); without a `.prj` it must be in longitude/latitude. On the desktop, one with more than 100,000 shapes (counted from its `.shx`) is read in place, a view at a time. |
 | KML / KMZ | `.kml`, `.kmz` | Add Data, drop the file, or upload it in the web app | A layer for each kind of geometry (points, lines, polygons), with each placemark's name, description, folder path and extended data. Styles are kept: the layer is drawn by unique values of its `style` field, with each KML style's line and fill colours, widths and icon colours (up to 64 styles). Multi-geometries and `gx:Track`s are read. Ground overlays (pictures on a `LatLonBox`, turned by its `rotation`) are raster layers kept in the project: the picture inside a KMZ, or a file beside a KML (not a web address, nor outside its folder); a `gx:LatLonQuad` isn't drawn. |
@@ -68,7 +68,7 @@ GDAL](data.md#formats-through-gdal).
 
 ## Files on the web
 
-**Home › Add Data › From URL…** (`layer.addUrl` with `"url"`) downloads a file by its `https://`
+**Home › Add › Add Data › From URL…** (`layer.addUrl` with `"url"`) downloads a file by its `https://`
 (or `http://` or `s3://`, see [S3 buckets](data.md#s3-buckets)) address and adds it like an
 uploaded file. Native formats include GeoJSON, delimited text, GeoParquet, FlatGeobuf, GeoPackage,
 zipped Shapefiles, KML/KMZ, GPX, spreadsheets, GeoRSS, GML, DXF, TopoJSON, LiDAR and rasters.
@@ -132,7 +132,7 @@ FlatGeobuf whose header hasn't been fetched yet, use the From URL… dialog or a
 
 ## Map and feature services
 
-**Home › Add Data › From Service…** connects to a service by its address, lists what it offers from
+**Home › Add › Add Data › From Service…** connects to a service by its address, lists what it offers from
 its capabilities. For OGC API feature collections, enter a group name (initially **My OGC Layer**)
 and choose **Import All**. The group expands into ordinary point, line and polygon layers with
 the same legends, styling and attribute tables as file imports. Other offerings have individual

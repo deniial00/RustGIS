@@ -1784,8 +1784,6 @@ impl RustGisApp {
             "ui.pane.contents" => self.ui.left = if self.ui.left == Some(LeftPane::Contents) { None } else { Some(LeftPane::Contents) },
             "ui.pane.catalog" => self.ui.left = if self.ui.left == Some(LeftPane::Catalog) { None } else { Some(LeftPane::Catalog) },
             "ui.pane.sources" => self.ui.left = if self.ui.left == Some(LeftPane::Sources) { None } else { Some(LeftPane::Sources) },
-            // Unlike `ui.pane.sources` this never closes the pane: a menu entry that opens it.
-            "ui.openSources" => self.ui.left = Some(LeftPane::Sources),
             "ui.pane.geoprocessing" => toggle_right(&mut self.ui, RightPane::Geoprocessing),
             "ui.pane.symbology" => {
                 // Showing its tab already open needs no layer.

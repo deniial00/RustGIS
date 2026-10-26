@@ -338,7 +338,7 @@ fn clipboard_group(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
-    // New maps and layouts and the project's items first: where work starts (#328).
+    // New maps and layouts first: where work starts (#328).
     project_group(app, ui);
     group(ui, "Navigate", |ui| {
         tool_btn(
@@ -391,7 +391,16 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
         col(ui, |ui| {
             small(ui, app, "prev_extent", "Previous", "Go back to the previous extent.", "map.prevExtent", Value::Null, false);
             small(ui, app, "next_extent", "Next", "Go forward to the next extent.", "map.nextExtent", Value::Null, false);
-            small(ui, app, "goto_xy", "Go To XY", "Pan to a longitude/latitude.", "ui.dialog", json!({"name": "goToXY"}), false);
+            small(
+                ui,
+                app,
+                "zoom_box",
+                "Zoom Box",
+                "Drag a box to zoom into.",
+                "tool.set",
+                json!({"tool": "zoomIn"}),
+                app.session.tool == Tool::ZoomIn,
+            );
         });
         col(ui, |ui| {
             let fp = app.session.map().view.first_person;
@@ -421,16 +430,10 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                     }
                 }
             });
-            small(
-                ui,
-                app,
-                "search",
-                "Find Place",
-                "Find a place or an address by name (OpenStreetMap).",
-                "ui.dialog",
-                json!({"name": "findPlace"}),
-                false,
-            );
+            small_menu(ui, app, "search", "Locate", "Find a place by coordinates, name, or address.", |ui, app| {
+                menu_item(ui, app, "goto_xy", "By Coordinates…", "ui.dialog", json!({"name": "goToXY"}));
+                menu_item(ui, app, "search", "By Place or Address…", "ui.dialog", json!({"name": "findPlace"}));
+            });
         });
         let on = app.ui.right == Some(crate::RightPane::Directions);
         big(
@@ -447,33 +450,43 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
     });
     group(ui, "Add", |ui| {
         big_form_menu(ui, app, "basemap", "Basemap", "Change the map's backdrop.", basemap_gallery);
-        big_menu(ui, app, "add_data", "Add\nData", "Add GeoJSON, CSV or Shapefile data to the map.", |ui, app| {
-            menu_item(ui, app, "", "Data…", "ui.addData", Value::Null);
-            menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
-            menu_item(ui, app, "", "Geocode Addresses…", "ui.dialog", json!({"name": "geocode"}));
-            menu_item(ui, app, "", "From URL…", "ui.addUrl", Value::Null);
-            menu_item(ui, app, "", "From Service…", "ui.addService", Value::Null);
-            menu_item(ui, app, "", "Zarr…", "ui.dialog", json!({"name": "zarr"}));
-            // Databases are read through DuckDB, a program the browser can't run.
-            #[cfg(not(target_arch = "wasm32"))]
-            menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
-            menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
-            // Saved connections live in the Data Sources pane, not here: one entry opens the pane
-            // (never closes it), and New Connection starts the form for a kind.
-            menu_item(ui, app, "", "Connections…", "ui.openSources", Value::Null);
-            submenu_row(ui, "", tl!("New Connection"), |ui| {
-                for (kind, label) in crate::connectionui::KINDS {
-                    // Database drivers aren't built for the browser.
-                    if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
-                        continue;
+        big_split_menu(
+            ui,
+            app,
+            "add_data",
+            "Add\nData",
+            "Add a data file to the map.",
+            "ui.addData",
+            Value::Null,
+            false,
+            "Add Data options",
+            "Add data from another source or use a data-adding option.",
+            true,
+            |ui, app| {
+                menu_item(ui, app, "", "Delimited Text…", "ui.addDelimited", Value::Null);
+                menu_item(ui, app, "", "Geocode Addresses…", "ui.dialog", json!({"name": "geocode"}));
+                menu_item(ui, app, "", "From URL…", "ui.addUrl", Value::Null);
+                menu_item(ui, app, "", "From Service…", "ui.addService", Value::Null);
+                menu_item(ui, app, "", "Zarr…", "ui.dialog", json!({"name": "zarr"}));
+                // Databases are read through DuckDB, a program the browser can't run.
+                #[cfg(not(target_arch = "wasm32"))]
+                menu_item(ui, app, "", "Database…", "ui.dialog", json!({"name": "addDatabase"}));
+                menu_item(ui, app, "", "S3…", "ui.dialog", json!({"name": "s3"}));
+                submenu_row(ui, "", tl!("New Connection"), |ui| {
+                    for (kind, label) in crate::connectionui::KINDS {
+                        if cfg!(target_arch = "wasm32") && rustgis_engine::connections::DATABASE_KINDS.contains(&kind) {
+                            continue;
+                        }
+                        menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
                     }
-                    menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
-                }
-            });
-            menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
-            ui.separator();
-            sample_data_gallery(ui, app);
-        });
+                });
+                menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
+                menu_item(ui, app, "add_folder", "Add Folder…", "ui.addFolder", Value::Null);
+                ui.separator();
+                sample_data_gallery(ui, app);
+            },
+        );
+        big(ui, app, "web_map", "Data\nSources", "Open the Data Sources pane.", "ui.pane.sources", Value::Null, false, false);
         big_menu(ui, app, "web_data", "Web\nData", "Add data from public web services and catalogs.", web_data_menu);
     });
     group(ui, "Selection", |ui| {
@@ -559,32 +572,18 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 }
             }
         });
-        col(ui, |ui| {
-            small(ui, app, "locate", "Locate", "Find a place by coordinates.", "ui.dialog", json!({"name": "goToXY"}), false);
-            small(
-                ui,
-                app,
-                "zoom_box",
-                "Zoom Box",
-                "Drag a box to zoom into.",
-                "tool.set",
-                json!({"tool": "zoomIn"}),
-                app.session.tool == Tool::ZoomIn,
-            );
-            small(
-                ui,
-                app,
-                "chart",
-                "Infographics",
-                "Counts, totals and top categories of what's in view.",
-                "ui.pane.infographics",
-                Value::Null,
-                app.ui.right == Some(RightPane::Infographics),
-            );
-        });
+        small(
+            ui,
+            app,
+            "chart",
+            "Infographics",
+            "Counts, totals and top categories of what's in view.",
+            "ui.pane.infographics",
+            Value::Null,
+            app.ui.right == Some(RightPane::Infographics),
+        );
     });
 }
-
 /// The Web Data menu: public web services and catalogs, the ones covering the world in one
 /// alphabetical list (a service fits one place, where a list by topic would leave it in several).
 /// Services covering one country go in a submenu named after it.
@@ -1060,8 +1059,6 @@ fn publication_label(id: &str) -> Option<&'static str> {
 fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Project", |ui| {
         big(ui, app, "new_map", "New\nMap", "Add a new map to the project.", "map.new", Value::Null, false, false);
-        big(ui, app, "toolbox", "Toolbox", "Browse the geoprocessing toolbox.", "ui.pane.geoprocessing", Value::Null, false, false);
-        big(ui, app, "open", "Import\nProject", "Open a RustGIS project.", "ui.open", Value::Null, false, false);
         big_menu(ui, app, "new_layout", "New\nLayout", "Add a page layout for printing and exporting the map.", |ui, app| {
             for (id, label, w, h) in rustgis_engine::map::layout::PAGES {
                 let text = format!("{} ({w:.0} × {h:.0} mm)", tl!(*label));
@@ -1076,7 +1073,6 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                 for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
                     let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
                     if profile.sheet {
-                        // A sheet is arranged in one of the styles; a figure leaves that to its caption.
                         ui.menu_button(label, |ui| {
                             for (style, name) in rustgis_engine::cmd::layout::PUBLICATION_STYLES {
                                 let (name, about) = publication_style(style).unwrap_or_else(|| (tl!(*name), ""));
@@ -1099,27 +1095,6 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                 ui.close();
             }
             menu_item(ui, app, "open", "Import Layout…", "ui.importLayout", Value::Null);
-        });
-        col(ui, |ui| {
-            small(ui, app, "catalog", "Browser", "Browse the project's maps, tables and folders.", "ui.pane.catalog", Value::Null, false);
-            small(ui, app, "add_data", "Add Data", "Add vector data.", "ui.addData", Value::Null, false);
-            small(ui, app, "add_folder", "Add Folder", "Connect a folder to the Browser.", "ui.addFolder", Value::Null, false);
-        });
-        col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "open",
-                "Import",
-                "Add the maps of a map file, map package, project or project package.",
-                "ui.openItem",
-                json!({"kind": "map"}),
-                false,
-            );
-            small_menu(ui, app, "save_as", "Templates", "Project templates: start projects from a saved setup.", |ui, app| {
-                menu_item(ui, app, "save_as", "New Custom Template…", "ui.saveItem", json!({"kind": "template"}));
-                menu_item(ui, app, "open", "Open Custom Template…", "ui.openItem", json!({"kind": "template"}));
-            });
         });
     });
 }

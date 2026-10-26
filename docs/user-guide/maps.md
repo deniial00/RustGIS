@@ -8,15 +8,16 @@ For selecting, grouping, reordering and copying layers between maps, see
 
 ## Navigating
 
-Drag to pan and scroll to zoom; ++home++ (or **Full Extent**) shows all the data. **Home ›
-Navigate** has fixed zoom steps, **Previous** and **Next** extents, **Bookmarks** (the World Atlas
-has World, Europe, Africa, Americas and East Asia) and **Go To XY**, which pans to a longitude and
-latitude. **New Bookmark…** saves the current view under a name, with an optional description of
-the place. The Bookmarks menu removes a bookmark with the button beside it, and exports or imports
-them as a `.rgisbookmarks` file. Imported bookmarks show the same place on a map in another
-projection; places that projection can't show are skipped. Type a scale in the status bar to jump
-to it. Beside it are the zoom level, bearing and pitch; click them to face north and look straight
-down again. More navigation tools are under [View effects](#view-effects) below.
+Drag to pan and scroll to zoom; ++home++ (or **Full Extent**) shows all the data. **Home › Navigate**
+has fixed zoom steps, **Previous** and **Next** extents, **Bookmarks** (the World Atlas has World,
+Europe, Africa, Americas and East Asia), and **Locate**: **By Coordinates…** pans to a longitude
+and latitude; **By Place or Address…** finds a place or address with a geocoder. **New Bookmark…**
+saves the current view under a name, with an optional description of the place. The Bookmarks menu
+removes a bookmark with the button beside it, and exports or imports them as a `.rgisbookmarks`
+file. Imported bookmarks show the same place on a map in another projection; places that projection
+can't show are skipped. Type a scale in the status bar to jump to it. Beside it are the zoom level,
+bearing and pitch; click them to face north and look straight down again. More navigation tools
+are under [View effects](#view-effects) below.
 
 **Measurement units.** In **Home › Inspect › Measure**, choose **Metric** or **Imperial**.
 The choice is remembered and updates existing distance and area measurements, the live
@@ -98,10 +99,11 @@ Double-click a name to rename it, and right-click it to rename, describe, update
 down, or delete it. Bookmark edits run `bookmark.*` commands and undo with ++ctrl+z++;
 **Zoom To** and **Pan To** change the view without adding an undo step.
 
-**Find Place** (`map.findPlace`) looks up a place or an address by name with OpenStreetMap's
-[Nominatim](https://nominatim.org) (or a [Photon](https://photon.komoot.io) server, or a
-geocoder of your own given by its address) and zooms to the one picked. The search goes to that
-server over the network; see [Geocoding addresses](data.md#geocoding-addresses) for whole tables.
+**Home › Navigate › Locate › By Place or Address…** (`map.findPlace`) looks up a place or an
+address by name with OpenStreetMap's [Nominatim](https://nominatim.org) (or a
+[Photon](https://photon.komoot.io) server, or a geocoder of your own given by its address) and
+zooms to the one picked. The search goes to that server over the network; see
+[Geocoding addresses](data.md#geocoding-addresses) for whole tables.
 
 The **search box** at the foot of the left pane searches the map as you type: a latitude and
 longitude (`40.7, -74.0`, `40.7N 74W` or `40°42'46"N 74°0'21"W`; latitude first unless the

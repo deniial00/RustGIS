@@ -20,9 +20,10 @@
 //! --plugin` does), and `{"testPlugin": "panel"}` the plugin tests use, with a panel,
 //! `{"titlebar": {"left_inset": 80, "height": 34}}`
 //! draws the header as a macOS unified title bar (`null` turns it off), and
-//! `{"width": w, "height": h}` on the first line sets the size (default
-//! 1480×900 at 2×; `"dt": seconds` there sets each frame's length, default 0.25, and a
-//! short one such as 0.016 catches the map mid-motion). The window opens the World Atlas sample.
+//! `{"width": w, "height": h}` on the first line sets the size (default 1480×900),
+//! and `"pixelsPerPoint": scale` sets the output scale (default 2). `"dt": seconds` there sets
+//! each frame's length, default 0.25; a short one such as 0.016 catches the map mid-motion.
+//! The window opens the World Atlas sample.
 //!
 //! Add `"ribbonSplit": true` to the first line for a compact reusable split-button showcase
 //! instead of the app. Its "Disable arrows", "Disable enclosing UI", and "Long two-line labels"
@@ -126,6 +127,7 @@ fn main() {
         script.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).expect("json line")).collect();
     let w = lines.iter().find_map(|l| l.get("width").and_then(|v| v.as_f64())).unwrap_or(1480.0) as f32;
     let h = lines.iter().find_map(|l| l.get("height").and_then(|v| v.as_f64())).unwrap_or(900.0) as f32;
+    let pixels_per_point = lines.iter().find_map(|l| l.get("pixelsPerPoint").and_then(|v| v.as_f64())).unwrap_or(2.0) as f32;
     let dt = lines.iter().find_map(|l| l.get("dt").and_then(|v| v.as_f64())).unwrap_or(0.25) as f32;
     let ribbon_split = lines.first().and_then(|l| l.get("ribbonSplit")).and_then(Value::as_bool).unwrap_or(false);
     let mut split_showcase = RibbonSplitShowcase::default();
@@ -146,7 +148,7 @@ fn main() {
     app.set_render_state(Some(rs.clone()));
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(w, h))
-        .with_pixels_per_point(2.0)
+        .with_pixels_per_point(pixels_per_point)
         .with_max_steps(10_000)
         .with_step_dt(dt)
         .renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(rs))
