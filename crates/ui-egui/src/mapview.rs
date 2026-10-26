@@ -2844,40 +2844,40 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
                     .corner_radius(CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 })
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(&title).font(semibold(14.0)));
-                                ui.label(egui::RichText::new(&layer).size(11.0).color(t.text_dim));
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                if ui.add(egui::Button::new(tl!("×")).frame(false)).clicked() {
-                                    close = true;
+                        // Lay out controls first; the title and layer share only the width left.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if ui.add(egui::Button::new(tl!("×")).frame(false)).clicked() {
+                                close = true;
+                            }
+                            // A feature (not a raster pixel): zoom to it.
+                            if shown.is_some() {
+                                let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                                let ink = if resp.hovered() { t.text } else { t.icon };
+                                crate::icons::paint(ui.painter(), r, "zoom_sel", ink, t.accent);
+                                if resp.on_hover_text(tl!("Zoom To")).clicked() {
+                                    zoom = true;
                                 }
-                                // A feature (not a raster pixel): zoom to it.
-                                if shown.is_some() {
-                                    let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-                                    let ink = if resp.hovered() { t.text } else { t.icon };
-                                    crate::icons::paint(ui.painter(), r, "zoom_sel", ink, t.accent);
-                                    if resp.on_hover_text(tl!("Zoom To")).clicked() {
-                                        zoom = true;
-                                    }
+                            }
+                            // Several features identified: step through them.
+                            if results > 1 {
+                                if ui.add_enabled(index + 1 < results, egui::Button::new("›").frame(false)).clicked() {
+                                    step = Some(index + 1);
                                 }
-                                // Several features identified: step through them.
-                                if results > 1 {
-                                    if ui.add_enabled(index + 1 < results, egui::Button::new("›").frame(false)).clicked() {
-                                        step = Some(index + 1);
-                                    }
-                                    let n = (index + 1).to_string();
-                                    let total = results.to_string();
-                                    ui.label(
-                                        egui::RichText::new(crate::i18n::fmt("{n} of {total}", &[("n", &n), ("total", &total)]))
-                                            .size(11.0)
-                                            .color(t.text_dim),
-                                    );
-                                    if ui.add_enabled(index > 0, egui::Button::new("‹").frame(false)).clicked() {
-                                        step = Some(index.saturating_sub(1));
-                                    }
+                                let n = (index + 1).to_string();
+                                let total = results.to_string();
+                                ui.label(
+                                    egui::RichText::new(crate::i18n::fmt("{n} of {total}", &[("n", &n), ("total", &total)]))
+                                        .size(11.0)
+                                        .color(t.text_dim),
+                                );
+                                if ui.add_enabled(index > 0, egui::Button::new("‹").frame(false)).clicked() {
+                                    step = Some(index.saturating_sub(1));
                                 }
+                            }
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                ui.add(egui::Label::new(egui::RichText::new(&title).font(semibold(14.0))).truncate()).on_hover_text(&title);
+                                ui.add(egui::Label::new(egui::RichText::new(&layer).size(11.0).color(t.text_dim)).truncate())
+                                    .on_hover_text(&layer);
                             });
                         });
                     });

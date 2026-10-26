@@ -141,7 +141,8 @@ Pop-ups (Home › Navigate) choose which layers a click with Explore identifies:
 under the click, every visible layer, only selectable layers, only the layer selected in Layers, or
 nothing. The pop-up lists every feature under the click in those layers, overlapping ones included
 (up to 100): step through them with ‹ ›. The feature shown is the one selected. The magnifier in
-the pop-up's header zooms to it.
+the pop-up's header zooms to it. Long feature titles and layer names are shortened with an
+ellipsis to leave room for the header controls; hover over either name to read it in full.
 
 The topmost and visible modes also identify the features of vector tile layers under the click:
 PMTiles and MBTiles archives and vector tiles added as data (not catalog basemaps or MapLibre
