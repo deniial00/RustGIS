@@ -847,7 +847,13 @@ struct Ran {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    if let Ok(destination) = path.canonicalize() {
+    // A new file has no canonical path yet: resolve its folder, so a file created inside a loaded
+    // source directory is refused as well as one replaced there.
+    let resolved = path.canonicalize().or_else(|error| {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        path.file_name().map(|name| parent.canonicalize().map(|p| p.join(name))).unwrap_or(Err(error))
+    });
+    if let Ok(destination) = resolved {
         if s.path.iter().chain(s.opened_package.iter()).any(|project| project.canonicalize().is_ok_and(|project| project == destination)) {
             return Err("destination is the open project's file; choose a different output file".into());
         }
@@ -1558,6 +1564,16 @@ mod file_tests {
             assert!(result.unwrap_err().contains("source of table 'Counts'"));
             assert_eq!(std::fs::read(&catalog).unwrap(), b"source catalog");
             assert_eq!(std::fs::read(&rows).unwrap(), b"source rows");
+        }
+        for created in [source.join("new.pmtiles"), source.join("nested").join("new.pmtiles")] {
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": created
+                }}),
+            );
+            assert!(result.is_err(), "export must refuse a new file in a loaded source directory: {result:?}");
+            assert!(!created.exists(), "nothing may be written into the source directory");
         }
         let sibling = root.join("Store.gdb.pmtiles");
         std::fs::write(&sibling, b"old output").unwrap();
