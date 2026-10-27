@@ -110,6 +110,10 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 **Vector to PMTiles** (`vectorToPmtiles`) writes a single-layer MVT archive in standard Web
 Mercator. Choose `minZoom` and `maxZoom` from 0 to 16; `sourceLayer` defaults to the input
 layer's name. The output file is saved atomically on desktop or downloaded in the browser.
+Without `output`, CLI, script and task calls use a sanitized `<layer>.pmtiles` name in the
+process's working directory; an existing destination is replaced atomically. The desktop tool
+pane instead asks for a destination with Save As. Exports refuse to replace a loaded layer's
+source file, including aliases of that path.
 An active selection is exported; otherwise the geoprocessing extent applies, and streamed
 sources are read in full rather than limited to the visible map window. It exports points,
 lines and polygons, including multipart geometry, attributes and feature IDs—not the map's
@@ -120,7 +124,11 @@ integer attributes outside ±2^53 are rejected to avoid precision loss.
 
 This is an in-memory export, limited to 10,000 distinct output tiles and a conservative
 256 MiB working-memory budget, including the input, clipping/encoding temporaries and final
-archive. Geometry allocation estimates are linear in the number of vertices and rings.
+archive. This budget is checked after streamed-source materialization, not during provider
+loading: the existing full-read limits (2,000,000 features on desktop, 500,000 in the browser)
+apply first, and loading may use more than 256 MiB before export refuses the input. Reduce a
+large source before loading it for export. Geometry allocation estimates are linear in the
+number of vertices and rings.
 Each geometry component's buffered candidate rectangle is limited to 40,000 tiles per zoom,
 including candidates where clipping produces no output. A separate **100,000,000-unit
 geometry-work budget** accumulates across all exported features, components and zooms:

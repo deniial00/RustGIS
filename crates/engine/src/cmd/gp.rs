@@ -845,6 +845,19 @@ struct Ran {
     started: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if let Ok(destination) = path.canonicalize() {
+        for layer in s.project.maps.iter().flat_map(|map| &map.layers) {
+            let source = layer.source.as_ref().and_then(|source| source.path.as_deref()).or(layer.dataset.source.as_deref());
+            if source.is_some_and(|source| std::path::Path::new(source).canonicalize().is_ok_and(|source| source == destination)) {
+                return Err(format!("destination is the source of layer '{}'; choose a different output file", layer.name));
+            }
+        }
+    }
+    rustgis_data::io::write_atomic(path, bytes).map_err(|error| error.to_string())
+}
+
 /// Adds a tool's result to the map and the history.
 fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis::ToolResult, String>, millis: u64) -> CmdResult {
     let Ran { name, id, command, started } = ran;
@@ -880,7 +893,7 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let path = params.get("output").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).unwrap_or(&file_name);
-                if let Err(error) = rustgis_data::io::write_atomic(std::path::Path::new(path), &bytes) {
+                if let Err(error) = write_file_output(s, std::path::Path::new(path), &bytes) {
                     let error = format!("{path}: {error}");
                     result.messages.push(error.clone());
                     s.project.gp_history.push(GpRecord {
@@ -1121,6 +1134,43 @@ mod file_tests {
         }
         assert!(queue_file(&mut s, "too-many.pmtiles".into(), vec![1], record()).is_err());
         assert_eq!(s.take_gp_files().len(), 8);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_export_preserves_loaded_sources_and_path_aliases() {
+        let root = std::env::temp_dir().join(format!("rustgis-source-output-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let source = root.join("sites.geojson");
+        let bytes = br#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"Site"},"geometry":{"type":"Point","coordinates":[20,30]}}]}"#;
+        std::fs::write(&source, bytes).unwrap();
+        let destinations = vec![source.clone(), root.join("nested").join("..").join("sites.geojson")];
+        #[cfg(unix)]
+        let destinations = {
+            let mut destinations = destinations;
+            let alias = root.join("alias.geojson");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            destinations.push(alias);
+            destinations
+        };
+        for stream in [false, true] {
+            let mut s = Session::new(crate::Project::default());
+            s.run("layer.addData", &json!({"path": source, "name": "Sites", "stream": stream})).unwrap();
+            for destination in &destinations {
+                let error = s
+                    .run(
+                        "gp.run",
+                        &json!({"tool": "vectorToPmtiles", "params": {
+                            "input": "Sites", "minZoom": 0, "maxZoom": 0, "output": destination
+                        }}),
+                    )
+                    .unwrap_err();
+                assert!(error.contains("source of layer 'Sites'"), "{error}");
+                assert_eq!(std::fs::read(&source).unwrap(), bytes, "source must survive a refused export");
+                assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_arch = "wasm32"))]
