@@ -501,10 +501,18 @@ impl RunReport {
 /// Runs a graph: its nodes in order, each tool on the layers wired into it, each output renaming
 /// its result; then removes the intermediate results. `trusted` is false for a model that came
 /// in a file, whose tools may not read or write files. The report is kept in
-/// `Session::model_run`, whatever happens.
+/// `Session::model_run`, whatever happens. A failed run discards its queued exports, so their
+/// nodes become errors rather than waiting for delivery.
 pub fn run(s: &mut Session, name: &str, g: &ModelGraph, trusted: bool) -> Result<Value, String> {
     let mut report = RunReport { model: name.to_string(), ..Default::default() };
     let res = run_into(s, g, trusted, &mut report);
+    if res.is_err() {
+        for node in report.nodes.iter_mut().filter(|node| node.status == "pending") {
+            node.status = "error";
+            node.message = "Queued export discarded because the model run failed.".to_string();
+        }
+        report.pending_files.clear();
+    }
     report.ok = res.is_ok() && !report.nodes.iter().any(|n| n.status == "pending");
     report.error = res.as_ref().err().cloned();
     let out = res.map(|ran| json!({"model": name, "ran": ran, "outputs": report.outputs}));
@@ -761,6 +769,39 @@ mod tests {
         assert_eq!(report.nodes[0].status, "done");
         assert_eq!(report.error, None);
         assert!(s.project.gp_history[0].ok);
+    }
+
+    #[test]
+    fn later_tool_failure_discards_queued_exports_and_keeps_a_terminal_failed_report() {
+        let mut s = session();
+        let previous_id = s.next_pending;
+        let graph = json!({"nodes": [
+            {"id": "file", "kind": "tool", "tool": "vectorToPmtiles", "x": 0,
+             "params": {"input": "Points", "minZoom": 0, "maxZoom": 0}},
+            {"id": "failure", "kind": "tool", "tool": "buffer", "x": 100,
+             "params": {"input": "Missing", "distance": 100}}
+        ], "edges": []});
+        let error = s.run("model.run", &json!({"graph": graph})).unwrap_err();
+        let discarded_id = s.next_pending;
+        assert_eq!(discarded_id, previous_id.wrapping_add(1), "the export queued before the later tool failed");
+        assert!(s.take_gp_files().is_empty());
+        assert!(s.file_outputs.is_empty(), "discarded exports cannot await delivery");
+        let report = s.model_run.as_ref().unwrap();
+        assert!(!report.ok);
+        assert_eq!(report.error.as_deref(), Some(error.as_str()));
+        assert_eq!(report.nodes.len(), 2);
+        assert!(report.nodes.iter().all(|node| node.status == "error"));
+        assert!(
+            report
+                .nodes
+                .iter()
+                .any(|node| { node.node == "file" && node.message == "Queued export discarded because the model run failed." })
+        );
+        assert!(report.nodes.iter().any(|node| node.node == "failure" && node.message == error));
+        assert!(report.pending_files.is_empty());
+        let before = report.clone();
+        assert_eq!(s.run("gp.fileDelivered", &json!({"id": discarded_id})).unwrap_err(), "no pending file with that id");
+        assert_eq!(s.model_run.as_ref(), Some(&before), "the original failed report survives a stale acknowledgement");
     }
 
     #[test]

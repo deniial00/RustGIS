@@ -939,7 +939,10 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
 /// Saves bytes through a temporary `<a download>` link.
 fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
+    let window = web_sys::window().ok_or("no window")?;
+    let document = window.document().ok_or("no document")?;
+    let body = document.body().ok_or("no body")?;
+    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(err)?.dyn_into().map_err(|_| "not an anchor".to_string())?;
     let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::new();
     parts.push(&array);
@@ -947,20 +950,27 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     props.set_type("application/octet-stream");
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &props).map_err(err)?;
     let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(err)?;
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(err)?.dyn_into().map_err(|_| "not an anchor".to_string())?;
     a.set_href(&url);
     a.set_download(name);
     // Some browsers only follow links that are in the document.
-    let body = document.body().ok_or("no body")?;
-    body.append_child(&a).map_err(err)?;
+    if let Err(error) = body.append_child(&a) {
+        let _ = web_sys::Url::revoke_object_url(&url);
+        return Err(err(error));
+    }
+    // Schedule cleanup before submission: a timer error must not mark an already offered file
+    // as failed. The browser may start reading the URL after `click` returns.
+    let cleanup_url = url.clone();
+    let revoke = wasm_bindgen::closure::Closure::once(move || {
+        let _ = web_sys::Url::revoke_object_url(&cleanup_url);
+    });
+    if let Err(error) = window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.as_ref().unchecked_ref(), 10_000) {
+        a.remove();
+        let _ = web_sys::Url::revoke_object_url(&url);
+        return Err(err(error));
+    }
+    revoke.forget();
     a.click();
     a.remove();
-    // Browsers may start the download after `click` returns, so free the URL a little later.
-    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
-        let _ = web_sys::Url::revoke_object_url(&url);
-    });
-    let window = web_sys::window().ok_or("no window")?;
-    window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(err)?;
     Ok(())
 }
 

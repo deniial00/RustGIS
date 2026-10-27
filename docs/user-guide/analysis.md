@@ -128,7 +128,10 @@ each candidate tile costs the component's vertex count, and each polygon validit
 (before clipping and after integer quantization) costs `(vertices + rings)²`. The extra
 vertex per ring allows for implicit ring closure. The work-limit error is distinct from
 the memory-limit error: simplify polygon rings, reduce the input extent, or narrow the zoom
-range. These limits reject the whole export rather than sampling or truncating it. Example:
+range. These limits reject the whole export rather than sampling or truncating it.
+Browser task, model and script runs can queue at most eight files or 256 MiB of archive bytes
+before downloads are submitted; split larger batches into separate runs. Browser success
+means the download was submitted, not confirmation that the browser saved it. Example:
 
 ```text
 gp.run={"tool":"vectorToPmtiles","params":{"input":"Roads","minZoom":0,"maxZoom":12,"sourceLayer":"roads","output":"roads.pmtiles"}}

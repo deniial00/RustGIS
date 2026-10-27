@@ -246,8 +246,8 @@ pub struct Services {
     /// Opens a file picker for `"data"`, `"project"`, or `"shapefile"`; results land in `inbox`.
     /// Shapefile picks carry [`SHAPEFILE_PICK`] after sidecars are gathered into ZIPs.
     pub open_async: Option<Box<dyn Fn(&str)>>,
-    /// Hands bytes to the user as a download named `file_name`; success means the browser
-    /// accepted delivery, not merely that the bytes were generated.
+    /// Offers bytes as a download named `file_name`; success means submission to the host's
+    /// download mechanism. Browsers do not expose confirmation that the file was saved.
     pub download: Option<Box<dyn Fn(&str, Vec<u8>) -> Result<(), String>>>,
     pub inbox: Option<Inbox>,
     /// Reads a saved preference (`language`, …).
@@ -1389,7 +1389,7 @@ impl RustGisApp {
             }
         };
         let file = format!("{stem}.rgis");
-        if let Err(e) = self.services.download.as_ref().ok_or("no download service")?(&file, text.into_bytes()) {
+        if let Err(e) = self.services.download.as_ref().ok_or(tl!("no download service"))?(&file, text.into_bytes()) {
             self.session.project.name = old;
             return Err(e);
         }
@@ -1429,12 +1429,12 @@ impl RustGisApp {
     }
 
     /// Delivers exports from all command entry points, including scripts and the assistant.
-    /// The engine records success only after the service confirms delivery.
+    /// The engine records success only after the service submits the file to the host.
     fn deliver_gp_files(&mut self, mut requested: Result<Value, String>) -> Result<Value, String> {
         for (id, name, bytes) in self.session.take_gp_files() {
             let delivered = match &self.services.download {
                 Some(download) => download(&name, bytes),
-                None => Err("this build has no download service".into()),
+                None => Err(tl!("this build has no download service").into()),
             };
             let mut params = json!({"id": id});
             if let Err(error) = &delivered {

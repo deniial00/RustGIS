@@ -505,7 +505,7 @@ fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, par
         let mut by_id = layer
             .selection
             .iter()
-            .map(|row| layer.dataset.features.get(*row).map(|f| (f.id, None)).ok_or_else(&missing))
+            .map(|row| layer.dataset.features.get(*row).map(|f| (f.id, None)).ok_or_else(missing))
             .collect::<Result<std::collections::HashMap<u64, Option<usize>>, _>>()?;
         for (row, feature) in dataset.features.iter().enumerate() {
             if let Some(selected_row) = by_id.get_mut(&feature.id) {
@@ -515,7 +515,7 @@ fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, par
         let selected = layer
             .selection
             .iter()
-            .map(|row| layer.dataset.features.get(*row).and_then(|f| by_id.get(&f.id)).copied().flatten().ok_or_else(&missing))
+            .map(|row| layer.dataset.features.get(*row).and_then(|f| by_id.get(&f.id)).copied().flatten().ok_or_else(missing))
             .collect::<Result<Vec<_>, _>>()?;
         rows.insert(name.clone(), selected);
     }
@@ -786,7 +786,7 @@ fn queue_file(s: &mut Session, file_name: String, bytes: Vec<u8>, record: GpReco
     const MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
     let held = s.file_outputs.iter().filter_map(|f| f.bytes.as_ref()).map(Vec::len).sum::<usize>();
     if s.file_outputs.len() >= 8 || bytes.len() > MAX_PENDING_BYTES.saturating_sub(held) {
-        return Err("too many file exports are waiting for download; deliver them before exporting again".into());
+        return Err("file export queue limit reached (8 files or 256 MiB); split the task, model, or script into smaller runs".into());
     }
     s.next_pending = s.next_pending.wrapping_add(1);
     let id = s.next_pending;

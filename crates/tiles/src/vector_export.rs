@@ -7,6 +7,7 @@
 //! clipping buffer is **8 / 4096 tile units**, including at world edges. Polygon intersection
 //! keeps disconnected pieces and holes; quantized rings use MVT's y-down winding convention.
 //! This is a bounded in-memory exporter, not a sampler: resource limits reject the whole job.
+//! Per-feature property scratch is released after cloning; retained tile properties stay budgeted.
 //! Allocation estimates are linear in geometry size. A separate cumulative CPU-work budget
 //! bounds quadratic polygon validation and candidate-tile vertex scans; a component's buffered
 //! candidate rectangle may not exceed 40,000 tiles at one zoom.
@@ -91,7 +92,8 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
             let text = if let Value::Text(s) = value { s.len() } else { 16 };
             n.checked_add(field.name.len()).and_then(|n| n.checked_add(text)).and_then(|n| n.checked_add(128)).ok_or(MEMORY_ERROR)
         })?;
-        budget.add(product(prop_size, 8)?)?;
+        let property_reserve = product(prop_size, 8)?;
+        budget.add(property_reserve)?;
         let props = properties(dataset, &feature.attrs)?;
         let mut local: BTreeMap<TileKey, Parts> = BTreeMap::new();
         let kind = match geometry {
@@ -128,7 +130,8 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
                     for hole in polygon.iter().skip(1) {
                         rings.push(project_path(hole, anchor, &mut notices, &mut bounds)?);
                     }
-                    emit(&rings, kind, min_zoom, max_zoom, &mut local, &mut budget, &mut notices)?;
+                    emit(&rings, kind, min_zoom, max_zoom, &mut local, &mut budget, &mut notices)
+                        .map_err(|error| format!("feature {}: {error}", feature.id))?;
                 }
             }
         }
@@ -140,6 +143,9 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
             budget.add(product(prop_size.checked_add(256).ok_or(MEMORY_ERROR)?, 2)?)?;
             tiles.entry(key).or_default().push(mvt::Feature { id: Some(feature.id), kind, geometry, props: props.clone() });
         }
+        // Local geometry has moved into tiles; release only the now-dead property scratch.
+        drop(props);
+        budget.release(property_reserve)?;
     }
     if tiles.is_empty() {
         return Err("no geometry survives clipping and quantization at the requested zooms".into());
@@ -220,6 +226,10 @@ impl Budget {
     fn add(&mut self, extra: usize) -> Result<(), String> {
         self.ensure(extra)?;
         self.used += extra;
+        Ok(())
+    }
+    fn release(&mut self, bytes: usize) -> Result<(), String> {
+        self.used = self.used.checked_sub(bytes).ok_or("vector export memory budget accounting underflow")?;
         Ok(())
     }
     fn add_work(&mut self, units: usize) -> Result<(), String> {
@@ -723,6 +733,64 @@ mod tests {
     }
 
     #[test]
+    fn attributed_points_release_per_feature_property_scratch() -> Result<(), String> {
+        let mut ds = Dataset::new("Attributed points", GeometryType::Point, vec![]);
+        ds.fields = (0..10).map(|i| Field::new(format!("f{i}"), FieldType::Text)).collect();
+        ds.features = (0..8_000)
+            .map(|id| Feature {
+                id,
+                geometry: Some(Geometry::Point(Coord::new(20.0, 30.0))),
+                attrs: (0..10).map(|i| Value::Text(format!("v{i}"))).collect(),
+            })
+            .collect();
+        // Retained properties and encoder scratch fit, but retaining every feature's
+        // temporary property reserve as well would exceed the memory limit.
+        let archive = export(&ds, &[], 0, 0, "attributed")?;
+        assert_eq!(&archive.bytes[..8], b"PMTiles\x03");
+        assert!(archive.messages.iter().any(|message| message.starts_with("Exported 1 tiles ")));
+        let tile = only_tile(&archive.bytes)?;
+        assert_eq!(tile.layers.len(), 1);
+        let layer = &tile.layers[0];
+        assert_eq!(layer.name, "attributed");
+        assert_eq!(layer.features.len(), ds.features.len());
+        for (expected, actual) in ds.features.iter().zip(&layer.features) {
+            assert_eq!(actual.id, Some(expected.id));
+            assert_eq!(actual.kind, mvt::GeomKind::Point);
+            assert_eq!(actual.geometry.len(), 1);
+            assert_eq!(actual.geometry[0].len(), 1);
+            assert_eq!(actual.props.len(), ds.fields.len());
+            for (i, field) in ds.fields.iter().enumerate() {
+                assert_eq!(actual.prop(&field.name), Some(&mvt::Value::String(format!("v{i}"))));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_polygon_reports_feature_id_without_returning_a_partial_archive() -> Result<(), String> {
+        let mut ds =
+            dataset(Geometry::Polygon(vec![vec![coords(&[(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0), (10.0, 10.0)])]]));
+        ds.features[0].id = 7;
+        let valid = export(&ds, &[], 0, 0, "polygons")?;
+        assert_eq!(only_tile(&valid.bytes)?.layers[0].features[0].id, Some(7));
+        let invalid_id = 98_765_432;
+        ds.features.push(Feature {
+            id: invalid_id,
+            geometry: Some(Geometry::Polygon(vec![vec![coords(&[(30.0, 10.0), (40.0, 20.0), (30.0, 20.0), (40.0, 10.0), (30.0, 10.0)])]])),
+            attrs: vec![],
+        });
+        let error = match export(&ds, &[], 0, 0, "polygons") {
+            Ok(_) => return Err("invalid polygon returned an archive instead of rejecting the whole export".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            format!("feature {invalid_id}: polygon is topologically invalid after antimeridian unwrapping; repair its rings before export")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rejects_unsafe_integer_and_nonfinite_attributes() {
         let mut ds = dataset(Geometry::Point(Coord::new(0.0, 0.0)));
         ds.fields.push(Field::new("n", FieldType::Integer));
@@ -858,6 +926,18 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn releasing_scratch_preserves_retained_memory_and_checks_underflow() -> Result<(), String> {
+        let mut budget = Budget { used: 64, work: 0 };
+        budget.add(128)?;
+        budget.add(32)?;
+        budget.release(128)?;
+        assert_eq!(budget.used, 96);
+        assert!(budget.release(97).is_err());
+        assert_eq!(budget.used, 96);
+        Ok(())
+    }
+
     fn circular_ring(vertices: usize) -> Vec<Coord> {
         (0..vertices)
             .map(|i| {
@@ -902,7 +982,7 @@ mod tests {
     fn quadratic_polygon_validation_has_a_separate_work_limit() -> Result<(), String> {
         let ds = dataset(Geometry::Polygon(vec![vec![circular_ring(10_000)]]));
         let error = export(&ds, &[], 0, 0, "detailed").err().ok_or("expected polygon work limit")?;
-        assert_eq!(error, WORK_ERROR);
+        assert_eq!(error, format!("feature {}: {WORK_ERROR}", u64::MAX));
         Ok(())
     }
 
