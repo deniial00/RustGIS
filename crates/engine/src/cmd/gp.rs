@@ -429,10 +429,9 @@ fn fingerprint(d: &Dataset) -> Option<u64> {
     Some(w.0.finish())
 }
 
-/// Fits a tool's result to the map: a selection it made on a streamed layer it read whole
-/// becomes rows of the layer's window in view, and an update of a streamed layer it read only
-/// in part (its selection, from the window in view), which would replace the whole layer with
-/// that part, is refused.
+/// Fits a tool's result to the map: a selection made on the complete streamed source becomes
+/// rows of the current window. An update from a selection is still refused: it would replace
+/// the complete source with just those selected features.
 fn fit_to_windows(s: &Session, res: &mut Result<rustgis_analysis::ToolResult, String>, full_ids: &FullIds) {
     if let Ok(r) = res
         && let Output::Selection { layer, rows } = &mut r.output
@@ -444,8 +443,9 @@ fn fit_to_windows(s: &Session, res: &mut Result<rustgis_analysis::ToolResult, St
     }
     if let Ok(r) = res
         && let Output::Update { layer, .. } = &r.output
-        && !full_ids.contains_key(&layer.to_ascii_lowercase())
-        && s.map().layer_by_name(layer).is_some_and(|l| l.is_streamed())
+        && s.map()
+            .layer_by_name(layer)
+            .is_some_and(|l| l.is_streamed() && (!l.selection.is_empty() || !full_ids.contains_key(&layer.to_ascii_lowercase())))
     {
         *res = Err(format!("{layer} is read in place from its file; Load All Features (layer.loadAll) before a tool updates it"));
     }
@@ -498,13 +498,32 @@ impl MapInputs<'_> {
 
 fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
     let full = streamed_inputs(s.map(), spec, params)?;
-    let rows = env_inputs(s.map(), &full, &s.project.gp_env, params)?;
+    let mut rows = env_inputs(s.map(), &full, &s.project.gp_env, params)?;
+    for (name, dataset) in &full {
+        let Some(layer) = s.map().layer_by_name(name).filter(|l| !l.selection.is_empty()) else { continue };
+        let missing = || format!("{}: a selected feature is no longer in the source", layer.name);
+        let mut by_id = layer
+            .selection
+            .iter()
+            .map(|row| layer.dataset.features.get(*row).map(|f| (f.id, None)).ok_or_else(&missing))
+            .collect::<Result<std::collections::HashMap<u64, Option<usize>>, _>>()?;
+        for (row, feature) in dataset.features.iter().enumerate() {
+            if let Some(selected_row) = by_id.get_mut(&feature.id) {
+                *selected_row = Some(row);
+            }
+        }
+        let selected = layer
+            .selection
+            .iter()
+            .map(|row| layer.dataset.features.get(*row).and_then(|f| by_id.get(&f.id)).copied().flatten().ok_or_else(&missing))
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.insert(name.clone(), selected);
+    }
     Ok(MapInputs { session: s, rows, loaded: full, flat: std::cell::OnceCell::new(), view: std::cell::OnceCell::new() })
 }
 
-/// Every feature of the streamed layers a tool's parameters name (those without a selection,
-/// whose rows the tool reads from the window in view): a tool runs on all the data, not on what
-/// the view happened to read.
+/// Complete streamed inputs without selections, plus selected PMTiles inputs: that exporter
+/// requires the complete source. Their selected window rows are remapped in `map_inputs`.
 fn streamed_inputs(
     map: &rustgis_map::Map,
     spec: Option<&rustgis_analysis::ToolSpec>,
@@ -516,7 +535,9 @@ fn streamed_inputs(
         if full.contains_key(&key) {
             continue;
         }
-        if let Some(l) = map.layer_by_name(n).filter(|l| l.is_streamed() && l.selection.is_empty()) {
+        if let Some(l) =
+            map.layer_by_name(n).filter(|l| l.is_streamed() && (l.selection.is_empty() || spec.is_some_and(|t| t.id == "vectorToPmtiles")))
+        {
             full.insert(key, l.load_all().map_err(|e| format!("{}: {e}", l.name))?);
         }
     }
@@ -623,13 +644,10 @@ impl Inputs for MapInputs<'_> {
         self.session.project.tables.iter().find(|t| t.id == id).map(|t| &t.dataset)
     }
     fn selection(&self, layer: &str) -> &[usize] {
-        match self.session.map().layer_by_name(layer) {
-            Some(l) if !l.selection.is_empty() => &l.selection,
-            // No selection: the environment's extent picks the rows (an extent holding none is
-            // refused before the tool runs, by `env_inputs`).
-            Some(l) => self.rows.get(&l.name.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&[]),
-            None => &[],
-        }
+        let Some(l) = self.session.map().layer_by_name(layer) else { return &[] };
+        // Loaded selections and environment extents are already rows of the dataset returned
+        // above. An extent containing none is refused before the run by `env_inputs`.
+        self.rows.get(&l.name.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&l.selection)
     }
     fn projection_name(&self) -> Option<String> {
         self.flat().map(|(name, _, _)| name.clone())
@@ -760,6 +778,11 @@ pub(crate) struct PendingFile {
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn queue_file(s: &mut Session, file_name: String, bytes: Vec<u8>, record: GpRecord) -> CmdResult {
+    let file_name =
+        record.params.get("output").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).unwrap_or(&file_name).to_string();
+    if file_name.is_empty() || file_name.contains(['/', '\\']) {
+        return Err("output must be a file name, not a path, in the browser".into());
+    }
     const MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
     let held = s.file_outputs.iter().filter_map(|f| f.bytes.as_ref()).map(Vec::len).sum::<usize>();
     if s.file_outputs.len() >= 8 || bytes.len() > MAX_PENDING_BYTES.saturating_sub(held) {
@@ -783,6 +806,9 @@ fn file_delivered(s: &mut Session, p: &Value) -> CmdResult {
     file.record.ok = error.is_none();
     if let Some(error) = error {
         file.record.messages.push(error.to_string());
+    }
+    if let Some(report) = &mut s.model_run {
+        report.file_delivered(id, error);
     }
     for message in &file.record.messages {
         s.notify(message.clone(), !file.record.ok);
@@ -842,6 +868,15 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
     };
     let out = match result.output {
         Output::File { file_name, bytes } => {
+            #[cfg(test)]
+            if s.queue_gp_files {
+                return queue_file(
+                    s,
+                    file_name,
+                    bytes,
+                    GpRecord { tool: name, id, params, command, at, ok: false, messages: result.messages, millis, outputs: Vec::new() },
+                );
+            }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let path = params.get("output").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).unwrap_or(&file_name);
@@ -865,11 +900,6 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let file_name =
-                    params.get("output").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).unwrap_or(&file_name).to_string();
-                if file_name.is_empty() || file_name.contains(['/', '\\']) {
-                    return Err("output must be a file name, not a path, in the browser".into());
-                }
                 return queue_file(
                     s,
                     file_name,
@@ -966,6 +996,61 @@ mod file_tests {
             millis: 3,
             outputs: Vec::new(),
         }
+    }
+
+    fn task_session(steps: Value) -> Session {
+        let mut s = Session::new(crate::Project::default());
+        let mut cities = Dataset::new("Cities", rustgis_data::GeometryType::Point, Vec::new());
+        cities.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(20.0, 30.0))), Vec::new());
+        s.map_mut().add_layer(rustgis_map::Layer::new(0, cities));
+        s.queue_gp_files = true;
+        s.run("task.new", &json!({"name": "Export task", "steps": steps})).unwrap();
+        s.mark_saved();
+        s
+    }
+
+    #[test]
+    fn task_with_a_prior_edit_and_final_queued_export_has_one_restorable_undo_step() {
+        let mut s = task_session(json!([
+            {"title": "Make buffer", "command": "gp.bufferPoint",
+             "params": {"lon": 20, "lat": 30, "distance": 100, "name": "Task buffer"}},
+            {"title": "Export buffer", "command": "gp.run",
+             "params": {"tool": "vectorToPmtiles", "params": {"input": "Task buffer", "minZoom": 0, "maxZoom": 0}}}
+        ]));
+        let depth = s.undo_depth();
+        let result = s.run("task.run", &json!({"task": "Export task"})).unwrap();
+        assert_eq!(result["ran"][1]["result"]["pending"], true);
+        assert!(s.map().layer_by_name("Task buffer").is_some());
+        assert_eq!(s.project.gp_history.len(), 1, "the buffer completed, the export has not");
+        assert!(s.dirty());
+        assert_eq!(s.undo_depth(), depth + 1, "direct step handlers share one task transaction");
+        let files = s.take_gp_files();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].2.starts_with(b"PMTiles\x03"), "the task ran the real exporter");
+        assert!(s.undo());
+        assert!(s.map().layer_by_name("Task buffer").is_none());
+        assert_eq!(s.map().layers.len(), 1);
+        assert!(s.project.gp_history.is_empty());
+        assert!(!s.dirty(), "undo restores the saved pre-task project");
+    }
+
+    #[test]
+    fn file_only_task_with_multiple_exports_and_a_view_step_stays_request_only() {
+        let mut s = task_session(json!([
+            {"title": "Export first", "command": "gp.run",
+             "params": {"tool": "vectorToPmtiles", "params": {"input": "Cities", "minZoom": 0, "maxZoom": 0}}},
+            {"title": "Export second", "command": "gp.run",
+             "params": {"tool": "vectorToPmtiles", "params": {"input": "Cities", "minZoom": 0, "maxZoom": 0}}},
+            {"title": "List tools", "command": "gp.tools"}
+        ]));
+        let depth = s.undo_depth();
+        let result = s.run("task.run", &json!({"task": "Export task"})).unwrap();
+        assert_eq!(result["ran"][0]["result"]["pending"], true);
+        assert_eq!(result["ran"][1]["result"]["pending"], true);
+        assert_eq!(s.take_gp_files().len(), 2);
+        assert!(s.project.gp_history.is_empty());
+        assert!(!s.dirty());
+        assert_eq!(s.undo_depth(), depth);
     }
 
     #[test]

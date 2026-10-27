@@ -7,9 +7,9 @@
 //! clipping buffer is **8 / 4096 tile units**, including at world edges. Polygon intersection
 //! keeps disconnected pieces and holes; quantized rings use MVT's y-down winding convention.
 //! This is a bounded in-memory exporter, not a sampler: resource limits reject the whole job.
-//! The conservative preflight also bounds polygon intersection work quadratically and refuses
-//! a component whose buffered candidate rectangle exceeds 40,000 tiles at one zoom. Sparse
-//! or very intricate geometry can therefore require a smaller extent even below 10,000 outputs.
+//! Allocation estimates are linear in geometry size. A separate cumulative CPU-work budget
+//! bounds quadratic polygon validation and candidate-tile vertex scans; a component's buffered
+//! candidate rectangle may not exceed 40,000 tiles at one zoom.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
@@ -24,7 +24,9 @@ const BUFFER: f64 = 8.0 / EXTENT as f64;
 const MAX_LAT: f64 = 85.051_128_779_806_6;
 const MAX_MEMORY: usize = 256 << 20;
 const MAX_TILES: usize = 10_000;
+const MAX_WORK: usize = 100_000_000;
 const MEMORY_ERROR: &str = "vector export exceeds the conservative 256 MiB memory limit; reduce the input or zoom range";
+const WORK_ERROR: &str = "vector export exceeds the 100,000,000-unit geometry work limit; simplify polygon rings, reduce the input extent, or narrow the zoom range";
 type TileKey = (u8, u32, u32);
 type Parts = Vec<Vec<[f32; 2]>>;
 
@@ -47,6 +49,8 @@ struct Notices {
 /// Zooms must satisfy `0 <= min_zoom <= max_zoom <= 16`. At most 10,000 distinct
 /// tiles and a conservative 256 MiB peak (including borrowed input, geometry work,
 /// encoder temporaries, writer duplication and the final archive) are allowed.
+/// Geometry work is capped separately at 100,000,000 cumulative units: one per
+/// candidate-tile vertex and `(vertices + rings)^2` per polygon validity check.
 /// Integers beyond the exact f64 range are rejected, never silently rounded.
 ///
 /// Geometry must already be normalized to WGS 84 degrees, as required by [`Dataset`].
@@ -61,7 +65,7 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
     if dataset.windowed || dataset.crs_incomplete {
         return Err("export requires a complete, fully georeferenced vector layer".into());
     }
-    let mut budget = Budget { used: input_size(dataset)? };
+    let mut budget = Budget { used: input_size(dataset)?, work: 0 };
     budget.add(product(rows.len(), size_of::<usize>())?)?;
     budget.add(product(source_layer.len(), 16)?)?;
     let mut names = BTreeSet::new();
@@ -77,7 +81,7 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
     let count = if rows.is_empty() { dataset.features.len() } else { rows.len() };
     // Keep row selection borrowed: do not copy all features or synthesize an index vector.
     for at in 0..count {
-        let row = if rows.is_empty() { at } else { rows[at] };
+        let row = if rows.is_empty() { at } else { *rows.get(at).ok_or_else(|| format!("selected row index {at} is out of range"))? };
         let feature = dataset.features.get(row).ok_or_else(|| format!("feature row {row} is out of range"))?;
         let Some(geometry) = &feature.geometry else {
             notices.missing += 1;
@@ -108,7 +112,7 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
             }
             Geometry::Line(parts) => {
                 for part in parts {
-                    budget.ensure(product(part.len().checked_add(8).ok_or(MEMORY_ERROR)?, 4096)?)?;
+                    budget.ensure(geometry_memory(part.len(), 1, false)?)?;
                     let path = project_path(part, None, &mut notices, &mut bounds)?;
                     emit(&[path], kind, min_zoom, max_zoom, &mut local, &mut budget, &mut notices)?;
                 }
@@ -116,9 +120,7 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
             Geometry::Polygon(polygons) => {
                 for polygon in polygons {
                     let vertices = polygon.iter().try_fold(0usize, |n, r| n.checked_add(r.len()).ok_or(MEMORY_ERROR))?;
-                    // Boolean operations may introduce pairwise intersections on hostile rings.
-                    // Reserve that worst case before calling geo, rather than checking afterwards.
-                    budget.ensure(polygon_work(vertices)?)?;
+                    budget.ensure(geometry_memory(vertices, polygon.len(), true)?)?;
                     let Some(exterior) = polygon.first() else { continue };
                     let outer = project_path(exterior, None, &mut notices, &mut bounds)?;
                     let anchor = path_centre(&outer);
@@ -209,6 +211,7 @@ pub fn export(dataset: &Dataset, rows: &[usize], min_zoom: u8, max_zoom: u8, sou
 
 struct Budget {
     used: usize,
+    work: usize,
 }
 impl Budget {
     fn ensure(&self, extra: usize) -> Result<(), String> {
@@ -219,17 +222,38 @@ impl Budget {
         self.used += extra;
         Ok(())
     }
+    fn add_work(&mut self, units: usize) -> Result<(), String> {
+        let work = self.work.checked_add(units).ok_or(WORK_ERROR)?;
+        if work > MAX_WORK {
+            return Err(WORK_ERROR.into());
+        }
+        self.work = work;
+        Ok(())
+    }
+    fn validate_polygon(&mut self, vertices: usize, rings: usize) -> Result<(), String> {
+        // geo 0.33 validates segment pairs quadratically, including between rings.
+        // One extra vertex per ring covers the implicit closure added by Polygon::new.
+        let closed = vertices.checked_add(rings).ok_or(WORK_ERROR)?;
+        self.add_work(closed.checked_mul(closed).ok_or(WORK_ERROR)?)
+    }
 }
 fn product(a: usize, b: usize) -> Result<usize, String> {
     a.checked_mul(b).ok_or_else(|| MEMORY_ERROR.into())
 }
-fn polygon_work(n: usize) -> Result<usize, String> {
-    let n = n.checked_add(8).ok_or(MEMORY_ERROR)?;
-    product(n, n)?.checked_mul(128).and_then(|v| v.checked_add(n.checked_mul(4096)?)).ok_or_else(|| MEMORY_ERROR.into())
+fn geometry_memory(vertices: usize, rings: usize, polygon: bool) -> Result<usize, String> {
+    let slots = vertices.checked_add(rings).and_then(|n| n.checked_add(8)).ok_or(MEMORY_ERROR)?;
+    // Per vertex/ring, 256 bytes cover projected f64 coordinates, up to two clipped
+    // endpoints per line segment, f32 quantization, Vec headers and capacity growth.
+    // Polygons reserve 2048 instead: a valid ring can cross each of the rectangle's
+    // four edges, introducing at most eight crossing endpoints per input segment.
+    // This also covers geo's sweep/intersection buffers, disconnected output rings,
+    // copied f64 rings for validation, and concurrent f32/f64 quantized copies.
+    // The rectangle intersection is linear in size, not a vertex-by-vertex overlay.
+    product(slots, if polygon { 2048 } else { 256 })
 }
 
 fn input_size(ds: &Dataset) -> Result<usize, String> {
-    let mut b = Budget { used: size_of::<Dataset>() };
+    let mut b = Budget { used: size_of::<Dataset>(), work: 0 };
     b.add(ds.name.capacity())?;
     b.add(ds.source.as_ref().map_or(0, String::capacity))?;
     b.add(product(ds.features.capacity(), size_of::<rustgis_data::Feature>())?)?;
@@ -382,24 +406,35 @@ fn emit(
         return Err("geometry wraps more than one world; split it at the antimeridian before export".into());
     }
     let vertices = rings.iter().try_fold(0usize, |n, r| n.checked_add(r.len()).ok_or(MEMORY_ERROR))?;
-    let polygon = if kind == mvt::GeomKind::Polygon {
-        budget.ensure(polygon_work(vertices)?)?;
-        let Some(polygon) = prepare_polygon(rings, notices)? else { return Ok(()) };
-        Some(polygon)
-    } else {
-        None
-    };
-    for z in min..=max {
+    let scratch = geometry_memory(vertices, rings.len(), kind == mvt::GeomKind::Polygon)?;
+    budget.ensure(scratch)?;
+    // Preflight every requested zoom before clipping any candidates. Keep the ranges
+    // on the stack; the public entry point allows at most seventeen zoom levels.
+    let mut ranges = [[0i64; 4]; 17];
+    for (range, z) in ranges.iter_mut().zip(min..=max) {
         let n = 1i64 << z;
         let scale = n as f64;
         let x0 = (bb[0] * scale - BUFFER).floor() as i64;
         let x1 = (bb[2] * scale + BUFFER).floor() as i64;
         let y0 = ((bb[1] * scale - BUFFER).floor() as i64).clamp(0, n - 1);
         let y1 = ((bb[3] * scale + BUFFER).floor() as i64).clamp(0, n - 1);
-        let candidates = (x1 - x0 + 1).checked_mul(y1 - y0 + 1).ok_or(MEMORY_ERROR)?;
+        let candidates = (x1 - x0 + 1).checked_mul(y1 - y0 + 1).ok_or(WORK_ERROR)?;
         if candidates > MAX_TILES as i64 * 4 {
             return Err("vector export candidate extent exceeds the 10,000 tile limit; reduce the zoom range or input extent".into());
         }
+        let candidates = usize::try_from(candidates).map_err(|_| WORK_ERROR)?;
+        budget.add_work(candidates.checked_mul(vertices).ok_or(WORK_ERROR)?)?;
+        *range = [x0, x1, y0, y1];
+    }
+    let polygon = if kind == mvt::GeomKind::Polygon {
+        let Some(polygon) = prepare_polygon(rings, budget, notices)? else { return Ok(()) };
+        Some(polygon)
+    } else {
+        None
+    };
+    for ([x0, x1, y0, y1], z) in ranges.into_iter().zip(min..=max) {
+        let n = 1i64 << z;
+        let scale = n as f64;
         for x in x0..=x1 {
             for y in y0..=y1 {
                 let rect = [
@@ -408,12 +443,8 @@ fn emit(
                     (x as f64 + 1.0 + BUFFER) / scale,
                     (y as f64 + 1.0 + BUFFER) / scale,
                 ];
-                budget.ensure(if kind == mvt::GeomKind::Polygon {
-                    polygon_work(vertices)?
-                } else {
-                    product(vertices.checked_add(8).ok_or(MEMORY_ERROR)?, 4096)?
-                })?;
-                let parts = clip_prepared(rings, polygon.as_ref(), kind, rect, x, y, scale, notices)?;
+                budget.ensure(scratch)?;
+                let parts = clip_prepared(rings, polygon.as_ref(), kind, rect, x, y, scale, budget, notices)?;
                 if parts.is_empty() {
                     continue;
                 }
@@ -432,12 +463,14 @@ fn emit(
     Ok(())
 }
 
-fn prepare_polygon(rings: &[Vec<GC<f64>>], notices: &mut Notices) -> Result<Option<Polygon<f64>>, String> {
+fn prepare_polygon(rings: &[Vec<GC<f64>>], budget: &mut Budget, notices: &mut Notices) -> Result<Option<Polygon<f64>>, String> {
     let Some(outer) = rings.first() else { return Ok(None) };
     if outer.len() < 3 {
         notices.collapsed += 1;
         return Ok(None);
     }
+    let vertices = rings.iter().try_fold(0usize, |n, ring| n.checked_add(ring.len()).ok_or(WORK_ERROR))?;
+    budget.validate_polygon(vertices, rings.len())?;
     let holes = rings
         .iter()
         .skip(1)
@@ -467,8 +500,9 @@ fn clipped(
     n: f64,
     notices: &mut Notices,
 ) -> Result<Parts, String> {
-    let polygon = if kind == mvt::GeomKind::Polygon { prepare_polygon(rings, notices)? } else { None };
-    clip_prepared(rings, polygon.as_ref(), kind, rect, x, y, n, notices)
+    let mut budget = Budget { used: 0, work: 0 };
+    let polygon = if kind == mvt::GeomKind::Polygon { prepare_polygon(rings, &mut budget, notices)? } else { None };
+    clip_prepared(rings, polygon.as_ref(), kind, rect, x, y, n, &mut budget, notices)
 }
 
 fn clip_prepared(
@@ -479,6 +513,7 @@ fn clip_prepared(
     x: i64,
     y: i64,
     n: f64,
+    budget: &mut Budget,
     notices: &mut Notices,
 ) -> Result<Parts, String> {
     let quantize =
@@ -525,6 +560,8 @@ fn clip_prepared(
                 let Some(exterior) = quantized_ring(polygon.exterior(), &quantize, false, notices) else { continue };
                 let holes: Vec<Vec<[f32; 2]>> =
                     polygon.interiors().iter().filter_map(|r| quantized_ring(r, &quantize, true, notices)).collect();
+                let vertices = holes.iter().try_fold(exterior.len(), |n, ring| n.checked_add(ring.len()).ok_or(WORK_ERROR))?;
+                budget.validate_polygon(vertices, holes.len().checked_add(1).ok_or(WORK_ERROR)?)?;
                 let to_line = |r: &Vec<[f32; 2]>| LineString::new(r.iter().map(|p| GC { x: p[0] as f64, y: p[1] as f64 }).collect());
                 let quantized = Polygon::new(to_line(&exterior), holes.iter().map(to_line).collect());
                 // Rounding can make a hole touch the exterior or collapse a narrow neck.
@@ -626,7 +663,7 @@ mod tests {
         let mut notices = Notices::default();
         let mut bounds = [180.0, MAX_LAT, -180.0, -MAX_LAT];
         let mut tiles = BTreeMap::new();
-        let mut budget = Budget { used: 0 };
+        let mut budget = Budget { used: 0, work: 0 };
         match g {
             Geometry::Line(parts) => {
                 for p in parts {
@@ -767,7 +804,7 @@ mod tests {
     fn boundary_points_are_buffered_into_adjacent_tiles() -> Result<(), String> {
         let mut tiles = BTreeMap::new();
         let mut notices = Notices::default();
-        emit(&[projected(&[(0.5, 0.5)])], mvt::GeomKind::Point, 1, 1, &mut tiles, &mut Budget { used: 0 }, &mut notices)?;
+        emit(&[projected(&[(0.5, 0.5)])], mvt::GeomKind::Point, 1, 1, &mut tiles, &mut Budget { used: 0, work: 0 }, &mut notices)?;
         assert_eq!(tiles.len(), 4);
         assert_eq!(tiles[&(1, 0, 0)][0][0], [4096.0, 4096.0]);
         assert_eq!(tiles[&(1, 1, 1)][0][0], [0.0, 0.0]);
@@ -809,12 +846,100 @@ mod tests {
         let wide = dataset(Geometry::Line(vec![coords(&[(-80.0, -70.0), (80.0, 70.0)])]));
         let error = export(&wide, &[], 16, 16, "test").err().ok_or("expected tile limit")?;
         assert!(error.contains("10,000"));
-        assert!(Budget { used: MAX_MEMORY }.ensure(1).is_err());
-        assert!(Budget { used: 0 }.ensure(usize::MAX).is_err());
-        assert!(polygon_work(usize::MAX).is_err());
+        assert!(Budget { used: MAX_MEMORY, work: 0 }.ensure(1).is_err());
+        assert!(Budget { used: 0, work: 0 }.ensure(usize::MAX).is_err());
+        assert!(geometry_memory(usize::MAX, 1, true).is_err());
+        assert!(geometry_memory(usize::MAX / 2048, 1, true).is_err());
+        assert!(geometry_memory(usize::MAX / 256, 1, false).is_err());
         assert!(product(usize::MAX, 2).is_err());
-        let complex = Geometry::Polygon(vec![vec![vec![Coord::new(0.0, 0.0); 2000]]]);
-        assert!(export(&dataset(complex), &[], 0, 0, "test").err().is_some_and(|e| e.contains("256 MiB")));
+        assert!(Budget { used: 0, work: 0 }.validate_polygon(usize::MAX, 1).is_err());
+        assert!(Budget { used: 0, work: 0 }.validate_polygon(usize::MAX / 2, 0).is_err());
+        assert!(Budget { used: 0, work: usize::MAX }.add_work(1).is_err());
+        Ok(())
+    }
+
+    fn circular_ring(vertices: usize) -> Vec<Coord> {
+        (0..vertices)
+            .map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / vertices as f64;
+                Coord::new(20.0 + 20.0 * angle.cos(), 20.0 + 20.0 * angle.sin())
+            })
+            .chain(std::iter::once(Coord::new(40.0, 20.0)))
+            .collect()
+    }
+
+    #[test]
+    fn valid_polygon_with_over_two_thousand_vertices_exports_at_low_zoom() -> Result<(), String> {
+        let ds = dataset(Geometry::Polygon(vec![vec![circular_ring(2400)]]));
+        let archive = export(&ds, &[], 0, 0, "detailed")?;
+        let tile = only_tile(&archive.bytes)?;
+        let feature = &tile.layers[0].features[0];
+        assert_eq!(feature.kind, mvt::GeomKind::Polygon);
+        assert!(!feature.geometry.is_empty());
+        assert!(feature.geometry.iter().all(|ring| mvt::ring_area(ring) > 0.0));
+        assert!(!archive.messages.iter().any(|message| message.contains("Dropped")));
+        Ok(())
+    }
+
+    #[test]
+    fn realistic_line_with_over_sixty_five_thousand_vertices_exports() -> Result<(), String> {
+        let points = (0..70_000)
+            .map(|i| {
+                let t = i as f64 / 69_999.0;
+                Coord::new(20.0 + 0.2 * t, 20.0 + 0.01 * (t * std::f64::consts::TAU * 8.0).sin())
+            })
+            .collect();
+        let ds = dataset(Geometry::Line(vec![points]));
+        let archive = export(&ds, &[], 0, 0, "detailed")?;
+        let tile = only_tile(&archive.bytes)?;
+        let feature = &tile.layers[0].features[0];
+        assert_eq!(feature.kind, mvt::GeomKind::LineString);
+        assert!(feature.geometry.iter().any(|part| part.len() >= 2));
+        Ok(())
+    }
+
+    #[test]
+    fn quadratic_polygon_validation_has_a_separate_work_limit() -> Result<(), String> {
+        let ds = dataset(Geometry::Polygon(vec![vec![circular_ring(10_000)]]));
+        let error = export(&ds, &[], 0, 0, "detailed").err().ok_or("expected polygon work limit")?;
+        assert_eq!(error, WORK_ERROR);
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_vertex_work_is_cumulative_across_zooms_before_clipping() -> Result<(), String> {
+        let ring: Vec<_> = (0..5000)
+            .map(|i| {
+                let t = i as f64 / 4999.0;
+                GC { x: 0.25 + 0.5 * t, y: 0.25 + 0.5 * t }
+            })
+            .collect();
+        // Buffered rectangles have 66² and 130² candidates, respectively. Either
+        // zoom fits alone, but their cumulative vertex scans exceed the work cap.
+        assert!(66 * 66 * ring.len() < MAX_WORK);
+        assert!(130 * 130 * ring.len() < MAX_WORK);
+        assert!((66 * 66 + 130 * 130) * ring.len() > MAX_WORK);
+        let mut tiles = BTreeMap::new();
+        let error = emit(&[ring], mvt::GeomKind::LineString, 7, 8, &mut tiles, &mut Budget { used: 0, work: 0 }, &mut Notices::default())
+            .err()
+            .ok_or("expected cumulative candidate work limit")?;
+        assert_eq!(error, WORK_ERROR);
+        assert!(tiles.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn quantized_polygon_validation_uses_the_same_cumulative_work_budget() -> Result<(), String> {
+        let rings = vec![projected(&[(0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9), (0.1, 0.1)])];
+        let mut budget = Budget { used: 0, work: 0 };
+        let mut notices = Notices::default();
+        let polygon = prepare_polygon(&rings, &mut budget, &mut notices)?;
+        budget.work = MAX_WORK - 1;
+        let error =
+            clip_prepared(&rings, polygon.as_ref(), mvt::GeomKind::Polygon, [0.0, 0.0, 1.0, 1.0], 0, 0, 1.0, &mut budget, &mut notices)
+                .err()
+                .ok_or("expected quantized validity work limit")?;
+        assert_eq!(error, WORK_ERROR);
         Ok(())
     }
 

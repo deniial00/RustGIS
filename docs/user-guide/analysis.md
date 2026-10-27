@@ -117,9 +117,17 @@ latitudes beyond Web Mercator's limit are clamped and reported. Geometry parts c
 integer quantization and features without geometry are reported. Null properties are omitted;
 integer attributes outside ±2^53 are rejected to avoid precision loss.
 
-This is an in-memory export, limited to 10,000 distinct tiles and a conservative 256 MiB
-working-memory budget; complex polygon clipping and very broad candidate extents may hit
-additional safety limits. It fails rather than sampling or truncating the input. Example:
+This is an in-memory export, limited to 10,000 distinct output tiles and a conservative
+256 MiB working-memory budget, including the input, clipping/encoding temporaries and final
+archive. Geometry allocation estimates are linear in the number of vertices and rings.
+Each geometry component's buffered candidate rectangle is limited to 40,000 tiles per zoom,
+including candidates where clipping produces no output. A separate **100,000,000-unit
+geometry-work budget** accumulates across all exported features, components and zooms:
+each candidate tile costs the component's vertex count, and each polygon validity check
+(before clipping and after integer quantization) costs `(vertices + rings)²`. The extra
+vertex per ring allows for implicit ring closure. The work-limit error is distinct from
+the memory-limit error: simplify polygon rings, reduce the input extent, or narrow the zoom
+range. These limits reject the whole export rather than sampling or truncating it. Example:
 
 ```text
 gp.run={"tool":"vectorToPmtiles","params":{"input":"Roads","minZoom":0,"maxZoom":12,"sourceLayer":"roads","output":"roads.pmtiles"}}

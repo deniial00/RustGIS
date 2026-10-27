@@ -605,6 +605,9 @@ pub struct Session {
     pub(crate) next_pending: u64,
     /// Tool files waiting for the front end to deliver and acknowledge.
     pub(crate) file_outputs: Vec<cmd::gp::PendingFile>,
+    /// Exercises the browser delivery path with real tools in native engine tests.
+    #[cfg(test)]
+    queue_gp_files: bool,
     /// Asynchronous runs started and not yet complete: (id, job, resolved params, start time).
     #[cfg(feature = "geolibre")]
     pub(crate) started: Vec<(u64, rustgis_geolibre::Job, serde_json::Value, u64)>,
@@ -777,6 +780,8 @@ impl Session {
             downloaded: Vec::new(),
             url_requests: Vec::new(),
             file_outputs: Vec::new(),
+            #[cfg(test)]
+            queue_gp_files: false,
             request_only: false,
             plugin_retries: Vec::new(),
             retry_tries: 0,

@@ -98,6 +98,29 @@ pub use rustgis_assistant;
 pub use rustgis_engine;
 pub use widgets::big_split_menu;
 
+/// Reconciles only command-result wrappers, not parameters or other arbitrary JSON.
+/// Script and model results retain their structure while file results become completed.
+fn complete_gp_file(result: Result<Value, String>, id: u64, completed: &Result<Value, String>) -> Result<Value, String> {
+    fn visit(result: &mut Value, id: u64, completed: &Result<Value, String>) -> Result<(), String> {
+        if result.get("download").and_then(Value::as_u64) == Some(id) {
+            *result = completed.as_ref().map_err(Clone::clone)?.clone();
+            return Ok(());
+        }
+        if let Some(ran) = result.get_mut("ran").and_then(Value::as_array_mut) {
+            for step in ran {
+                visit(step, id, completed)?;
+            }
+        }
+        if let Some(result) = result.get_mut("result") {
+            visit(result, id, completed)?;
+        }
+        Ok(())
+    }
+    let mut result = result?;
+    visit(&mut result, id, completed)?;
+    Ok(result)
+}
+
 /// Files read asynchronously (browser uploads, drops) waiting to be opened: (file name, bytes).
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
@@ -1407,8 +1430,7 @@ impl RustGisApp {
 
     /// Delivers exports from all command entry points, including scripts and the assistant.
     /// The engine records success only after the service confirms delivery.
-    fn deliver_gp_files(&mut self, requested: Option<u64>) -> Option<Result<Value, String>> {
-        let mut answer = None;
+    fn deliver_gp_files(&mut self, mut requested: Result<Value, String>) -> Result<Value, String> {
         for (id, name, bytes) in self.session.take_gp_files() {
             let delivered = match &self.services.download {
                 Some(download) => download(&name, bytes),
@@ -1424,14 +1446,11 @@ impl RustGisApp {
                 Ok(_) => (true, self.session.project.gp_history.last().map(|h| h.messages.clone()).unwrap_or_default()),
                 Err(error) => (false, vec![error.clone()]),
             });
-            if let Err(error) = &result {
-                self.session.notify(error.clone(), true);
-            }
-            if requested == Some(id) {
-                answer = Some(result);
-            }
+            // gp.fileDelivered reports delivery failures from the history record and its
+            // own acknowledgment errors through Session::run; neither needs a second notice.
+            requested = complete_gp_file(requested, id, &result);
         }
-        answer
+        requested
     }
 
     /// The RustGIS logo as a texture (rasterised once from `rustgis_render::logo`).
@@ -1624,10 +1643,7 @@ impl RustGisApp {
         let open_layout = |app: &Self| (app.session.active_layout, app.session.project.layouts.len());
         let layout_before = open_layout(self);
         let mut r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
-        let download = r.as_ref().ok().and_then(|v| v.get("download")).and_then(Value::as_u64);
-        if let Some(delivered) = self.deliver_gp_files(download) {
-            r = delivered;
-        }
+        r = self.deliver_gp_files(r);
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
         }
@@ -3529,7 +3545,7 @@ impl RustGisApp {
         panes::poll_geolibre(self, ctx);
         panes::poll_plugin_run(self, ctx);
         self.poll_downloads();
-        self.deliver_gp_files(None);
+        let _ = self.deliver_gp_files(Ok(Value::Null));
         // A value picked under Dynamic Text lasts while the text tool does, however the tool
         // changes (Esc, another tool, a text placed without Keep Tool, a command).
         if self.session.tool != rustgis_engine::Tool::Graphic("text") {
@@ -4054,7 +4070,8 @@ mod vertex_undo_tests {
 
 #[cfg(test)]
 mod download_service_tests {
-    use super::{RustGisApp, Services};
+    use super::{RustGisApp, Services, complete_gp_file};
+    use serde_json::json;
 
     #[test]
     fn rejected_download_does_not_announce_success_or_rename_project() {
@@ -4069,5 +4086,66 @@ mod download_service_tests {
         assert!(!app.download("archive.pmtiles", vec![1, 2, 3]));
         assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
         assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+    }
+
+    #[test]
+    fn direct_file_result_reports_delivery_instead_of_pending() {
+        let pending = json!({"pending": true, "download": 7, "file": "cities.pmtiles"});
+        let completed = json!({"file": "cities.pmtiles", "delivered": true, "messages": ["Exported cities"]});
+        assert_eq!(complete_gp_file(Ok(pending.clone()), 7, &Ok(completed.clone())), Ok(completed));
+        assert_eq!(complete_gp_file(Ok(pending), 7, &Err("browser rejected download".into())), Err("browser rejected download".into()));
+    }
+
+    #[test]
+    fn delivered_script_and_model_results_keep_their_wrappers_and_other_outputs() {
+        let script = json!({
+            "ran": [
+                {"line": 1, "command": "model.run", "result": {
+                    "model": "Export cities",
+                    "ran": [
+                        {"step": 1, "node": "export", "tool": "vectorToPmtiles",
+                            "result": {"pending": true, "download": 7, "file": "cities.pmtiles"}},
+                        {"step": 2, "node": "buffer", "tool": "buffer", "result": {"layer": 42}}
+                    ],
+                    "outputs": [{"node": "buffer", "layer": 42}]
+                }},
+                {"line": 2, "command": "map.zoom", "result": {"zoom": 5}}
+            ]
+        });
+        let completed = json!({"file": "cities.pmtiles", "delivered": true, "messages": ["Exported cities"]});
+        let mut expected = script.clone();
+        expected["ran"][0]["result"]["ran"][0]["result"] = completed.clone();
+        assert_eq!(complete_gp_file(Ok(script), 7, &Ok(completed)), Ok(expected));
+    }
+
+    #[test]
+    fn any_matching_failed_export_fails_the_compound_command() {
+        let script = json!({"ran": [
+            {"line": 1, "command": "gp.run", "result": {"pending": true, "download": 7, "file": "cities.pmtiles"}},
+            {"line": 2, "command": "gp.run", "result": {"pending": true, "download": 8, "file": "roads.pmtiles"}}
+        ]});
+        let cities = Ok(json!({"file": "cities.pmtiles", "delivered": true, "messages": []}));
+        let after_first = complete_gp_file(Ok(script), 7, &cities);
+        assert_eq!(complete_gp_file(after_first, 8, &Err("roads download rejected".into())), Err("roads download rejected".into()));
+    }
+
+    #[test]
+    fn unrelated_delivery_failures_do_not_change_the_command_result() {
+        let script = json!({"ran": [
+            {"line": 1, "command": "gp.run", "result": {"pending": true, "download": 7, "file": "cities.pmtiles"}},
+            {"line": 2, "command": "layer.color", "params": {"download": 8}, "result": {"layer": 42}}
+        ]});
+        assert_eq!(complete_gp_file(Ok(script.clone()), 8, &Err("unrelated download failed".into())), Ok(script));
+        assert_eq!(
+            complete_gp_file(Err("script command failed".into()), 7, &Err("download failed".into())),
+            Err("script command failed".into())
+        );
+    }
+
+    #[test]
+    fn acknowledgment_errors_still_have_one_error_notice() {
+        let mut app = RustGisApp::with_sample();
+        assert_eq!(app.run("gp.fileDelivered", json!({"id": u64::MAX})), Err("no pending file with that id".into()));
+        assert_eq!(app.session.notices.iter().filter(|n| n.error && n.text == "no pending file with that id").count(), 1);
     }
 }

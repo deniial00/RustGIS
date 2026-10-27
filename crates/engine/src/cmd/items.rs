@@ -690,6 +690,8 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         None => t.steps.iter().cloned().enumerate().collect(),
     };
     let mut done = Vec::new();
+    let mut edited = false;
+    let mut requested = false;
     for (i, st) in steps {
         if st.command.starts_with("task.") {
             return Err(format!("step {} would run another task", i + 1));
@@ -703,7 +705,7 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
             ));
         }
         let spec = s.registry.get(&st.command).ok_or_else(|| format!("step {} runs an unknown command '{}'", i + 1, st.command))?;
-        let (run, enabled) = (spec.run, spec.enabled);
+        let (run, enabled, mutates) = (spec.run, spec.enabled, spec.mutates);
         // As when run directly, a step naming a layer is checked against that layer.
         if st.params.get("layer").is_some()
             && let Ok(id) = s.layer_id(&st.params)
@@ -713,12 +715,18 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         if let Some(why) = enabled(s) {
             return Err(format!("step {} ({}): {why}", i + 1, st.title));
         }
+        // These handlers share the task's one outer transaction. A final request must not
+        // erase the undo step for earlier edits.
+        s.request_only = false;
         // A step that panics fails the task instead of the app (the whole task is one undo step).
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(s, &st.params)))
             .unwrap_or_else(|_| Err("failed unexpectedly".into()))
             .map_err(|e| format!("step {} ({}): {e}", i + 1, st.title))?;
+        requested |= s.request_only;
+        edited |= mutates && !s.request_only;
         done.push(json!({"step": i, "title": st.title, "result": r}));
     }
+    s.request_only = requested && !edited;
     Ok(json!({"task": t.name, "ran": done}))
 }
 

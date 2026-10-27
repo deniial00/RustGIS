@@ -478,6 +478,24 @@ pub struct RunReport {
     pub outputs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Correlates browser acknowledgements with this run only, never a newer report.
+    #[serde(skip)]
+    pending_files: HashMap<u64, String>,
+}
+
+impl RunReport {
+    pub(crate) fn file_delivered(&mut self, id: u64, error: Option<&str>) {
+        let Some(node_id) = self.pending_files.remove(&id) else { return };
+        let Some(node) = self.nodes.iter_mut().find(|n| n.node == node_id && n.status == "pending") else { return };
+        node.status = if error.is_some() { "error" } else { "done" };
+        if let Some(error) = error {
+            node.message = error.to_string();
+            if self.error.is_none() {
+                self.error = Some(error.to_string());
+            }
+        }
+        self.ok = self.error.is_none() && self.nodes.iter().all(|n| n.status == "done");
+    }
 }
 
 /// Runs a graph: its nodes in order, each tool on the layers wired into it, each output renaming
@@ -567,6 +585,9 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
                         tool_completed |= !pending;
                         let status = if pending { "pending" } else { "done" };
                         report.nodes.push(NodeRun { node: n.id.clone(), status, message: String::new(), layer: first.clone() });
+                        if pending && let Some(id) = r.get("download").and_then(Value::as_u64) {
+                            report.pending_files.insert(id, n.id.clone());
+                        }
                         if let Some(f) = first {
                             value.insert(n.id.as_str(), f);
                         }
@@ -625,15 +646,11 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
     if s.active_layer.is_some_and(|a| s.map().layer(a).is_none()) {
         s.active_layer = s.map().layers.first().map(|l| l.id);
     }
-    preserve_model_undo(s, tool_completed, file_pending);
-    Ok(ran)
-}
-
-/// A queued file is a request-only model result only if no other tool changed the project.
-fn preserve_model_undo(s: &mut Session, tool_completed: bool, file_pending: bool) {
+    // Queued bytes alone are request-only; completed tools still need the model's undo step.
     if tool_completed && file_pending {
         s.request_only = false;
     }
+    Ok(ran)
 }
 
 /// Renames layer `id` to `wanted` (made unique among the map's other layers) and returns the
@@ -669,35 +686,127 @@ mod tests {
     use super::*;
     use crate::Project;
 
-    #[test]
-    fn queued_file_does_not_hide_undo_for_prior_model_tools() {
+    fn session() -> Session {
         let mut s = Session::new(Project::default());
+        let mut points = rustgis_data::Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(20.0, 30.0))), Vec::new());
+        s.map_mut().add_layer(rustgis_map::Layer::new(0, points));
+        s.queue_gp_files = true;
         s.mark_saved();
-        let depth = s.undo_depth();
-        let result = s.guarded("Model run", true, |s| {
-            s.project.name = "Changed by model".into();
-            s.request_only = true;
-            preserve_model_undo(s, true, true);
-            Ok(Value::Null)
-        });
-        assert!(result.is_ok());
-        assert_eq!(s.project.name, "Changed by model");
-        assert!(s.dirty());
-        assert_eq!(s.undo_depth(), depth + 1);
+        s
+    }
+
+    fn file_graph() -> Value {
+        json!({"nodes": [
+            {"id": "file", "kind": "tool", "tool": "vectorToPmtiles",
+             "params": {"input": "Points", "minZoom": 0, "maxZoom": 0}}
+        ], "edges": []})
+    }
+
+    fn run_files(s: &mut Session, graph: Value) -> Vec<u64> {
+        let result = s.run("model.run", &json!({"graph": graph})).unwrap();
+        assert!(result["ran"].as_array().unwrap().iter().all(|r| r["result"]["pending"] == true));
+        s.take_gp_files()
+            .into_iter()
+            .map(|(id, _, bytes)| {
+                assert!(bytes.starts_with(b"PMTiles\x03"));
+                id
+            })
+            .collect()
     }
 
     #[test]
-    fn file_only_model_still_skips_an_empty_undo_step() {
-        let mut s = Session::new(Project::default());
-        s.mark_saved();
+    fn queued_file_does_not_hide_undo_for_prior_model_tools() {
+        let mut s = session();
         let depth = s.undo_depth();
-        let result = s.guarded("Model run", true, |s| {
-            s.request_only = true;
-            preserve_model_undo(s, false, true);
-            Ok(Value::Null)
-        });
-        assert!(result.is_ok());
+        let graph = json!({"nodes": [
+            {"id": "points", "kind": "input", "layer": "Points"},
+            {"id": "buffer", "kind": "tool", "tool": "buffer", "params": {"distance": 100}},
+            {"id": "output", "kind": "output", "name": "Buffered"},
+            {"id": "file", "kind": "tool", "tool": "vectorToPmtiles", "params": {"minZoom": 0, "maxZoom": 0}}
+        ], "edges": [
+            {"from": "points", "fromPort": "out", "to": "buffer", "toPort": "input"},
+            {"from": "buffer", "fromPort": "out", "to": "output", "toPort": "in"},
+            {"from": "buffer", "fromPort": "out", "to": "file", "toPort": "input"}
+        ]});
+        s.run("model.run", &json!({"graph": graph})).unwrap();
+        assert!(s.map().layer_by_name("Buffered").is_some());
+        assert_eq!(s.project.gp_history.len(), 1, "only the buffer has completed");
+        assert!(!s.model_run.as_ref().unwrap().ok);
+        assert!(s.model_run.as_ref().unwrap().nodes.iter().any(|n| n.node == "file" && n.status == "pending"));
+        let files = s.take_gp_files();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].2.starts_with(b"PMTiles\x03"));
+        assert!(s.dirty());
+        assert_eq!(s.undo_depth(), depth + 1);
+        assert!(s.undo());
+        assert!(s.map().layer_by_name("Buffered").is_none());
+        assert_eq!(s.map().layers.len(), 1);
+        assert!(s.project.gp_history.is_empty());
+        assert!(!s.dirty(), "undo restores the pre-model saved state");
+    }
+
+    #[test]
+    fn file_only_model_still_skips_an_empty_undo_step_and_completes_on_delivery() {
+        let mut s = session();
+        let depth = s.undo_depth();
+        let ids = run_files(&mut s, file_graph());
+        assert_eq!(ids.len(), 1);
         assert!(!s.dirty());
         assert_eq!(s.undo_depth(), depth);
+        assert!(!s.model_run.as_ref().unwrap().ok);
+        s.run("gp.fileDelivered", &json!({"id": ids[0]})).unwrap();
+        let report = s.model_run.as_ref().unwrap();
+        assert!(report.ok);
+        assert_eq!(report.nodes[0].status, "done");
+        assert_eq!(report.error, None);
+        assert!(s.project.gp_history[0].ok);
+    }
+
+    #[test]
+    fn model_file_failure_updates_the_matching_node_and_survives_other_deliveries() {
+        let mut s = session();
+        let graph = json!({"nodes": [
+            {"id": "first", "kind": "tool", "tool": "vectorToPmtiles",
+             "params": {"input": "Points", "minZoom": 0, "maxZoom": 0, "output": "first.pmtiles"}},
+            {"id": "second", "kind": "tool", "tool": "vectorToPmtiles",
+             "params": {"input": "Points", "minZoom": 0, "maxZoom": 0, "output": "second.pmtiles"}}
+        ], "edges": []});
+        let ids = run_files(&mut s, graph);
+        assert_eq!(ids.len(), 2);
+        s.run("gp.fileDelivered", &json!({"id": ids[1], "error": "download denied"})).unwrap();
+        let report = s.model_run.as_ref().unwrap();
+        assert!(!report.ok);
+        assert_eq!(report.error.as_deref(), Some("download denied"));
+        assert!(report.nodes.iter().any(|n| n.node == "second" && n.status == "error" && n.message == "download denied"));
+        assert!(report.nodes.iter().any(|n| n.node == "first" && n.status == "pending"));
+        s.run("gp.fileDelivered", &json!({"id": ids[0]})).unwrap();
+        let report = s.model_run.as_ref().unwrap();
+        assert!(!report.ok);
+        assert_eq!(report.error.as_deref(), Some("download denied"));
+        assert!(report.nodes.iter().any(|n| n.node == "first" && n.status == "done"));
+        assert!(report.nodes.iter().all(|n| n.status != "pending"));
+    }
+
+    #[test]
+    fn model_waits_for_all_downloads_and_ignores_older_run_acknowledgements() {
+        let mut s = session();
+        let old = run_files(&mut s, file_graph())[0];
+        let mut graph = file_graph();
+        let mut second = graph["nodes"][0].clone();
+        second["id"] = json!("second");
+        graph["nodes"].as_array_mut().unwrap().push(second);
+        let ids = run_files(&mut s, graph);
+        let before = s.model_run.clone();
+        s.run("gp.fileDelivered", &json!({"id": old, "error": "old run failed"})).unwrap();
+        assert_eq!(s.model_run, before, "matching node names do not identify a model run");
+        s.run("gp.fileDelivered", &json!({"id": ids[1]})).unwrap();
+        assert!(!s.model_run.as_ref().unwrap().ok, "the other download is still pending");
+        assert_eq!(s.model_run.as_ref().unwrap().nodes.iter().filter(|n| n.status == "pending").count(), 1);
+        s.run("gp.fileDelivered", &json!({"id": ids[0]})).unwrap();
+        let report = s.model_run.as_ref().unwrap();
+        assert!(report.ok);
+        assert!(report.nodes.iter().all(|n| n.status == "done"));
+        assert_eq!(report.error, None);
     }
 }
