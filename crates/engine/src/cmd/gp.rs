@@ -45,6 +45,8 @@ pub fn commands() -> Vec<C> {
         C::new("gp.uninstallGeolibre", "Uninstall GeoLibre Tools", "Analyze › Geoprocessing", |_, _| uninstall_geolibre()).view(),
         C::new("gp.finish", "Finish Tool Run", "Analyze › Geoprocessing", finish)
             .params(r#"{"id": a finished run (the browser's GeoLibre tools run asynchronously)}"#),
+        C::new("gp.fileDelivered", "Finish File Export", "Analyze › Geoprocessing", file_delivered)
+            .params(r#"{"id": pending file id, "error"?: download failure message}"#),
         C::new("gp.setGeolibre", "Locate GeoLibre Runner", "Analyze › Geoprocessing", set_geolibre)
             .view()
             .params(r#"{"path"?: "the geolibre executable (empty: look in the usual places)"}"#),
@@ -595,6 +597,17 @@ fn env_rows(
 }
 
 impl Inputs for MapInputs<'_> {
+    fn vector_to_pmtiles(
+        &self,
+        dataset: &Dataset,
+        rows: &[usize],
+        min_zoom: u8,
+        max_zoom: u8,
+        source_layer: &str,
+    ) -> Result<(Vec<u8>, Vec<String>), String> {
+        let out = crate::render::rustgis_tiles::vector_export::export(dataset, rows, min_zoom, max_zoom, source_layer)?;
+        Ok((out.bytes, out.messages))
+    }
     fn dataset(&self, layer: &str) -> Option<&Dataset> {
         self.loaded
             .get(&layer.to_ascii_lowercase())
@@ -732,6 +745,56 @@ pub fn reads_files(spec: &rustgis_analysis::ToolSpec) -> bool {
     spec.params.iter().any(|p| p.kind == rustgis_analysis::ParamKind::Path)
 }
 
+/// Whether a tool produces a file rather than a map layer.
+pub fn writes_files(spec: &rustgis_analysis::ToolSpec) -> bool {
+    spec.params.iter().any(|p| matches!(p.kind, rustgis_analysis::ParamKind::SaveFile { .. }))
+}
+
+/// A browser file export waiting for delivery, without a success record until acknowledged.
+pub(crate) struct PendingFile {
+    pub(crate) id: u64,
+    pub(crate) file_name: String,
+    pub(crate) bytes: Option<Vec<u8>>,
+    record: GpRecord,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn queue_file(s: &mut Session, file_name: String, bytes: Vec<u8>, record: GpRecord) -> CmdResult {
+    const MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
+    let held = s.file_outputs.iter().filter_map(|f| f.bytes.as_ref()).map(Vec::len).sum::<usize>();
+    if s.file_outputs.len() >= 8 || bytes.len() > MAX_PENDING_BYTES.saturating_sub(held) {
+        return Err("too many file exports are waiting for download; deliver them before exporting again".into());
+    }
+    s.next_pending = s.next_pending.wrapping_add(1);
+    let id = s.next_pending;
+    s.file_outputs.push(PendingFile { id, file_name: file_name.clone(), bytes: Some(bytes), record });
+    s.request_only = true;
+    Ok(json!({"pending": true, "download": id, "file": file_name}))
+}
+
+fn file_delivered(s: &mut Session, p: &Value) -> CmdResult {
+    let id = p.get("id").and_then(Value::as_u64).ok_or("id is required")?;
+    let i = s.file_outputs.iter().position(|f| f.id == id).ok_or("no pending file with that id")?;
+    if s.file_outputs[i].bytes.is_some() {
+        return Err("the file has not been handed to the download service".into());
+    }
+    let mut file = s.file_outputs.remove(i);
+    let error = p.get("error").and_then(Value::as_str);
+    file.record.ok = error.is_none();
+    if let Some(error) = error {
+        file.record.messages.push(error.to_string());
+    }
+    for message in &file.record.messages {
+        s.notify(message.clone(), !file.record.ok);
+    }
+    let out = json!({"file": file.file_name, "delivered": file.record.ok, "messages": file.record.messages});
+    s.project.gp_history.push(file.record);
+    if s.project.gp_history.len() > 500 {
+        s.project.gp_history.remove(0);
+    }
+    Ok(out)
+}
+
 /// The parameters as the history keeps them: a file picked in the browser (`{"name", "data"}`)
 /// by its name, not its contents.
 fn recorded(spec: Option<&rustgis_analysis::ToolSpec>, mut params: Value) -> Value {
@@ -778,6 +841,43 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
         Ok(r) => r,
     };
     let out = match result.output {
+        Output::File { file_name, bytes } => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = params.get("output").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).unwrap_or(&file_name);
+                if let Err(error) = rustgis_data::io::write_atomic(std::path::Path::new(path), &bytes) {
+                    let error = format!("{path}: {error}");
+                    result.messages.push(error.clone());
+                    s.project.gp_history.push(GpRecord {
+                        tool: name,
+                        id,
+                        params,
+                        command,
+                        at,
+                        ok: false,
+                        messages: result.messages,
+                        millis,
+                        outputs: Vec::new(),
+                    });
+                    return Err(error);
+                }
+                json!({"file": path, "bytes": bytes.len()})
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let file_name =
+                    params.get("output").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).unwrap_or(&file_name).to_string();
+                if file_name.is_empty() || file_name.contains(['/', '\\']) {
+                    return Err("output must be a file name, not a path, in the browser".into());
+                }
+                return queue_file(
+                    s,
+                    file_name,
+                    bytes,
+                    GpRecord { tool: name, id, params, command, at, ok: false, messages: result.messages, millis, outputs: Vec::new() },
+                );
+            }
+        }
         Output::Layer(ds) => {
             let id = super::layer::add_dataset(s, ds);
             json!({"layer": id})
@@ -847,4 +947,174 @@ fn apply(s: &mut Session, ran: Ran, params: Value, res: Result<rustgis_analysis:
         s.project.gp_history.remove(0);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod file_tests {
+    use super::*;
+
+    fn record() -> GpRecord {
+        GpRecord {
+            tool: "File export".into(),
+            id: "vectorToPmtiles".into(),
+            params: json!({"input": "Cities"}),
+            command: None,
+            at: 1,
+            ok: false,
+            messages: vec!["Exported data".into()],
+            millis: 3,
+            outputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn queueing_a_file_is_not_an_edit_before_delivery() {
+        let mut s = Session::new(crate::Project::default());
+        s.mark_saved();
+        let depth = s.undo_depth();
+        let pending = s.guarded("File export", true, |s| queue_file(s, "cities.pmtiles".into(), vec![1, 2, 3], record())).unwrap();
+        assert!(!s.dirty(), "generated bytes alone do not change the project");
+        assert_eq!(s.undo_depth(), depth, "queueing must not add an empty undo step");
+        assert!(s.project.gp_history.is_empty());
+        s.take_gp_files();
+        let out = s.run("gp.fileDelivered", &json!({"id": pending["download"]})).unwrap();
+        assert_eq!(out["delivered"], true);
+        assert!(s.dirty(), "acknowledged delivery adds history");
+        assert_eq!(s.undo_depth(), depth + 1);
+        assert_eq!(s.project.gp_history.len(), 1);
+    }
+
+    #[test]
+    fn file_download_history_waits_for_delivery_and_records_failure() {
+        let mut s = Session::new(crate::Project::default());
+        let pending = queue_file(&mut s, "cities.pmtiles".into(), vec![1, 2, 3], record()).unwrap();
+        let id = pending["download"].as_u64().unwrap();
+        assert_eq!(pending["pending"], true);
+        assert!(s.project.gp_history.is_empty());
+        assert!(s.run("gp.fileDelivered", &json!({"id": id})).is_err());
+        assert!(s.project.gp_history.is_empty());
+        assert_eq!(s.take_gp_files(), vec![(id, "cities.pmtiles".into(), vec![1, 2, 3])]);
+        assert!(s.take_gp_files().is_empty(), "bytes are handed over once");
+        let out = s.run("gp.fileDelivered", &json!({"id": id, "error": "browser rejected download"})).unwrap();
+        assert_eq!(out["delivered"], false);
+        assert_eq!(s.project.gp_history.len(), 1);
+        assert!(!s.project.gp_history[0].ok);
+        assert!(s.project.gp_history[0].outputs.is_empty());
+        assert!(s.project.gp_history[0].messages.iter().any(|m| m == "browser rejected download"));
+        assert!(s.run("gp.fileDelivered", &json!({"id": id})).is_err(), "acknowledged once");
+    }
+
+    #[test]
+    fn file_download_success_and_project_replacement() {
+        let mut s = Session::new(crate::Project::default());
+        let pending = queue_file(&mut s, "cities.pmtiles".into(), vec![4], record()).unwrap();
+        let id = pending["download"].as_u64().unwrap();
+        s.take_gp_files();
+        let out = s.run("gp.fileDelivered", &json!({"id": id})).unwrap();
+        assert_eq!(out["delivered"], true);
+        assert!(s.project.gp_history[0].ok);
+        assert!(s.project.gp_history[0].outputs.is_empty(), "a file is not a layer");
+        let old = queue_file(&mut s, "old.pmtiles".into(), vec![5], record()).unwrap();
+        s.run("project.new", &json!({})).unwrap();
+        assert!(s.take_gp_files().is_empty());
+        assert!(s.run("gp.fileDelivered", &json!({"id": old["download"]})).is_err());
+    }
+
+    #[test]
+    fn failed_commands_drop_pending_file_deliveries() {
+        let mut s = Session::new(crate::Project::default());
+        let r = s.guarded("Failed export task", true, |s| {
+            queue_file(s, "cancelled.pmtiles".into(), vec![1], record())?;
+            Err("task cancelled".into())
+        });
+        assert!(r.is_err());
+        assert!(s.take_gp_files().is_empty());
+        assert!(s.project.gp_history.is_empty());
+        for _ in 0..8 {
+            queue_file(&mut s, "bounded.pmtiles".into(), vec![1], record()).unwrap();
+        }
+        assert!(queue_file(&mut s, "too-many.pmtiles".into(), vec![1], record()).is_err());
+        assert_eq!(s.take_gp_files().len(), 8);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_file_exports_are_atomic_and_never_map_layers() {
+        let mut s = Session::new(crate::Project::default());
+        let root = std::env::temp_dir().join(format!("rustgis-gp-file-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir(&root).unwrap();
+        let destination = root.join("cities.pmtiles");
+        std::fs::write(&destination, b"previous").unwrap();
+        let file = || {
+            Ok(rustgis_analysis::ToolResult {
+                output: Output::File { file_name: "cities.pmtiles".into(), bytes: b"archive".to_vec() },
+                messages: vec!["Exported data".into()],
+            })
+        };
+        let ran = || Ran { name: "File export".into(), id: "vectorToPmtiles".into(), command: None, started: 1000 };
+        let params = json!({"output": destination.display().to_string()});
+        let out = apply(&mut s, ran(), params, file(), 3).unwrap();
+        assert_eq!(out["bytes"], 7);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"archive");
+        assert!(s.map().layers.is_empty());
+        assert!(s.project.gp_history[0].ok);
+        assert!(s.project.gp_history[0].outputs.is_empty());
+        let occupied = root.join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("keep"), b"unchanged").unwrap();
+        let params = json!({"output": occupied.display().to_string()});
+        assert!(s.guarded("File export", true, |s| apply(s, ran(), params, file(), 3)).is_err());
+        assert_eq!(std::fs::read(occupied.join("keep")).unwrap(), b"unchanged");
+        assert_eq!(s.project.gp_history.len(), 2, "a failed save must be recorded");
+        let failed = &s.project.gp_history[1];
+        assert!(!failed.ok);
+        assert_eq!(failed.id, "vectorToPmtiles");
+        assert_eq!(failed.params["output"], occupied.display().to_string());
+        assert_eq!(failed.at, 1);
+        assert_eq!(failed.millis, 3);
+        assert!(failed.outputs.is_empty());
+        assert_eq!(failed.messages.first().map(String::as_str), Some("Exported data"));
+        assert!(failed.messages.last().is_some_and(|m| m.contains(occupied.to_string_lossy().as_ref())));
+        let previous = s.project.gp_history[0].clone();
+        s.project.gp_history.resize(500, previous);
+        let params = json!({"output": occupied.display().to_string()});
+        assert!(
+            s.guarded("Failed export task", true, |s| { s.guarded("File export", true, |s| apply(s, ran(), params, file(), 3)) }).is_err()
+        );
+        assert_eq!(s.project.gp_history.len(), 500);
+        assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "no partial staging file");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod file_permission_tests {
+    use super::*;
+
+    #[test]
+    fn file_tools_are_file_access_even_without_an_output_path() {
+        let s = Session::new(crate::Project::default());
+        let tool = rustgis_analysis::tool("vectorToPmtiles").expect("registered file export tool");
+        assert!(writes_files(tool));
+        assert!(!reads_files(tool), "output files are not input paths");
+        for output in [None, Some("archive"), Some("cities.pmtiles")] {
+            let mut params = json!({"input": "Cities", "minZoom": 0, "maxZoom": 0});
+            if let Some(output) = output {
+                params["output"] = json!(output);
+            }
+            let p = json!({"tool": "vectorToPmtiles", "params": params});
+            assert!(crate::cmd::items::touches_files("gp.run", &p));
+            let reaches = s.registry.get("gp.run").and_then(|spec| crate::cmd::plugins::reaches(spec, &p));
+            assert!(matches!(reaches, Some(crate::cmd::plugins::Reach::Files)));
+        }
+        let node = crate::project::ModelNode {
+            kind: crate::project::ModelNodeKind::Tool,
+            tool: Some("vectorToPmtiles".into()),
+            ..Default::default()
+        };
+        assert!(crate::model::output_ports(&node).is_empty(), "files must not be wired as layers");
+    }
 }

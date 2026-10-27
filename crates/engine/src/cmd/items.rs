@@ -735,6 +735,8 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
         || ["import", "export", "open", "save", "add", "package", "upload", "download"].iter().any(|w| verb.starts_with(w))
         // Its inputs may be bare file names, which don't look like paths.
         || id == "raster.mosaic"
+        || (id == "gp.run" && params.get("tool").and_then(Value::as_str).and_then(super::gp::tool_id)
+            .and_then(rustgis_analysis::tool).is_some_and(super::gp::writes_files))
         || reaches(params)
 }
 
@@ -753,7 +755,7 @@ fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow
             .get("tool")
             .and_then(Value::as_str)
             .and_then(rustgis_analysis::tool)
-            .is_some_and(|spec| rustgis_analysis::TOOLS.iter().any(|b| std::ptr::eq(b, spec)))
+            .is_some_and(|spec| !super::gp::writes_files(spec) && rustgis_analysis::TOOLS.iter().any(|b| std::ptr::eq(b, spec)))
     };
     let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
     let named = || params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);

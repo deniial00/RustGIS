@@ -94,6 +94,7 @@ pub fn input_ports(node: &ModelNode) -> Vec<Port> {
 pub fn output_ports(node: &ModelNode) -> Vec<Port> {
     match node.kind {
         ModelNodeKind::Output => Vec::new(),
+        ModelNodeKind::Tool if tool_of(node).is_some_and(crate::cmd::gp::writes_files) => Vec::new(),
         _ => vec![Port { id: OUT, label: "Output", kind: PortKind::Any, required: false, many: false }],
     }
 }
@@ -458,7 +459,7 @@ pub fn graph_from_json(v: &Value) -> Result<ModelGraph, String> {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NodeRun {
     pub node: String,
-    /// `done` or `error`.
+    /// `done`, `pending` (a browser file awaiting delivery), or `error`.
     pub status: &'static str,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub message: String,
@@ -486,7 +487,7 @@ pub struct RunReport {
 pub fn run(s: &mut Session, name: &str, g: &ModelGraph, trusted: bool) -> Result<Value, String> {
     let mut report = RunReport { model: name.to_string(), ..Default::default() };
     let res = run_into(s, g, trusted, &mut report);
-    report.ok = res.is_ok();
+    report.ok = res.is_ok() && !report.nodes.iter().any(|n| n.status == "pending");
     report.error = res.as_ref().err().cloned();
     let out = res.map(|ran| json!({"model": name, "ran": ran, "outputs": report.outputs}));
     s.model_run = Some(report);
@@ -514,6 +515,8 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
     // The layer (by id) each tool node handed on, for its output to rename.
     let mut handed: HashMap<&str, u32> = HashMap::new();
     let mut ran = Vec::new();
+    let mut file_pending = false;
+    let mut tool_completed = false;
     for i in order {
         let Some(n) = g.nodes.get(i) else { continue };
         let upstream = |port: &str| -> Vec<String> {
@@ -559,7 +562,11 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
                                 .then(|| s.project.gp_history.last().and_then(|h| h.outputs.first().cloned()))
                                 .flatten()
                         });
-                        report.nodes.push(NodeRun { node: n.id.clone(), status: "done", message: String::new(), layer: first.clone() });
+                        let pending = r.get("pending").and_then(Value::as_bool) == Some(true);
+                        file_pending |= pending;
+                        tool_completed |= !pending;
+                        let status = if pending { "pending" } else { "done" };
+                        report.nodes.push(NodeRun { node: n.id.clone(), status, message: String::new(), layer: first.clone() });
                         if let Some(f) = first {
                             value.insert(n.id.as_str(), f);
                         }
@@ -618,7 +625,15 @@ fn run_into(s: &mut Session, g: &ModelGraph, trusted: bool, report: &mut RunRepo
     if s.active_layer.is_some_and(|a| s.map().layer(a).is_none()) {
         s.active_layer = s.map().layers.first().map(|l| l.id);
     }
+    preserve_model_undo(s, tool_completed, file_pending);
     Ok(ran)
+}
+
+/// A queued file is a request-only model result only if no other tool changed the project.
+fn preserve_model_undo(s: &mut Session, tool_completed: bool, file_pending: bool) {
+    if tool_completed && file_pending {
+        s.request_only = false;
+    }
 }
 
 /// Renames layer `id` to `wanted` (made unique among the map's other layers) and returns the
@@ -647,4 +662,42 @@ pub const SCHEMA: &str = "https://rustgis.app/schemas/model-graph-v1.json";
 
 pub fn to_file(name: &str, g: &ModelGraph) -> Value {
     json!({"$schema": SCHEMA, "version": "1.0.0", "name": name, "graph": g})
+}
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::Project;
+
+    #[test]
+    fn queued_file_does_not_hide_undo_for_prior_model_tools() {
+        let mut s = Session::new(Project::default());
+        s.mark_saved();
+        let depth = s.undo_depth();
+        let result = s.guarded("Model run", true, |s| {
+            s.project.name = "Changed by model".into();
+            s.request_only = true;
+            preserve_model_undo(s, true, true);
+            Ok(Value::Null)
+        });
+        assert!(result.is_ok());
+        assert_eq!(s.project.name, "Changed by model");
+        assert!(s.dirty());
+        assert_eq!(s.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn file_only_model_still_skips_an_empty_undo_step() {
+        let mut s = Session::new(Project::default());
+        s.mark_saved();
+        let depth = s.undo_depth();
+        let result = s.guarded("Model run", true, |s| {
+            s.request_only = true;
+            preserve_model_undo(s, false, true);
+            Ok(Value::Null)
+        });
+        assert!(result.is_ok());
+        assert!(!s.dirty());
+        assert_eq!(s.undo_depth(), depth);
+    }
 }

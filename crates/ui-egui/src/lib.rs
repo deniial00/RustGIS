@@ -223,8 +223,9 @@ pub struct Services {
     /// Opens a file picker for `"data"`, `"project"`, or `"shapefile"`; results land in `inbox`.
     /// Shapefile picks carry [`SHAPEFILE_PICK`] after sidecars are gathered into ZIPs.
     pub open_async: Option<Box<dyn Fn(&str)>>,
-    /// Hands bytes to the user as a download named `file_name`.
-    pub download: Option<Box<dyn Fn(&str, Vec<u8>)>>,
+    /// Hands bytes to the user as a download named `file_name`; success means the browser
+    /// accepted delivery, not merely that the bytes were generated.
+    pub download: Option<Box<dyn Fn(&str, Vec<u8>) -> Result<(), String>>>,
     pub inbox: Option<Inbox>,
     /// Reads a saved preference (`language`, …).
     pub load_pref: Option<Box<dyn Fn(&str) -> Option<String>>>,
@@ -1365,7 +1366,11 @@ impl RustGisApp {
             }
         };
         let file = format!("{stem}.rgis");
-        self.download(&file, text.into_bytes());
+        if let Err(e) = self.services.download.as_ref().ok_or("no download service")?(&file, text.into_bytes()) {
+            self.session.project.name = old;
+            return Err(e);
+        }
+        self.session.notify(crate::i18n::fmt("Downloaded {name}", &[("name", &file)]), false);
         if stripped > 0 {
             self.session.notify(
                 crate::i18n::fmt(
@@ -1389,12 +1394,44 @@ impl RustGisApp {
     fn download(&mut self, name: &str, bytes: Vec<u8>) -> bool {
         match &self.services.download {
             Some(d) => {
-                d(name, bytes);
+                if let Err(e) = d(name, bytes) {
+                    self.session.notify(e, true);
+                    return false;
+                }
                 self.session.notify(crate::i18n::fmt("Downloaded {name}", &[("name", name)]), false);
                 true
             }
             None => false,
         }
+    }
+
+    /// Delivers exports from all command entry points, including scripts and the assistant.
+    /// The engine records success only after the service confirms delivery.
+    fn deliver_gp_files(&mut self, requested: Option<u64>) -> Option<Result<Value, String>> {
+        let mut answer = None;
+        for (id, name, bytes) in self.session.take_gp_files() {
+            let delivered = match &self.services.download {
+                Some(download) => download(&name, bytes),
+                None => Err("this build has no download service".into()),
+            };
+            let mut params = json!({"id": id});
+            if let Err(error) = &delivered {
+                params["error"] = json!(error);
+            }
+            let completed = self.session.run("gp.fileDelivered", &params);
+            let result = delivered.and(completed);
+            self.gp.last = Some(match &result {
+                Ok(_) => (true, self.session.project.gp_history.last().map(|h| h.messages.clone()).unwrap_or_default()),
+                Err(error) => (false, vec![error.clone()]),
+            });
+            if let Err(error) = &result {
+                self.session.notify(error.clone(), true);
+            }
+            if requested == Some(id) {
+                answer = Some(result);
+            }
+        }
+        answer
     }
 
     /// The RustGIS logo as a texture (rasterised once from `rustgis_render::logo`).
@@ -1586,7 +1623,11 @@ impl RustGisApp {
         // of another, so it ends when the open layout changes (or layouts come and go).
         let open_layout = |app: &Self| (app.session.active_layout, app.session.project.layouts.len());
         let layout_before = open_layout(self);
-        let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
+        let mut r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
+        let download = r.as_ref().ok().and_then(|v| v.get("download")).and_then(Value::as_u64);
+        if let Some(delivered) = self.deliver_gp_files(download) {
+            r = delivered;
+        }
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
         }
@@ -3488,6 +3529,7 @@ impl RustGisApp {
         panes::poll_geolibre(self, ctx);
         panes::poll_plugin_run(self, ctx);
         self.poll_downloads();
+        self.deliver_gp_files(None);
         // A value picked under Dynamic Text lasts while the text tool does, however the tool
         // changes (Esc, another tool, a text placed without Keep Tool, a command).
         if self.session.tool != rustgis_engine::Tool::Graphic("text") {
@@ -4007,5 +4049,25 @@ mod vertex_undo_tests {
         app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
         app.run("edit.redo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "redo");
+    }
+}
+
+#[cfg(test)]
+mod download_service_tests {
+    use super::{RustGisApp, Services};
+
+    #[test]
+    fn rejected_download_does_not_announce_success_or_rename_project() {
+        let mut app = RustGisApp::with_sample()
+            .with_services(Services { download: Some(Box::new(|_, _| Err("browser rejected download".into()))), ..Default::default() });
+        let name = app.session.project.name.clone();
+        let saved_name = app.ui.web_file.clone();
+        assert!(app.save_download("renamed.rgis").is_err());
+        assert_eq!(app.session.project.name, name);
+        assert_eq!(app.ui.web_file, saved_name);
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+        assert!(!app.download("archive.pmtiles", vec![1, 2, 3]));
+        assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
     }
 }

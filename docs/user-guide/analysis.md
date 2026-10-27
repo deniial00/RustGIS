@@ -78,7 +78,7 @@ written some other way (a token typed into a SQL query, say) can still be there:
 before sharing it. A point buffered where the
 map was clicked is copied as the command that buffered it, with the point.
 
-There are 20 built-in tools; GeoLibre and plugin tools join them when available.
+There are 22 built-in tools; GeoLibre and plugin tools join them when available.
 Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available tools and their parameters):
 
 | Tool | Id | Toolbox |
@@ -101,8 +101,29 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Summarize Within | `countPoints` | Analysis › Summarize |
 | Summary Statistics | `summaryStatistics` | Analysis › Statistics |
 | Export Features | `exportFeatures` | Conversion |
+| Vector to PMTiles | `vectorToPmtiles` | Analyze › Tools |
 | IDW Interpolation | `idwInterpolation` | Analysis › Interpolation |
 | Ordinary Kriging | `kriging` | Analysis › Interpolation |
+| Zonal Statistics | `zonalStats` | Analysis › Raster |
+
+**Vector to PMTiles** (`vectorToPmtiles`) writes a single-layer MVT archive in standard Web
+Mercator. Choose `minZoom` and `maxZoom` from 0 to 16; `sourceLayer` defaults to the input
+layer's name. The output file is saved atomically on desktop or downloaded in the browser.
+An active selection is exported; otherwise the geoprocessing extent applies, and streamed
+sources are read in full rather than limited to the visible map window. It exports points,
+lines and polygons, including multipart geometry, attributes and feature IDs—not the map's
+style or labels. Antimeridian paths are unwrapped and clipped with an 8/4096-tile buffer;
+latitudes beyond Web Mercator's limit are clamped and reported. Geometry parts collapsed by
+integer quantization and features without geometry are reported. Null properties are omitted;
+integer attributes outside ±2^53 are rejected to avoid precision loss.
+
+This is an in-memory export, limited to 10,000 distinct tiles and a conservative 256 MiB
+working-memory budget; complex polygon clipping and very broad candidate extents may hit
+additional safety limits. It fails rather than sampling or truncating the input. Example:
+
+```text
+gp.run={"tool":"vectorToPmtiles","params":{"input":"Roads","minZoom":0,"maxZoom":12,"sourceLayer":"roads","output":"roads.pmtiles"}}
+```
 
 **Simplify** uses Douglas–Peucker with a tolerance in kilometres. Each polygon ring keeps at
 least three different, non-collinear corners (plus the closing vertex), so a tolerance larger
@@ -114,8 +135,8 @@ use a smaller value for local boundaries.
 Most feature tools process only the selected rows when an input has a selection. Selection tools
 instead replace the input's selection; Select Layer By Location honours the selecting layer's
 selection. Summarize Within counts the selected points against **all** input polygons, and
-Calculate Geometry Attributes updates **all** rows. A built-in tool's `output` is a layer name in
-the project, never a file path.
+Calculate Geometry Attributes updates **all** rows. For tools that create a map layer, `output`
+is the layer name; `vectorToPmtiles` uses it as a file destination.
 
 **Buffer** distances, and the distance of **Select Layer By Location**, are measured on the Earth
 (the WGS 84 ellipsoid, as PROJ and GeographicLib measure it), not in the map's display

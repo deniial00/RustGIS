@@ -459,6 +459,7 @@ struct PutAside {
     /// Its work still under way (tool runs, downloads, plugin fetches, queries): the runs of
     /// the previous project mustn't land in the next one.
     pending: Vec<PendingRun>,
+    file_outputs: Vec<cmd::gp::PendingFile>,
     #[cfg(feature = "geolibre")]
     started: Vec<(u64, rustgis_geolibre::Job, serde_json::Value, u64)>,
     plugin_runs: Vec<cmd::gp::StartedRun>,
@@ -602,6 +603,8 @@ pub struct Session {
     /// Finished asynchronous tool runs waiting for `gp.finish` (the browser's GeoLibre tools).
     pub(crate) pending: Vec<PendingRun>,
     pub(crate) next_pending: u64,
+    /// Tool files waiting for the front end to deliver and acknowledge.
+    pub(crate) file_outputs: Vec<cmd::gp::PendingFile>,
     /// Asynchronous runs started and not yet complete: (id, job, resolved params, start time).
     #[cfg(feature = "geolibre")]
     pub(crate) started: Vec<(u64, rustgis_geolibre::Job, serde_json::Value, u64)>,
@@ -773,6 +776,7 @@ impl Session {
             downloading: Vec::new(),
             downloaded: Vec::new(),
             url_requests: Vec::new(),
+            file_outputs: Vec::new(),
             request_only: false,
             plugin_retries: Vec::new(),
             retry_tries: 0,
@@ -852,6 +856,12 @@ impl Session {
     /// The `layer.addUrl` requests waiting for the front end ([`Session::request_url`]), taken.
     pub fn take_url_requests(&mut self) -> Vec<serde_json::Value> {
         std::mem::take(&mut self.url_requests)
+    }
+
+    /// Takes tool files awaiting download. Metadata stays until `gp.fileDelivered` acknowledges
+    /// delivery, so producing bytes alone never records a successful run.
+    pub fn take_gp_files(&mut self) -> Vec<(u64, String, Vec<u8>)> {
+        self.file_outputs.iter_mut().filter_map(|f| f.bytes.take().map(|bytes| (f.id, f.file_name.clone(), bytes))).collect()
     }
 
     /// Whether background work still belongs to this project.
@@ -978,6 +988,7 @@ impl Session {
         self.quiet_failure = false;
         // Requests a failed command left for the front end go with its other changes.
         let requests = self.url_requests.len();
+        let file_outputs = self.file_outputs.len();
         let said = self.notices_given;
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)))
             .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly; the project was restored")));
@@ -1035,6 +1046,10 @@ impl Session {
                 self.state = self.new_state();
             }
             (Err(_), Some(snap)) => {
+                // File exports report delivery failures as history, not as a successful map
+                // edit. Keep those failure records while rolling back the command's edits.
+                let history_from = snap.gp_history.len();
+                let failed_history = if self.opened == opened { std::mem::take(&mut self.project.gp_history) } else { Vec::new() };
                 // The project as it was before the command, so the layout open then, whatever
                 // the command opened on the way (a task's steps).
                 self.project = snap;
@@ -1056,11 +1071,28 @@ impl Session {
                 let errors: Vec<Notice> = self.notices.drain(start..).filter(|n| n.error).collect();
                 self.notices_given -= (new - errors.len()) as u64;
                 self.notices.extend(errors);
+                let mut recorded_failure = false;
+                for record in failed_history
+                    .into_iter()
+                    .skip(history_from)
+                    .filter(|record| !record.ok && rustgis_analysis::tool(&record.id).is_some_and(cmd::gp::writes_files))
+                {
+                    self.project.gp_history.push(record);
+                    recorded_failure = true;
+                }
+                if recorded_failure {
+                    if self.depth == 0 && self.project.gp_history.len() > 500 {
+                        let excess = self.project.gp_history.len() - 500;
+                        self.project.gp_history.drain(..excess);
+                    }
+                    self.state = self.new_state();
+                }
             }
             _ => {}
         }
         if res.is_err() {
             self.url_requests.truncate(requests);
+            self.file_outputs.truncate(file_outputs);
         }
         let quiet = std::mem::take(&mut self.quiet_failure);
         if let Err(e) = &res
@@ -1121,6 +1153,7 @@ impl Session {
             path: self.path.clone(),
             model_run: self.model_run.take(),
             pending: take(&mut self.pending),
+            file_outputs: take(&mut self.file_outputs),
             #[cfg(feature = "geolibre")]
             started: take(&mut self.started),
             plugin_runs: take(&mut self.plugin_runs),
@@ -1166,6 +1199,7 @@ impl Session {
             path,
             model_run,
             pending,
+            file_outputs,
             #[cfg(feature = "geolibre")]
             started,
             plugin_runs,
@@ -1189,6 +1223,7 @@ impl Session {
         (self.measurements, self.topology_errors, self.edit_counts) = (measurements, topology_errors, edit_counts);
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
         (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
+        self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
         self.trend_results = trend_results;
         #[cfg(feature = "geolibre")]
