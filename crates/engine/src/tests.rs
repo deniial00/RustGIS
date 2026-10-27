@@ -257,7 +257,7 @@ fn undo_steps_share_the_layers_they_leave_alone() {
     s.run("layer.rename", &json!({"layer": "Nations", "name": "States"})).unwrap();
     let live = s.map().layer_by_name("States").unwrap();
     let id = live.id;
-    for (snap, _, _, _, _) in &s.undo {
+    for (snap, ..) in &s.undo {
         let old = snap.maps.iter().flat_map(|m| &m.layers).find(|l| l.id == id).unwrap();
         assert!(old.dataset.features.shares(&live.dataset.features), "the snapshot copied the features");
         assert_eq!(old.projected_cache().as_ptr(), live.projected_cache().as_ptr(), "the snapshot copied the projected geometry");
@@ -266,7 +266,7 @@ fn undo_steps_share_the_layers_they_leave_alone() {
     let before = s.map().layer_by_name("Cities").unwrap().dataset.features.len();
     s.run("edit.addFeature", &json!({"layer": "Cities", "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}})).unwrap();
     let cities = s.map().layer_by_name("Cities").unwrap();
-    let (snap, _, _, _, _) = s.undo.last().unwrap();
+    let (snap, ..) = s.undo.last().unwrap();
     let old = snap.maps.iter().flat_map(|m| &m.layers).find(|l| l.id == cities.id).unwrap();
     assert!(!old.dataset.features.shares(&cities.dataset.features));
     assert_eq!((old.dataset.features.len(), cities.dataset.features.len()), (before, before + 1));

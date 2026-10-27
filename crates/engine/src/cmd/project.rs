@@ -54,6 +54,7 @@ fn reset(s: &mut Session, p: Project) {
     s.active_layout = None;
     s.tool = Tool::Explore;
     s.clear_history();
+    s.file_identity = s.state();
     s.history_from_file = s.project.gp_history.len();
     // Zarr layers that follow the time slider read the step it is at.
     super::zarr::follow_time(s);
@@ -82,6 +83,8 @@ const MAX_PACKAGE: u64 = 1 << 30;
 fn open(s: &mut Session, p: &Value) -> CmdResult {
     let path = PathBuf::from(super::ps(p, "path").ok_or("path is required")?);
     let is_package = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rgispkg"));
+    let origin = if is_package { path.canonicalize() } else { std::path::absolute(&path) }
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     super::connections::clear_active();
     let proj = (|| {
         if is_package {
@@ -112,10 +115,10 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
         name_from_file(s, &path);
     }
     if is_package {
-        s.opened_package = Some(path);
+        s.opened_package = Some(origin);
         s.path = None;
     } else {
-        s.path = Some(path);
+        s.path = Some(origin);
     }
     s.notify(format!("Opened {}", s.project.name), false);
     super::connections::resolve_project(s);
@@ -150,14 +153,15 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
 /// project's file. The project as it is now is the saved state undo can return to.
 fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     let path = if path.extension().is_none() { path.with_extension(crate::project::EXTENSION) } else { path };
-    let stripped = s.project.save(&path)?;
+    let destination = std::path::absolute(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let stripped = s.project.save(&destination)?;
     s.mark_saved();
     s.edit_counts.clear();
     s.notify(format!("Saved {}", path.display()), false);
     if stripped > 0 {
         s.notify(format!("{stripped} layer address(es) were saved without their keys, tokens or passwords: after RustGIS closes, add those layers again to give them"), false);
     }
-    s.path = Some(path.clone());
+    s.path = Some(destination);
     Ok(json!({"path": path.display().to_string(), "stripped": stripped}))
 }
 

@@ -1267,6 +1267,228 @@ mod file_tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn points_session() -> Session {
+        let mut s = Session::new(crate::Project::default());
+        let mut points = Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(20.0, 30.0))), Vec::new());
+        s.map_mut().add_dataset(points);
+        s
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_project_origins_survive_cwd_changes() {
+        if std::env::var_os("RUSTGIS_TEST_PROJECT_ORIGIN_CWD").is_none() {
+            let root = std::env::temp_dir().join(format!("rustgis-origin-cwd-{}-{}", std::process::id(), now_ms()));
+            std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+            let mut s = points_session();
+            s.run("project.saveAs", &json!({"path": root.join("Opened.rgis")})).unwrap();
+            s.run("project.package", &json!({"path": root.join("Pack.rgispkg")})).unwrap();
+            // cwd is process-wide: never change it in the parallel suite's parent process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cmd::gp::file_tests::native_project_origins_survive_cwd_changes", "--nocapture"])
+                .env("RUSTGIS_TEST_PROJECT_ORIGIN_CWD", "1")
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            assert!(stdout.contains("1 passed; 0 failed"), "the isolated child must exercise the guard: {stdout}");
+            return;
+        }
+        let root = std::env::current_dir().unwrap();
+        for (mode, name) in [("package", "Pack.rgispkg"), ("project", "Opened.rgis"), ("save", "Saved.rgis")] {
+            std::env::set_current_dir(&root).unwrap();
+            let mut s = Session::new(crate::Project::default());
+            let input = if mode == "save" { "Opened.rgis" } else { name };
+            s.run("project.open", &json!({"path": input})).unwrap();
+            if mode == "save" {
+                s.run("project.saveAs", &json!({"path": name})).unwrap();
+            }
+            if mode == "package" {
+                assert!(s.path.is_none(), "the anchored package is still not a save destination");
+            }
+            let destination = root.join(name);
+            let original = std::fs::read(&destination).unwrap();
+            std::env::set_current_dir(root.join("elsewhere")).unwrap();
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": destination
+                }}),
+            );
+            assert!(result.is_err(), "{mode}: cwd changes must not allow overwriting the origin: {result:?}");
+            assert!(result.unwrap_err().contains("open project's file"));
+            assert_eq!(std::fs::read(&destination).unwrap(), original);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_project_origins_follow_undo_redo() {
+        let root = std::env::temp_dir().join(format!("rustgis-origin-undo-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        for package in [true, false] {
+            let mut s = points_session();
+            let source = root.join(if package { "Pack.rgispkg" } else { "Saved.rgis" });
+            if package {
+                s.run("project.package", &json!({"path": source})).unwrap();
+                s.run("project.open", &json!({"path": source})).unwrap();
+            } else {
+                s.run("project.saveAs", &json!({"path": source})).unwrap();
+            }
+            let original = std::fs::read(&source).unwrap();
+            let points = s.map().layer_by_name("Points").unwrap().dataset.clone();
+            s.guarded("Replace project", true, |s| s.run("project.new", &json!({"name": "Other"}))).unwrap();
+            assert!(s.undo());
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": source
+                }}),
+            );
+            assert!(result.is_err(), "undo must restore the project's file protection: {result:?}");
+            assert!(result.unwrap_err().contains("open project's file"));
+            assert_eq!(std::fs::read(&source).unwrap(), original);
+            assert!(s.redo());
+            assert!(s.map().layer_by_name("Points").is_none());
+            s.run("script.run", &json!({"script": "edit.undo {}"})).unwrap();
+            assert!(s.map().layer_by_name("Points").is_some());
+            assert!(s.undo(), "undoing a script that used undo must restore its original file origins");
+            assert!(s.map().layer_by_name("Points").is_none());
+            s.map_mut().add_dataset(points);
+            s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": source
+                }}),
+            )
+            .unwrap();
+            assert!(std::fs::read(&source).unwrap().starts_with(b"PMTiles\x03"), "redo must not retain the previous project's guard");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_project_origins_survive_failed_nested_undo() {
+        let root = std::env::temp_dir().join(format!("rustgis-origin-rollback-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut s = points_session();
+        let first = root.join("First.rgispkg");
+        let second = root.join("Second.rgispkg");
+        for source in [&first, &second] {
+            s.run("project.package", &json!({"path": source})).unwrap();
+        }
+        let original = std::fs::read(&second).unwrap();
+        s.run("project.open", &json!({"path": first})).unwrap();
+        let open_second = format!("project.open {}", json!({"path": second}));
+        s.run("script.run", &json!({"script": open_second})).unwrap();
+        assert!(s.run("script.run", &json!({"script": "edit.undo {}\nmissing.command {}"})).is_err());
+        let result = s.run(
+            "gp.run",
+            &json!({"tool": "vectorToPmtiles", "params": {
+                "input": "Points", "minZoom": 0, "maxZoom": 0, "output": second
+            }}),
+        );
+        assert!(result.is_err(), "a failed script must restore the active package origin: {result:?}");
+        assert!(result.unwrap_err().contains("open project's file"));
+        assert_eq!(std::fs::read(&second).unwrap(), original);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_project_origins_restore_unsaved_after_replacement_saved_later() {
+        let root = std::env::temp_dir().join(format!("rustgis-origin-later-save-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        for nested in [false, true] {
+            let mut s = points_session();
+            s.project.name = "A".into();
+            s.run("script.run", &json!({"script": "project.new {\"name\":\"B\"}"})).unwrap();
+            if nested {
+                s.run("script.run", &json!({"script": "edit.undo {}"})).unwrap();
+            }
+            let saved = root.join(if nested { "A.rgis" } else { "B.rgis" });
+            s.run("project.saveAs", &json!({"path": saved})).unwrap();
+            let original = std::fs::read(&saved).unwrap();
+            assert!(s.undo());
+            assert_eq!(s.project.name, if nested { "B" } else { "A" });
+            assert!(s.run("project.save", &Value::Null).is_err(), "the restored unsaved project must not save over the later destination");
+            assert_eq!(std::fs::read(&saved).unwrap(), original);
+            assert!(s.redo());
+            assert_eq!(s.path.as_deref(), Some(saved.as_path()));
+            s.run("project.save", &Value::Null).unwrap();
+            assert_eq!(crate::Project::load(&saved).unwrap().name, if nested { "A" } else { "B" });
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_project_origin_keeps_save_as_after_nonreplacement_undo() {
+        let root = std::env::temp_dir().join(format!("rustgis-origin-save-as-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        for round_trip in [false, true] {
+            let mut s = points_session();
+            if round_trip {
+                let points = s.map().layer_by_name("Points").unwrap().dataset.clone();
+                s.run("script.run", &json!({"script": "project.new {}"})).unwrap();
+                s.map_mut().add_dataset(points);
+                s.run("script.run", &json!({"script": "edit.undo {}\nedit.redo {}"})).unwrap();
+            } else {
+                s.run("map.rename", &json!({"name": "Edited map"})).unwrap();
+            }
+            let saved = root.join(if round_trip { "Roundtrip.rgis" } else { "Edited.rgis" });
+            s.run("project.saveAs", &json!({"path": saved})).unwrap();
+            let original = std::fs::read(&saved).unwrap();
+            assert!(s.undo());
+            assert_eq!(s.path.as_deref(), Some(saved.as_path()), "undoing a nonreplacement must not undo a later Save As");
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": saved
+                }}),
+            );
+            assert!(result.is_err(), "the Save As destination must remain protected: {result:?}");
+            assert_eq!(std::fs::read(&saved).unwrap(), original);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_project_origins_keep_earliest_files_when_steps_merge() {
+        let root = std::env::temp_dir().join(format!("rustgis-origin-merge-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut s = points_session();
+        let first = root.join("A.rgis");
+        let second = root.join("B.rgis");
+        let third = root.join("C.rgis");
+        s.run("project.saveAs", &json!({"path": first})).unwrap();
+        s.merge_undo("file-edits");
+        s.run("map.rename", &json!({"name": "Edited map"})).unwrap();
+        for destination in [&second, &third] {
+            s.merge_undo("file-edits");
+            let script = format!("project.saveAs {}", json!({"path": destination}));
+            s.run("script.run", &json!({"script": script})).unwrap();
+        }
+        let second_bytes = std::fs::read(&second).unwrap();
+        let third_bytes = std::fs::read(&third).unwrap();
+        assert!(s.undo());
+        assert_eq!(s.path.as_deref(), Some(first.as_path()), "merged origin changes must retain the earliest destination");
+        s.run("project.save", &Value::Null).unwrap();
+        assert_eq!(std::fs::read(&second).unwrap(), second_bytes);
+        assert_eq!(std::fs::read(&third).unwrap(), third_bytes);
+        assert!(s.redo());
+        assert_eq!(s.path.as_deref(), Some(third.as_path()), "redo must restore the final destination");
+        s.run("project.save", &Value::Null).unwrap();
+        assert_eq!(crate::Project::load(&third).unwrap().name, "C");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_export_preserves_standalone_table_sources() {
         let root = std::env::temp_dir().join(format!("rustgis-table-output-{}-{}", std::process::id(), now_ms()));

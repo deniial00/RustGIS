@@ -118,8 +118,10 @@ is replaced atomically. The desktop tool pane instead asks for a destination wit
 Native exports refuse to replace the open/saved project file, the package this project was
 opened from, or a file that a loaded layer, raster, standalone table or tile archive reads.
 This includes path aliases, ZIP archives holding loaded members, and Shapefile companion
-files. Browser downloads cannot check the eventual save destination; choose a different file
-in the browser's save dialog to avoid replacing an input.
+files. Project/package paths stay anchored across changes to the working directory, and their
+origins are restored when a project replacement is undone or redone. Browser downloads cannot
+check the eventual save destination; choose a different file in the browser's save dialog to
+avoid replacing an input.
 An active selection is exported; otherwise the geoprocessing extent applies, and streamed
 sources are read in full rather than limited to the visible map window. It exports points,
 lines and polygons, including multipart geometry, attributes and feature IDs—not the map's

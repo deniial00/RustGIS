@@ -416,9 +416,16 @@ pub struct Notice {
 
 const UNDO_LIMIT: usize = 40;
 
+struct ProjectFiles {
+    identity: u64,
+    path: Option<PathBuf>,
+    opened_package: Option<PathBuf>,
+}
+
 /// An undo or redo step: the project before it, the layout open then, its label, who made it,
-/// and which state of the project it is ([`Session::dirty`]).
-type Step = (Project, Option<usize>, &'static str, Option<String>, u64);
+/// and which state of the project it is ([`Session::dirty`]). File origins accompany changes
+/// made by the command only: undoing an ordinary edit must not undo a subsequent Save As.
+type Step = (Project, Option<usize>, &'static str, Option<String>, u64, Option<ProjectFiles>);
 
 /// What a project holds in the session beside itself: what [`Session::clear_history`] forgets
 /// when another project starts, and what opening one sets (its file, layer, tool…). When another
@@ -456,6 +463,7 @@ struct PutAside {
     /// the file the replacement named (or none).
     path: Option<PathBuf>,
     opened_package: Option<PathBuf>,
+    file_identity: u64,
     model_run: Option<model::RunReport>,
     /// Its work still under way (tool runs, downloads, plugin fetches, queries): the runs of
     /// the previous project mustn't land in the next one.
@@ -482,6 +490,9 @@ pub struct Session {
     /// Package this project was opened from, protected as an input without making it the save
     /// destination. Kept after Save As; cleared when a different project starts.
     opened_package: Option<PathBuf>,
+    /// Undoable identity of the project owning these origins. Allocated from the unique state
+    /// counter at reset; separate from `opened`, whose values must not be reused by undo.
+    file_identity: u64,
     /// Which state of the project is open: a new one after each change, an earlier one again
     /// after undo. Each is given once in a session (`states` counts them).
     state: u64,
@@ -722,6 +733,7 @@ impl Session {
             project,
             path: None,
             opened_package: None,
+            file_identity: 0,
             state: 0,
             states: 0,
             saved: Some(0),
@@ -990,6 +1002,11 @@ impl Session {
         // The project's generation rolls back with it: a project opened part way (a task's step)
         // and then undone is the one before, still open.
         let opened = self.opened;
+        let files = mutates.then(|| ProjectFiles {
+            identity: self.file_identity,
+            path: self.path.clone(),
+            opened_package: self.opened_package.clone(),
+        });
         self.depth += 1;
         self.restorable += u32::from(mutates);
         // Edit counts roll back with the project when a command fails part way.
@@ -1043,11 +1060,19 @@ impl Session {
                 // A step made under the same merge key as the last one is part of it: undo goes
                 // back to before the first of them. Only a command run by itself merges.
                 let key = merge;
+                let files = files.filter(|files| {
+                    files.identity != self.file_identity || files.path != self.path || files.opened_package != self.opened_package
+                });
                 if key.is_none() || key != self.merged || self.undo.is_empty() {
-                    self.undo.push((snap, open_layout, label, self.actor.clone(), state));
+                    self.undo.push((snap, open_layout, label, self.actor.clone(), state, files));
                     if self.undo.len() > UNDO_LIMIT {
                         self.undo.remove(0);
                     }
+                } else if files.is_some()
+                    && let Some(step) = self.undo.last_mut()
+                    && step.5.is_none()
+                {
+                    step.5 = files;
                 }
                 if self.depth == 0 {
                     self.merged = key;
@@ -1068,6 +1093,11 @@ impl Session {
                 // trust, its unsaved state) comes back with it.
                 if self.opened != opened {
                     self.give_back(opened);
+                }
+                if let Some(files) = files {
+                    self.file_identity = files.identity;
+                    self.path = files.path;
+                    self.opened_package = files.opened_package;
                 }
                 self.opened = opened;
                 self.state = state;
@@ -1162,6 +1192,7 @@ impl Session {
             topology_errors: take(&mut self.topology_errors),
             path: self.path.clone(),
             opened_package: self.opened_package.clone(),
+            file_identity: self.file_identity,
             model_run: self.model_run.take(),
             pending: take(&mut self.pending),
             file_outputs: take(&mut self.file_outputs),
@@ -1209,6 +1240,7 @@ impl Session {
             topology_errors,
             path,
             opened_package,
+            file_identity,
             model_run,
             pending,
             file_outputs,
@@ -1235,6 +1267,7 @@ impl Session {
         (self.measurements, self.topology_errors, self.edit_counts) = (measurements, topology_errors, edit_counts);
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
         self.opened_package = opened_package;
+        self.file_identity = file_identity;
         (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
         self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
@@ -1341,26 +1374,36 @@ impl Session {
 
     pub(crate) fn undo(&mut self) -> bool {
         self.merged = None;
-        let Some((p, saved, label, actor, state)) = self.undo.pop() else { return false };
+        let Some((p, saved, label, actor, state, mut files)) = self.undo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
+        if let Some(files) = &mut files {
+            std::mem::swap(&mut self.file_identity, &mut files.identity);
+            std::mem::swap(&mut self.path, &mut files.path);
+            std::mem::swap(&mut self.opened_package, &mut files.opened_package);
+        }
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
-        self.redo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state)));
+        self.redo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files));
         self.touch_all_geometry();
         true
     }
 
     pub(crate) fn redo(&mut self) -> bool {
         self.merged = None;
-        let Some((p, saved, label, actor, state)) = self.redo.pop() else { return false };
+        let Some((p, saved, label, actor, state, mut files)) = self.redo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
+        if let Some(files) = &mut files {
+            std::mem::swap(&mut self.file_identity, &mut files.identity);
+            std::mem::swap(&mut self.path, &mut files.path);
+            std::mem::swap(&mut self.opened_package, &mut files.opened_package);
+        }
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
-        self.undo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state)));
+        self.undo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files));
         self.touch_all_geometry();
         true
     }
