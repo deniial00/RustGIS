@@ -848,6 +848,9 @@ struct Ran {
 #[cfg(not(target_arch = "wasm32"))]
 fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if let Ok(destination) = path.canonicalize() {
+        if s.path.as_ref().is_some_and(|project| project.canonicalize().is_ok_and(|project| project == destination)) {
+            return Err("destination is the open project's file; choose a different output file".into());
+        }
         for map in &s.project.maps {
             for layer in &map.layers {
                 let sources = [
@@ -1165,6 +1168,43 @@ mod file_tests {
         }
         assert!(queue_file(&mut s, "too-many.pmtiles".into(), vec![1], record()).is_err());
         assert_eq!(s.take_gp_files().len(), 8);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_export_preserves_the_saved_project_file() {
+        let root = std::env::temp_dir().join(format!("rustgis-project-output-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let project = root.join("Map.rgis");
+        let mut s = Session::new(crate::Project::default());
+        let mut points = Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(20.0, 30.0))), Vec::new());
+        s.map_mut().add_dataset(points);
+        s.run("project.saveAs", &json!({"path": project})).unwrap();
+        let original = std::fs::read(&project).unwrap();
+        let destinations = vec![project.clone(), root.join("nested").join("..").join("Map.rgis")];
+        #[cfg(unix)]
+        let destinations = {
+            let mut destinations = destinations;
+            let alias = root.join("alias.rgis");
+            std::os::unix::fs::symlink(&project, &alias).unwrap();
+            destinations.push(alias);
+            destinations
+        };
+        for destination in destinations {
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": destination
+                }}),
+            );
+            assert!(result.is_err(), "export must refuse the saved project: {result:?}");
+            assert!(result.unwrap_err().contains("open project's file"));
+            assert_eq!(std::fs::read(&project).unwrap(), original);
+            assert_eq!(s.path.as_deref(), Some(project.as_path()));
+            assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_arch = "wasm32"))]
