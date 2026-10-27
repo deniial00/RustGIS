@@ -879,12 +879,14 @@ fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Resul
     rustgis_data::io::write_atomic(path, bytes).map_err(|error| error.to_string())
 }
 
-/// Whether a path a loaded source reads is `destination`: the file itself, the archive that a
-/// ZIP member's path (`archive.zip/member`) lies in, or a Shapefile's companion file.
+/// Whether a loaded source reads `destination`: the file itself, a directory's contents, the
+/// archive a ZIP member's path (`archive.zip/member`) lies in, or a Shapefile's companion file.
 #[cfg(not(target_arch = "wasm32"))]
 fn names_file(source: &str, destination: &std::path::Path) -> bool {
     let source = std::path::Path::new(source);
-    if source.ancestors().any(|p| p.canonicalize().is_ok_and(|p| p.as_path() == destination)) {
+    if source.canonicalize().is_ok_and(|p| destination.starts_with(p))
+        || source.ancestors().skip(1).any(|p| p.canonicalize().is_ok_and(|p| p.as_path() == destination))
+    {
         return true;
     }
     let shapefile = source.extension().is_some_and(|e| e.eq_ignore_ascii_case("shp"));
@@ -1516,6 +1518,57 @@ mod file_tests {
             assert_eq!(std::fs::read(&source).unwrap(), bytes);
             assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_export_preserves_loaded_source_directories() {
+        let root = std::env::temp_dir().join(format!("rustgis-directory-output-{}-{}", std::process::id(), now_ms()));
+        let source = root.join("Store.gdb");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        let catalog = source.join("a00000001.gdbtable");
+        let rows = source.join("nested").join("rows.bin");
+        std::fs::write(&catalog, b"source catalog").unwrap();
+        std::fs::write(&rows, b"source rows").unwrap();
+        let mut s = points_session();
+        let mut table = Dataset::new("Counts", rustgis_data::GeometryType::None, Vec::new());
+        table.source = Some(source.display().to_string());
+        s.project.add_table(table);
+        let destinations = vec![catalog.clone(), source.join("nested").join("..").join("a00000001.gdbtable"), rows.clone()];
+        #[cfg(unix)]
+        let destinations = {
+            let mut destinations = destinations;
+            let alias = root.join("database-link");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            destinations.push(alias.join("a00000001.gdbtable"));
+            let file_alias = root.join("catalog-link.pmtiles");
+            std::os::unix::fs::symlink(&catalog, &file_alias).unwrap();
+            destinations.push(file_alias);
+            destinations
+        };
+        for destination in destinations {
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": destination
+                }}),
+            );
+            assert!(result.is_err(), "export must refuse a file in a loaded source directory: {result:?}");
+            assert!(result.unwrap_err().contains("source of table 'Counts'"));
+            assert_eq!(std::fs::read(&catalog).unwrap(), b"source catalog");
+            assert_eq!(std::fs::read(&rows).unwrap(), b"source rows");
+        }
+        let sibling = root.join("Store.gdb.pmtiles");
+        std::fs::write(&sibling, b"old output").unwrap();
+        s.run(
+            "gp.run",
+            &json!({"tool": "vectorToPmtiles", "params": {
+                "input": "Points", "minZoom": 0, "maxZoom": 0, "output": sibling
+            }}),
+        )
+        .unwrap();
+        assert!(std::fs::read(&sibling).unwrap().starts_with(b"PMTiles\x03"), "a shared name prefix is not directory membership");
         std::fs::remove_dir_all(root).unwrap();
     }
 

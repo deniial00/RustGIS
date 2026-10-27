@@ -117,6 +117,8 @@ directory, where `<layer>` is the layer's name without any folder part; an exist
 is replaced atomically. The desktop tool pane instead asks for a destination with Save As.
 Native exports refuse to replace the open/saved project file, the package this project was
 opened from, or a file that a loaded layer, raster, standalone table or tile archive reads.
+For directory-backed sources such as File Geodatabases, files inside the source directory are
+protected as well.
 This includes path aliases, ZIP archives holding loaded members, and Shapefile companion
 files. Project/package paths stay anchored across changes to the working directory, and their
 origins are restored when a project replacement is undone or redone. Browser downloads cannot
