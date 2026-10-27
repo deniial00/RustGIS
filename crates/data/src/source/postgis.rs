@@ -355,7 +355,7 @@ fn connect_as(dsn: &str, ask: bool, writable: bool) -> Result<Arc<Conn>> {
         if !ask {
             return None;
         }
-        std::env::var("PGPASSWORD").ok().filter(|p| !p.is_empty()).or_else(|| pgpass(&config))
+        super::duckdb::ambient_password("postgres").or_else(|| pgpass(&config))
     });
     // A connection opened with another password (one given since) isn't shared.
     let find = |live: &mut Vec<Live>| {

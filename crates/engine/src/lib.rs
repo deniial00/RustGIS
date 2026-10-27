@@ -9,6 +9,7 @@ pub mod cmd;
 pub mod connections;
 pub mod geometry_calc;
 pub mod model;
+pub mod prefs;
 pub mod project;
 pub mod s3_connections;
 pub mod s3_keys;

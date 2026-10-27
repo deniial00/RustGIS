@@ -715,6 +715,11 @@ class Session(_Api):
         data: Files to add as layers (GeoJSON, CSV, Shapefile, GeoPackage, GeoParquet,
             FlatGeobuf, KML, GPX, GeoTIFF and more).
         plugins: Load the plugins installed for the desktop app first.
+        use_saved_secrets: Use the connections the desktop app saved, with the passwords and
+            keys it keeps in the system keychain (read only when a command needs one).
+            Parameters given to a command win. Off by default: nothing reads the keychain.
+            When the keychain can't be used the session goes on without the saved secret and
+            logs one ``WARNING`` to the ``rustgis`` logger; it never raises or warns.
 
     Example:
         >>> s = rustgis.Session(data=["parcels.gpkg"])
@@ -729,11 +734,12 @@ class Session(_Api):
         sample: bool = False,
         data: Optional[Union[PathLike, Iterable[PathLike]]] = None,
         plugins: bool = False,
+        use_saved_secrets: bool = False,
     ) -> None:
         """Starts a session, optionally opening a project, the sample and data files."""
         if plugins:
             load_plugins()
-        self._engine = _Engine()
+        self._engine = _Engine(use_saved_secrets)
         if sample:
             self.run("project.sample")
         if project is not None:

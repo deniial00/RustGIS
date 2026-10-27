@@ -429,9 +429,10 @@ does not read the store or guarantee it is available. In the next session, choos
 testing or logging in to the connection can read its keys from the store with nothing typed
 (the system may ask you to unlock it). Typed keys win over saved ones for that login.
 Temporary credentials (with a session token) are never kept: they work for the session,
-and keys saved earlier stay as they were. If the store is missing or refuses (the web app and the
-command line have none), the login still works for this session and says the keys weren't
-remembered; without keys typed, a connection with nothing available says so, and is not logged in.
+and keys saved earlier stay as they were. If the store is missing or refuses, the login still
+works for this session and says the keys weren't remembered; without keys typed, a connection
+with nothing available says so, and is not logged in. The web app has no system keychain; the
+command line and Python use it only with `--use-saved-secrets` / `use_saved_secrets=True`.
 **Forget Saved Keys** (`connection.forgetSavedKeys`; the connection's right-click menu or its
 form) deletes them from the store and keeps the session's login. Removing a connection deletes
 its saved keys first, and changing its endpoint or switching away from typed keys does too.
@@ -588,7 +589,8 @@ initially. Checking it opts that submitted password into the operating system's 
 `connection.login {"id":"c1","password":"…","remember":true}`; `remember` defaults to false.
 If the store is missing, unavailable or denies access, the login remains usable for the
 session and a visible warning says it was not remembered (`passwordSaved:false` in the result).
-The browser and command line have no OS-store hook and remain session-only.
+The browser has no OS-store hook and remains session-only. The command line and Python also
+remain session-only unless run with `--use-saved-secrets` (Python: `use_saved_secrets=True`).
 
 The stored database password envelope is bound to the connection's ID, kind and cleaned address,
 including its username. Renaming or regrouping preserves it. Changing the address or username,
@@ -608,16 +610,19 @@ Matching strips passwords and outer wrappers/whitespace, but does not infer that
 libpq forms, reordered parameters, host aliases or different usernames mean the same server.
 Several eligible remembered matches open a chooser with no default; cancel leaves the layers
 unavailable. Choose a connection explicitly, or use `connection.login {"id":"c2"}` to select
-its existing session or remembered password without exposing it. Selection lasts for this
+its existing session, environment or remembered password without exposing it. Selection lasts for this
 session, not in the project. `connection.list` reports secret-free `loginRequests` with the
 reason, database label, candidate IDs and affected-layer count; ambiguous layers are not
-attributed to the first saved row. `loggedIn` means this ID has a session password or an already
-loaded remembered password available; it does not certify successful server authentication.
+attributed to the first saved row. `loggedIn` means this ID has a session password, an environment
+password selected for it, or an already-loaded remembered password available; it does not certify
+successful server authentication.
 
-Explicit session input or selection takes precedence over a saved password; a saved password
-takes precedence over existing ambient fallbacks on explicitly initiated connections.
-Opening a project never newly authorizes environment/password-file credentials or Windows
-identity. A positively refused saved password is not retried for the rest of the session,
+Explicit command, address and session passwords take precedence over saved credentials. For an
+eligible remembered connection, `PGPASSWORD`, `MYSQL_PWD` or `SQLCMDPASSWORD` (according to the
+database kind) wins over the keychain password without reading the store. Project opening may
+use it only through the same exact-address remembered-connection selection; it never newly
+authorizes an unrelated address, password-file credentials or Windows identity. A positively
+refused saved or environment password is not retried automatically for the rest of the session,
 and no other saved password is tried automatically. Its old OS-store value is retained.
 The fresh login form has an empty password and Remember unchecked: an unchecked replacement is
 session-only and does not overwrite or delete the old value; checking Remember and successfully

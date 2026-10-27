@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 
 use crate::sources::{self, Sources};
 
+/// The desktop preference saved connections are kept under.
+pub const PREF: &str = "connections";
+
 pub const MAX_CONNECTIONS: usize = 200;
 const MAX_TEXT: usize = 2048;
 const MAX_NAME: usize = 200;
@@ -515,10 +518,13 @@ pub struct DatabaseLogins {
     session: BTreeMap<String, Secret>,
     /// Saved passwords read from the store, by connection id.
     saved: BTreeMap<String, Secret>,
+    /// Passwords the database client's environment gave (`PGPASSWORD`…) to connections that keep
+    /// a saved one, by connection id: used before the saved one, which then isn't read.
+    ambient: BTreeMap<String, Secret>,
     unavailable: BTreeSet<String>,
     /// The connection chosen for each database (kind and driver address) by a login.
     selected: BTreeMap<(&'static str, String), String>,
-    /// Connections whose saved password the server refused this session.
+    /// Connections whose saved or environment password the server refused this session.
     rejected: BTreeSet<String>,
     /// The connection whose password the driver uses for each database address (driver key),
     /// as set by a login or the project's resolution: what is set again when the driver's
@@ -546,6 +552,7 @@ impl DatabaseLogins {
     pub fn set_store(&mut self, store: Option<Arc<dyn SecretStore>>) {
         self.store = store;
         self.saved.clear();
+        self.ambient.clear();
         self.unavailable.clear();
     }
 
@@ -574,7 +581,14 @@ impl DatabaseLogins {
     /// Drops a refused session credential and suppresses an equivalent saved value for this run.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn reject_session_password(&mut self, c: &Connection) {
-        let Some(refused) = self.session.remove(&c.id) else { return };
+        let Some(refused) = self.session.remove(&c.id) else {
+            // Nothing was given this session, so the refused password came from the environment:
+            // not tried again, nor replaced by the saved one the server was never asked about.
+            if self.ambient.remove(&c.id).is_some() && c.remembered {
+                self.rejected.insert(c.id.clone());
+            }
+            return;
+        };
         if !c.remembered || self.is_rejected(&c.id) {
             return;
         }
@@ -666,6 +680,7 @@ impl DatabaseLogins {
     pub fn forget_connection(&mut self, id: &str) {
         self.session.remove(id);
         self.saved.remove(id);
+        self.ambient.remove(id);
         self.unavailable.remove(id);
         self.rejected.remove(id);
         self.selected.retain(|_, chosen| chosen != id);
@@ -679,9 +694,23 @@ impl DatabaseLogins {
     }
 
     /// The password a connection logs in with where it is known here: the one given this session,
-    /// else the saved one read (never reading the store).
+    /// else the environment's, else the saved one read (never reading the store).
     pub fn known_password(&self, id: &str) -> Option<&Secret> {
-        self.session.get(id).or_else(|| self.saved.get(id))
+        self.session.get(id).or_else(|| self.ambient.get(id)).or_else(|| self.saved.get(id))
+    }
+
+    /// The environment's password for a database connection that keeps a saved one (`PGPASSWORD`,
+    /// `MYSQL_PWD` or `SQLCMDPASSWORD` of its kind), which ranks above the saved one: a login that
+    /// has it never asks the store. It is read once per connection.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn ambient(&mut self, c: &Connection) -> Option<Secret> {
+        if let Some(p) = self.ambient.get(&c.id) {
+            return Some(p.clone());
+        }
+        let (kind, _) = database_key(&c.address)?;
+        let p = Secret::new(rustgis_data::source::duckdb::ambient_password(kind)?);
+        self.ambient.insert(c.id.clone(), p.clone());
+        Some(p)
     }
 
     /// Retries a lazy lookup on explicit login or Refresh, without retrying a refused password.
@@ -713,6 +742,7 @@ impl DatabaseLogins {
     /// session stays).
     pub fn forget_saved(&mut self, id: &str) {
         self.saved.remove(id);
+        self.ambient.remove(id);
         self.rejected.remove(id);
         if !self.session.contains_key(id) {
             self.activations.retain(|_, active| active != id);
