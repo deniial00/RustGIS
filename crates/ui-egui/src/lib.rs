@@ -2655,7 +2655,11 @@ impl RustGisApp {
                 };
                 if let Some(open) = &self.services.open_async {
                     self.ui.pending_open = Some(cmd);
-                    open(if kind == "ramps" { "ramp" } else { "item" });
+                    open(match kind {
+                        "ramps" => "ramp",
+                        "qgisProject" => "qgisProject",
+                        _ => "item",
+                    });
                 } else if let Some(path) = dialogs::pick_open(exts, tl!(label)) {
                     let r = self.run_by_user(cmd, json!({"path": path}));
                     self.map.invalidate();

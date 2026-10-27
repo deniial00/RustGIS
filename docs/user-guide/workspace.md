@@ -75,6 +75,7 @@ The browser app doesn't autosave yet; it warns before you leave a page with unsa
 
 A QGIS project (`.qgs`, or a `.qgz` archive) opens as a new map of the current project: **Open**
 on the desktop, or **Project › New › QGIS Project…** (`project.importQgis={"path": "…/towns.qgs"}`).
+The QGIS Project picker filters for `.qgs` and `.qgz` files on both desktop and web.
 Its layers come in the layer tree's order, each from its file (GeoPackage, Shapefile, GeoJSON,
 GeoTIFF and the other formats RustGIS reads, relative paths from the project's folder), a CSV of
 points, XYZ tiles or a WMS layer, unchecked layers and groups hidden. The map takes the project's
