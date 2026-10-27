@@ -46,6 +46,7 @@ fn reset(s: &mut Session, p: Project) {
     // Kept until the command ends: a failure gives the project back with its history.
     s.put_aside();
     s.project = p;
+    s.opened_package = None;
     s.opened = s.opened.wrapping_add(1);
     s.active_layer = s.map().layers.first().map(|l| l.id);
     s.table_layer = None;
@@ -110,7 +111,12 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
     if !is_package {
         name_from_file(s, &path);
     }
-    s.path = if is_package { None } else { Some(path) };
+    if is_package {
+        s.opened_package = Some(path);
+        s.path = None;
+    } else {
+        s.path = Some(path);
+    }
     s.notify(format!("Opened {}", s.project.name), false);
     super::connections::resolve_project(s);
     super::connections::note_waiting(s);

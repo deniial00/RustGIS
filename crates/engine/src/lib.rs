@@ -455,6 +455,7 @@ struct PutAside {
     /// The file it was opened from or saved to: a Save after the rollback writes there, not to
     /// the file the replacement named (or none).
     path: Option<PathBuf>,
+    opened_package: Option<PathBuf>,
     model_run: Option<model::RunReport>,
     /// Its work still under way (tool runs, downloads, plugin fetches, queries): the runs of
     /// the previous project mustn't land in the next one.
@@ -478,6 +479,9 @@ struct PutAside {
 pub struct Session {
     pub project: Project,
     pub path: Option<PathBuf>,
+    /// Package this project was opened from, protected as an input without making it the save
+    /// destination. Kept after Save As; cleared when a different project starts.
+    opened_package: Option<PathBuf>,
     /// Which state of the project is open: a new one after each change, an earlier one again
     /// after undo. Each is given once in a session (`states` counts them).
     state: u64,
@@ -717,6 +721,7 @@ impl Session {
         Session {
             project,
             path: None,
+            opened_package: None,
             state: 0,
             states: 0,
             saved: Some(0),
@@ -1156,6 +1161,7 @@ impl Session {
             measurements: take(&mut self.measurements),
             topology_errors: take(&mut self.topology_errors),
             path: self.path.clone(),
+            opened_package: self.opened_package.clone(),
             model_run: self.model_run.take(),
             pending: take(&mut self.pending),
             file_outputs: take(&mut self.file_outputs),
@@ -1202,6 +1208,7 @@ impl Session {
             measurements,
             topology_errors,
             path,
+            opened_package,
             model_run,
             pending,
             file_outputs,
@@ -1227,6 +1234,7 @@ impl Session {
         (self.layer_selection, self.layer_selection_of) = (layer_selection, layer_selection_of);
         (self.measurements, self.topology_errors, self.edit_counts) = (measurements, topology_errors, edit_counts);
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
+        self.opened_package = opened_package;
         (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
         self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);

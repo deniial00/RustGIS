@@ -848,7 +848,7 @@ struct Ran {
 #[cfg(not(target_arch = "wasm32"))]
 fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if let Ok(destination) = path.canonicalize() {
-        if s.path.as_ref().is_some_and(|project| project.canonicalize().is_ok_and(|project| project == destination)) {
+        if s.path.iter().chain(s.opened_package.iter()).any(|project| project.canonicalize().is_ok_and(|project| project == destination)) {
             return Err("destination is the open project's file; choose a different output file".into());
         }
         for map in &s.project.maps {
@@ -1204,6 +1204,65 @@ mod file_tests {
             assert_eq!(s.path.as_deref(), Some(project.as_path()));
             assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_export_preserves_the_opened_project_package() {
+        let root = std::env::temp_dir().join(format!("rustgis-package-output-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let package = root.join("Map.rgispkg");
+        let mut s = Session::new(crate::Project::default());
+        let mut points = Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(20.0, 30.0))), Vec::new());
+        s.map_mut().add_dataset(points.clone());
+        s.run("project.package", &json!({"path": package})).unwrap();
+        let original = std::fs::read(&package).unwrap();
+        s.run("project.open", &json!({"path": package})).unwrap();
+        assert!(s.path.is_none(), "opening a package must still require Save As");
+        assert!(s.run("project.save", &Value::Null).is_err());
+        let destinations = vec![package.clone(), root.join("nested").join("..").join("Map.rgispkg")];
+        #[cfg(unix)]
+        let destinations = {
+            let mut destinations = destinations;
+            let alias = root.join("alias.rgispkg");
+            std::os::unix::fs::symlink(&package, &alias).unwrap();
+            destinations.push(alias);
+            destinations
+        };
+        let export = |s: &mut Session, destination: &std::path::Path| {
+            s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": destination
+                }}),
+            )
+        };
+        for destination in destinations {
+            let result = export(&mut s, &destination);
+            assert!(result.is_err(), "export must refuse the opened package: {result:?}");
+            assert!(result.unwrap_err().contains("open project's file"));
+            assert_eq!(std::fs::read(&package).unwrap(), original);
+            assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
+        }
+        let failed = s.guarded("Failed project replacement", true, |s| {
+            s.run("project.new", &json!({}))?;
+            Err("later step failed".into())
+        });
+        assert!(failed.is_err());
+        assert!(export(&mut s, &package).is_err(), "rollback must restore package protection");
+        assert_eq!(std::fs::read(&package).unwrap(), original);
+        assert!(s.path.is_none());
+        let saved = root.join("Saved.rgis");
+        s.run("project.saveAs", &json!({"path": saved})).unwrap();
+        assert_eq!(s.path.as_deref(), Some(saved.as_path()));
+        assert!(export(&mut s, &package).is_err(), "Save As must not forget the package origin");
+        assert_eq!(std::fs::read(&package).unwrap(), original);
+        s.run("project.new", &json!({})).unwrap();
+        s.map_mut().add_dataset(points);
+        export(&mut s, &package).unwrap();
+        assert!(std::fs::read(&package).unwrap().starts_with(b"PMTiles\x03"), "the previous package is no longer open");
         std::fs::remove_dir_all(root).unwrap();
     }
 

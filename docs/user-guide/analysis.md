@@ -115,9 +115,11 @@ layer's name. The output file is saved atomically on desktop or downloaded in th
 Without `output`, CLI, script and task calls write `<layer>.pmtiles` in the process's working
 directory, where `<layer>` is the layer's name without any folder part; an existing destination
 is replaced atomically. The desktop tool pane instead asks for a destination with Save As.
-Exports refuse to replace the open/saved project file or a file that a loaded layer, raster,
-standalone table or tile archive reads. This includes path aliases, ZIP archives holding
-loaded members, and Shapefile companion files.
+Native exports refuse to replace the open/saved project file, the package this project was
+opened from, or a file that a loaded layer, raster, standalone table or tile archive reads.
+This includes path aliases, ZIP archives holding loaded members, and Shapefile companion
+files. Browser downloads cannot check the eventual save destination; choose a different file
+in the browser's save dialog to avoid replacing an input.
 An active selection is exported; otherwise the geoprocessing extent applies, and streamed
 sources are read in full rather than limited to the visible map window. It exports points,
 lines and polygons, including multipart geometry, attributes and feature IDs—not the map's
