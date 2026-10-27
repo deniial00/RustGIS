@@ -867,6 +867,11 @@ fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Resul
                 }
             }
         }
+        for table in &s.project.tables {
+            if table.dataset.source.as_deref().is_some_and(|source| names_file(source, &destination)) {
+                return Err(format!("destination is the source of table '{}'; choose a different output file", table.dataset.name));
+            }
+        }
     }
     rustgis_data::io::write_atomic(path, bytes).map_err(|error| error.to_string())
 }
@@ -1160,6 +1165,37 @@ mod file_tests {
         }
         assert!(queue_file(&mut s, "too-many.pmtiles".into(), vec![1], record()).is_err());
         assert_eq!(s.take_gp_files().len(), 8);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_export_preserves_standalone_table_sources() {
+        let root = std::env::temp_dir().join(format!("rustgis-table-output-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let source = root.join("Counts.csv");
+        let bytes = b"name,value\nalpha,7\n";
+        std::fs::write(&source, bytes).unwrap();
+        let mut s = Session::new(crate::Project::default());
+        let mut points = Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+        points.push_next(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(20.0, 30.0))), Vec::new());
+        s.map_mut().add_dataset(points);
+        s.run("layer.addData", &json!({"path": source})).unwrap();
+        let table = s.project.tables.first().unwrap();
+        assert_eq!(table.dataset.name, "Counts");
+        assert_eq!(table.dataset.source.as_deref(), source.to_str());
+        for destination in [&source, &root.join("nested").join("..").join("Counts.csv")] {
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": destination
+                }}),
+            );
+            assert!(result.is_err(), "export must refuse a loaded table source: {result:?}");
+            assert!(result.unwrap_err().contains("source of table 'Counts'"));
+            assert_eq!(std::fs::read(&source).unwrap(), bytes);
+            assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_arch = "wasm32"))]
