@@ -3928,6 +3928,8 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "share.locator",
     "pg.saveEdits",
     "pg.discardEdits",
+    "gpkg.saveEdits",
+    "gpkg.discardEdits",
     "zarr.reduce",
     "cube.trend",
     "cube.reduce",

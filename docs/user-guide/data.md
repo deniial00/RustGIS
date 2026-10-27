@@ -268,6 +268,48 @@ Connecting and adding a layer read the database, so the [AI Assistant](assistant
 before it connects or adds a table, and asks every time before it saves edits. Plugins can't
 connect or save at all.
 
+### Editing GeoPackage tables
+
+On the desktop, **Home › Add › Add Data › Edit GeoPackage Table…** (`gpkg.addLayer`) loads one
+feature table of an existing local `.gpkg` for editing. Choose its table with **List Tables**
+when the file has several. The table needs one `INTEGER PRIMARY KEY`. At most 100,000 rows
+are loaded; **Most rows** can lower that limit. Rows outside that load, including rows with
+unreadable geometry, are left untouched when saving.
+
+**Edit › Manage Edits › Save to GeoPackage…** (`gpkg.saveEdits`) writes pending inserts, updates
+and deletes to that table in one SQLite transaction. If any row you changed or deleted has
+changed or disappeared in the file since it was loaded, nothing is saved. A constraint or
+trigger failure also rolls everything back; pending edits remain in the layer. New features
+get source-assigned keys that cannot alias loaded rows, and unrelated columns and tables remain
+intact. The saved rows are read back within the transaction, so the layer keeps values assigned
+by defaults and triggers before it starts tracking its next edits.
+
+**Discard GeoPackage Edits…** (`gpkg.discardEdits`) reloads the scoped rows as they are in the
+file now, including renamed key and geometry columns; Undo restores the discarded layer edits.
+Undoing a save does not undo file writes:
+Redo or Discard Edits is needed before saving again. Saving the project keeps pending edits
+in the project only, while exporting writes a new file rather than changing this table.
+Feature-less project templates retain the layer's schema and styling, but no source-edit binding:
+opening a template cannot turn its absent features into source-row deletions.
+
+Geometry is converted back to the table's coordinate system and must match its declared family.
+Single-part columns reject multipart features; collection, curve and surface columns cannot
+receive geometry writes. Geometry writes that would lose existing Z/M dimensions, or insert
+geometry into a table requiring them, are refused; attribute-only edits can still be saved.
+Read-only files cannot be saved. These editing commands are desktop-only; normal GeoPackage
+reading remains available in the browser.
+
+```sh
+rustgis-cli run --cmd 'gpkg.addLayer={"path":"/data/roads.gpkg","table":"roads","name":"Roads"}' \
+  --cmd 'edit.enable={"on":true}' \
+  --cmd 'edit.setValue={"layer":"Roads","row":0,"field":"name","value":"Main St"}' \
+  --cmd 'gpkg.saveEdits={"layer":"Roads"}'
+```
+
+The AI Assistant asks before reading the file and every time before saving edits. Plugins
+need file permission to load or discard rows and cannot save edits back to the table.
+
+
 ## MySQL and MariaDB
 
 **Home › Add › Add Data › Database…** (`layer.addDatabase`) also connects to a MySQL (8 or later) or

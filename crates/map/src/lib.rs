@@ -186,6 +186,9 @@ pub struct Layer {
     /// saved to, and the rows' versions as loaded (desktop only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgis: Option<source::PostgisEdit>,
+    /// The GeoPackage table this layer's edits save to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpkg: Option<source::GpkgEdit>,
     /// Shared, like the features: an undo snapshot or other copy of the layer doesn't copy it.
     #[serde(skip)]
     projected: std::sync::Arc<Vec<Option<Geometry>>>,
@@ -217,9 +220,14 @@ fn yes() -> bool {
 }
 
 impl Layer {
+    /// Baseline rows for a layer loaded for source editing.
+    pub fn edit_versions(&self) -> Option<&source::Versions> {
+        self.postgis.as_ref().map(|e| &e.versions).or_else(|| self.gpkg.as_ref().map(|e| &e.versions))
+    }
+
     /// Local linked paths, followed by the dataset's record-only provenance.
     pub fn file_paths_mut(&mut self) -> Vec<(&mut String, bool)> {
-        let Layer { dataset, source, raster, .. } = self;
+        let Layer { dataset, source, raster, gpkg, .. } = self;
         let mut paths = Vec::new();
         if let Some(src) = source {
             if let Some(g) = &mut src.gdal {
@@ -246,6 +254,9 @@ impl Layer {
             if let Some(z) = &mut r.time_zarr {
                 paths.push((&mut z.store, false));
             }
+        }
+        if let Some(g) = gpkg {
+            paths.push((&mut g.path, false));
         }
         if let Some(p) = &mut dataset.source {
             paths.push((p, true));
@@ -332,6 +343,7 @@ impl Layer {
             raster: None,
             source: None,
             postgis: None,
+            gpkg: None,
             projected: Default::default(),
             projected_extents: Default::default(),
             projected_vertices: 0,
