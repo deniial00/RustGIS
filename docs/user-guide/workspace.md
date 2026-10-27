@@ -77,12 +77,14 @@ A QGIS project (`.qgs`, or a `.qgz` archive) opens as a new map of the current p
 on the desktop, or **Project › New › QGIS Project…** (`project.importQgis={"path": "…/towns.qgs"}`).
 The QGIS Project picker filters for `.qgs` and `.qgz` files on both desktop and web.
 Its layers come in the layer tree's order, each from its file (GeoPackage, Shapefile, GeoJSON,
-GeoTIFF and the other formats RustGIS reads, relative paths from the project's folder), a CSV of
+GeoTIFF and the other formats RustGIS reads), a CSV of
 points, XYZ tiles or a WMS layer, unchecked layers and groups hidden. The map takes the project's
 coordinate system and its saved view (or its layers' extent, when that view shows none of them),
 with no basemap and no graticule, as QGIS draws it. A project in degrees (EPSG:4326 and other supported
 longitude/latitude systems) opens in the Equirectangular projection, the plate carrée QGIS draws
 it in. The import is one undo step.
+Relative layer paths resolve from the project's folder on desktop. In the browser, relative
+file sources cannot be resolved and are listed in the import notes.
 
 Each layer keeps its look:
 
