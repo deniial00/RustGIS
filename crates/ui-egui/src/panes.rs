@@ -3424,6 +3424,7 @@ pub fn tool_icon(id: &str) -> &'static str {
         "buffer" => "buffer",
         "clip" => "clip",
         "erase" => "erase",
+        "intersect" => "intersect",
         "dissolve" => "dissolve",
         "convexHull" => "hull",
         "featureToPoint" => "centroid",
