@@ -187,8 +187,8 @@ sessions, take turns because connection activations are shared by the process. W
 another native call also releases the GIL; unrelated Python threads remain free to run.
 Ctrl+C (`KeyboardInterrupt`) is raised only once the command has ended. So a trend over a data
 cube (`cube.trend`) keeps the Script pane's bounds here (2 billion pairs compared, a STAC search
-of 2,000 items); run a larger one, such
-as a trend over a state, with `rustgis-cli run` (see [the command line](cli.md)).
+of 2,000 items); run a larger one, such as a trend over a state, with `rustgis-cli run` (see
+[the command line](cli.md)).
 
 ```python
 s.commands()                                        # every command, with its parameters
@@ -246,8 +246,9 @@ or hide the original `RustGISError`. Each session reports its own failure. A log
 filter that raises cannot change the operation's result; the diagnostic falls back to stderr.
 A command that doesn't need a secret neither touches the keychain nor emits a keychain
 diagnostic. On macOS, Keychain may ask once per item whether the Python executable may read it;
-**Always Allow** stops that question for that executable and item.
-
+**Always Allow** stops that question for that executable and item. Until such a question is
+answered (or a locked Secret Service on Linux responds), the command that asked waits, and so do
+other RustGIS calls in the process, even on other sessions; other Python threads keep running.
 
 ## Data in and out
 

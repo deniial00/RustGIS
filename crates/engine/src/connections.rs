@@ -519,8 +519,12 @@ pub struct DatabaseLogins {
     /// Saved passwords read from the store, by connection id.
     saved: BTreeMap<String, Secret>,
     /// Passwords the database client's environment gave (`PGPASSWORD`…) to connections that keep
-    /// a saved one, by connection id: used before the saved one, which then isn't read.
+    /// a saved one, by connection id: used before the saved one, which then isn't read. Only in a
+    /// session that opted into the desktop's saved secrets (see `prefer_environment_passwords`).
     ambient: BTreeMap<String, Secret>,
+    /// Whether the environment's passwords rank above the saved ones (the command line and Python
+    /// with `--use-saved-secrets` / `use_saved_secrets`); the desktop never reads them.
+    environment_first: bool,
     unavailable: BTreeSet<String>,
     /// The connection chosen for each database (kind and driver address) by a login.
     selected: BTreeMap<(&'static str, String), String>,
@@ -583,7 +587,8 @@ impl DatabaseLogins {
     pub(crate) fn reject_session_password(&mut self, c: &Connection) {
         let Some(refused) = self.session.remove(&c.id) else {
             // Nothing was given this session, so the refused password came from the environment:
-            // not tried again, nor replaced by the saved one the server was never asked about.
+            // it isn't tried again, and the connection is rejected for the session, so the saved
+            // password isn't tried automatically either (the user types one, as with any refusal).
             if self.ambient.remove(&c.id).is_some() && c.remembered {
                 self.rejected.insert(c.id.clone());
             }
@@ -699,11 +704,22 @@ impl DatabaseLogins {
         self.session.get(id).or_else(|| self.ambient.get(id)).or_else(|| self.saved.get(id))
     }
 
+    /// Lets the database clients' environment passwords serve saved connections before the store.
+    /// For the command line and Python that opted into the desktop's saved secrets; the desktop
+    /// itself never calls it.
+    pub fn prefer_environment_passwords(&mut self) {
+        self.environment_first = true;
+    }
+
     /// The environment's password for a database connection that keeps a saved one (`PGPASSWORD`,
     /// `MYSQL_PWD` or `SQLCMDPASSWORD` of its kind), which ranks above the saved one: a login that
-    /// has it never asks the store. It is read once per connection.
+    /// has it never asks the store. It is read once per connection, and only after
+    /// `prefer_environment_passwords`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn ambient(&mut self, c: &Connection) -> Option<Secret> {
+        if !self.environment_first {
+            return None;
+        }
         if let Some(p) = self.ambient.get(&c.id) {
             return Some(p.clone());
         }

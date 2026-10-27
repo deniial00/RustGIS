@@ -610,20 +610,22 @@ Matching strips passwords and outer wrappers/whitespace, but does not infer that
 libpq forms, reordered parameters, host aliases or different usernames mean the same server.
 Several eligible remembered matches open a chooser with no default; cancel leaves the layers
 unavailable. Choose a connection explicitly, or use `connection.login {"id":"c2"}` to select
-its existing session, environment or remembered password without exposing it. Selection lasts for this
-session, not in the project. `connection.list` reports secret-free `loginRequests` with the
-reason, database label, candidate IDs and affected-layer count; ambiguous layers are not
-attributed to the first saved row. `loggedIn` means this ID has a session password, an environment
-password selected for it, or an already-loaded remembered password available; it does not certify
-successful server authentication.
+its existing session, environment or remembered password without exposing it. Selection lasts
+for this session, not in the project. `connection.list` reports secret-free `loginRequests` with
+the reason, database label, candidate IDs and affected-layer count; ambiguous layers are not
+attributed to the first saved row. `loggedIn` means this ID has a session password, an
+environment password selected for it, or an already-loaded remembered password available; it
+does not certify successful server authentication.
 
-Explicit command, address and session passwords take precedence over saved credentials. For an
-eligible remembered connection, `PGPASSWORD`, `MYSQL_PWD` or `SQLCMDPASSWORD` (according to the
-database kind) wins over the keychain password without reading the store. Project opening may
-use it only through the same exact-address remembered-connection selection; it never newly
-authorizes an unrelated address, password-file credentials or Windows identity. A positively
-refused saved or environment password is not retried automatically for the rest of the session,
-and no other saved password is tried automatically. Its old OS-store value is retained.
+Explicit command, address and session passwords take precedence over saved credentials. On the
+command line and in Python with `--use-saved-secrets` / `use_saved_secrets=True`, an eligible
+remembered connection's `PGPASSWORD`, `MYSQL_PWD` or `SQLCMDPASSWORD` (according to the database
+kind) wins over the keychain password without reading the store; the desktop app always uses the
+saved password. Project opening may use it only through the same exact-address
+remembered-connection selection; it never newly authorizes an unrelated address, password-file
+credentials or Windows identity. A positively refused saved or environment password is not
+retried automatically for the rest of the session, and no other saved password is tried
+automatically. Its old OS-store value is retained.
 The fresh login form has an empty password and Remember unchecked: an unchecked replacement is
 session-only and does not overwrite or delete the old value; checking Remember and successfully
 saving replaces it. A password the server refuses is not kept as this session's, and is not sent

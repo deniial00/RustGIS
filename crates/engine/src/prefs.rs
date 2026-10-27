@@ -34,7 +34,8 @@ fn read_at(path: &Path) -> Result<Map<String, Value>, String> {
     }
 }
 
-/// Updates one desktop preference, preserving all others. A corrupt or unreadable file is
+/// Updates one desktop preference, preserving all others. A malformed file is moved aside to
+/// `prefs.json.bad` (kept for the user to repair) and a new one started; an unreadable one is
 /// never overwritten. A temporary file and rename avoid truncating the old file on a crash.
 pub fn write(key: &str, value: &str) -> Result<(), String> {
     let dir = rustgis_data::dirs::config_dir().ok_or("the settings folder isn't available")?;
@@ -43,7 +44,15 @@ pub fn write(key: &str, value: &str) -> Result<(), String> {
 }
 
 fn write_at(path: &Path, key: &str, value: &str) -> Result<(), String> {
-    let mut map = read_at(path)?;
+    let mut map = match read_at(path) {
+        Ok(map) => map,
+        Err(_) if path.is_file() && std::fs::read_to_string(path).is_ok() => {
+            std::fs::rename(path, path.with_extension("json.bad"))
+                .map_err(|error| format!("could not set aside the malformed preferences: {error}"))?;
+            Map::new()
+        }
+        Err(error) => return Err(error),
+    };
     map.insert(key.to_string(), Value::String(value.to_string()));
     let text = serde_json::to_vec(&map).map_err(|_| "could not serialize preferences")?;
     let dir = path.parent().ok_or("the settings folder isn't available")?;
@@ -76,13 +85,15 @@ pub fn opt_in(
 
 /// Gives `s` the desktop's saved connections and their keychain. Connection commands use the
 /// desktop's matching rules (same id, kind and address or endpoint; typed passwords and keys
-/// win). Changes to the connections aren't written back. Missing preferences never import
-/// legacy connections.
+/// win), with a database client's environment password (`PGPASSWORD`…) before the saved one.
+/// Changes to the connections aren't written back. Missing preferences never import legacy
+/// connections.
 pub fn use_saved_secrets(s: &mut crate::Session, prefs: &Map<String, Value>, store: Arc<dyn SecretStore>) {
     if let Some(text) = prefs.get(crate::connections::PREF).and_then(Value::as_str) {
         s.connections = crate::connections::Connections::from_json(text);
     }
     s.database_logins.set_store(Some(store));
+    s.database_logins.prefer_environment_passwords();
 }
 
 #[cfg(test)]
@@ -91,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preference_updates_preserve_other_values_and_refuse_corruption() {
+    fn preference_updates_preserve_other_values_and_set_malformed_files_aside() {
         let dir = std::env::temp_dir().join(format!("rustgis-preferences-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(FILE);
@@ -105,8 +116,9 @@ mod tests {
         std::fs::write(&path, broken).unwrap();
         let error = read_at(&path).unwrap_err();
         assert!(!error.contains("prefs-sentinel"));
-        assert!(write_at(&path, "theme", "light").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        write_at(&path, "theme", "light").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("prefs.json.bad")).unwrap(), broken);
+        assert_eq!(read_at(&path).unwrap().get("theme"), Some(&Value::String("light".into())));
         std::fs::write(&path, r#"["prefs-sentinel"]"#).unwrap();
         assert!(!read_at(&path).unwrap_err().contains("prefs-sentinel"));
         assert!(read_at(&dir).is_err());

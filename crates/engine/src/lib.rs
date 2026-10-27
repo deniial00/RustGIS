@@ -9,6 +9,7 @@ pub mod cmd;
 pub mod connections;
 pub mod geometry_calc;
 pub mod model;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod prefs;
 pub mod project;
 pub mod s3_connections;

@@ -195,11 +195,12 @@ impl SecretStore for Counting {
     }
 }
 
-/// A session over any store, holding the saved connections `prefs` names.
+/// A session over any store, holding the saved connections `prefs` names, as the command line and
+/// Python open one with `--use-saved-secrets` / `use_saved_secrets`.
 fn session_with(store: Arc<dyn SecretStore>, prefs: &str) -> Session {
     let mut s = Session::new(Project::default());
-    s.database_logins.set_store(Some(store));
-    s.connections = crate::connections::Connections::from_json(prefs);
+    let prefs = serde_json::Map::from_iter([(crate::connections::PREF.to_string(), Value::String(prefs.to_string()))]);
+    crate::prefs::use_saved_secrets(&mut s, &prefs, store);
     s
 }
 
@@ -371,8 +372,9 @@ fn remembered_database_exact_address_and_explicit_precedence_packets() {
     server.empty();
 }
 
-/// A saved connection's password from the environment (`PGPASSWORD`) beats the keychain's, for an
-/// explicit command and for opening a project, and the keychain is never asked. A password given
+/// With the saved-secrets opt-in, a saved connection's password from the environment
+/// (`PGPASSWORD`) beats the keychain's, for an explicit command and for opening a project, and the
+/// keychain is never asked; the desktop (no opt-in) keeps sending the saved one. A password given
 /// to a command, or typed for the address, beats the environment; the environment reaches no
 /// address the saved connection doesn't name exactly, nor a connection kept without a password.
 /// The ambient value is set in a child process: it is process-global, and the rest of the suite
@@ -389,6 +391,12 @@ fn remembered_database_environment_password_wins_over_saved_for_postgres() {
     let id = remember(&mut seed, "Env", &server.address, "saved-sentinel");
     let prefs = seed.connections.to_json();
     // Seeding activated the typed password for the driver; the sessions below start without it.
+    rustgis_data::source::duckdb::forget_connection_passwords();
+    // The desktop (a store without the opt-in) never reads the environment: the saved one is sent.
+    let mut desktop = app(seeded.clone(), &prefs);
+    assert!(desktop.run("connection.test", &json!({"id":id})).is_err());
+    assert_eq!(server.take(), b"saved-sentinel\0");
+    server.empty();
     rustgis_data::source::duckdb::forget_connection_passwords();
     let store = Counting::over(seeded);
     let (_, key) = crate::connections::database_key(&server.address).unwrap();
