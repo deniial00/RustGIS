@@ -112,10 +112,11 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 **Vector to PMTiles** (`vectorToPmtiles`) writes a single-layer MVT archive in standard Web
 Mercator. Choose `minZoom` and `maxZoom` from 0 to 16; `sourceLayer` defaults to the input
 layer's name. The output file is saved atomically on desktop or downloaded in the browser.
-Without `output`, CLI, script and task calls use a sanitized `<layer>.pmtiles` name in the
-process's working directory; an existing destination is replaced atomically. The desktop tool
-pane instead asks for a destination with Save As. Exports refuse to replace a loaded layer's
-source file, including aliases of that path.
+Without `output`, CLI, script and task calls write `<layer>.pmtiles` in the process's working
+directory, where `<layer>` is the layer's name without any folder part; an existing destination
+is replaced atomically. The desktop tool pane instead asks for a destination with Save As.
+Exports refuse to replace a file that a loaded layer, raster or tile archive reads, including
+aliases of that path, a ZIP archive that holds a loaded member, and a Shapefile's companion files.
 An active selection is exported; otherwise the geoprocessing extent applies, and streamed
 sources are read in full rather than limited to the visible map window. It exports points,
 lines and polygons, including multipart geometry, attributes and feature IDs—not the map's

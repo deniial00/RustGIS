@@ -960,15 +960,14 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     // Schedule cleanup before submission: a timer error must not mark an already offered file
     // as failed. The browser may start reading the URL after `click` returns.
     let cleanup_url = url.clone();
-    let revoke = wasm_bindgen::closure::Closure::once(move || {
+    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
         let _ = web_sys::Url::revoke_object_url(&cleanup_url);
     });
-    if let Err(error) = window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.as_ref().unchecked_ref(), 10_000) {
+    if let Err(error) = window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000) {
         a.remove();
         let _ = web_sys::Url::revoke_object_url(&url);
         return Err(err(error));
     }
-    revoke.forget();
     a.click();
     a.remove();
     Ok(())

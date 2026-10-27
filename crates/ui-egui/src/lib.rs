@@ -2560,7 +2560,11 @@ impl RustGisApp {
             "ui.save" | "ui.saveAs" if self.services.download.is_some() => {
                 let name = format!("{}.rgis", self.session.project.name);
                 if id == "ui.save" && self.ui.web_file.as_deref() == Some(name.as_str()) {
-                    self.save_download(&name)?;
+                    // The keyboard caller discards the result, so the failure is shown here too.
+                    if let Err(error) = self.save_download(&name) {
+                        self.session.notify(error.clone(), true);
+                        return Err(error);
+                    }
                 } else {
                     self.dialogs.open("saveProject", &self.session)?;
                 }

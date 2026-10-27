@@ -848,14 +848,40 @@ struct Ran {
 #[cfg(not(target_arch = "wasm32"))]
 fn write_file_output(s: &Session, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if let Ok(destination) = path.canonicalize() {
-        for layer in s.project.maps.iter().flat_map(|map| &map.layers) {
-            let source = layer.source.as_ref().and_then(|source| source.path.as_deref()).or(layer.dataset.source.as_deref());
-            if source.is_some_and(|source| std::path::Path::new(source).canonicalize().is_ok_and(|source| source == destination)) {
-                return Err(format!("destination is the source of layer '{}'; choose a different output file", layer.name));
+        for map in &s.project.maps {
+            for layer in &map.layers {
+                let sources = [
+                    layer.source.as_ref().and_then(|source| source.path.as_deref()),
+                    layer.dataset.source.as_deref(),
+                    layer.raster.as_ref().and_then(|raster| raster.path.as_deref()),
+                ];
+                if sources.into_iter().flatten().any(|source| names_file(source, &destination)) {
+                    return Err(format!("destination is the source of layer '{}'; choose a different output file", layer.name));
+                }
+            }
+            for tile in &map.tiles {
+                let archive = tile.url.strip_prefix("file://").unwrap_or(tile.url.as_str());
+                let local = matches!(tile.kind, rustgis_map::TileKind::PmTiles | rustgis_map::TileKind::MbTiles);
+                if local && rustgis_map::tiles::is_local_archive(&tile.url) && names_file(archive, &destination) {
+                    return Err(format!("destination is the archive of tile layer '{}'; choose a different output file", tile.name));
+                }
             }
         }
     }
     rustgis_data::io::write_atomic(path, bytes).map_err(|error| error.to_string())
+}
+
+/// Whether a path a loaded source reads is `destination`: the file itself, the archive that a
+/// ZIP member's path (`archive.zip/member`) lies in, or a Shapefile's companion file.
+#[cfg(not(target_arch = "wasm32"))]
+fn names_file(source: &str, destination: &std::path::Path) -> bool {
+    let source = std::path::Path::new(source);
+    if source.ancestors().any(|p| p.canonicalize().is_ok_and(|p| p.as_path() == destination)) {
+        return true;
+    }
+    let shapefile = source.extension().is_some_and(|e| e.eq_ignore_ascii_case("shp"));
+    let companion = |ext: &str| source.with_extension(ext).canonicalize().is_ok_and(|p| p.as_path() == destination);
+    shapefile && ["dbf", "shx", "prj", "cpg"].iter().any(|&ext| companion(ext) || companion(ext.to_ascii_uppercase().as_str()))
 }
 
 /// Adds a tool's result to the map and the history.
@@ -1170,6 +1196,23 @@ mod file_tests {
                 assert!(s.project.gp_history.last().is_some_and(|record| !record.ok));
             }
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn source_paths_name_zip_archives_and_shapefile_companions() {
+        let root = std::env::temp_dir().join(format!("rustgis-source-names-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = root.join("roads.zip");
+        let companion = root.join("roads.DBF");
+        std::fs::write(&archive, b"zip").unwrap();
+        std::fs::write(&companion, b"dbf").unwrap();
+        let archive_file = archive.canonicalize().unwrap();
+        let companion_file = companion.canonicalize().unwrap();
+        assert!(names_file(&archive.join("roads.shp").display().to_string(), &archive_file));
+        assert!(names_file(&root.join("roads.shp").display().to_string(), &companion_file));
+        assert!(!names_file(&root.join("roads.dbf").display().to_string(), &archive_file));
         std::fs::remove_dir_all(root).unwrap();
     }
 
