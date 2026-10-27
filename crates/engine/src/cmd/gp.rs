@@ -1529,6 +1529,31 @@ mod file_tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn native_export_preserves_loaded_workbooks() {
+        let root = std::env::temp_dir().join(format!("rustgis-workbook-output-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let book = root.join("Counts.xlsx");
+        let bytes = rustgis_data::sheets::xlsx(&[("Counts", &[&["name", "value"], &["alpha", "7"]])]);
+        std::fs::write(&book, &bytes).unwrap();
+        let mut s = points_session();
+        s.run("layer.addData", &json!({"path": book})).unwrap();
+        assert_eq!(s.project.tables.first().map(|t| t.dataset.source.as_deref()), Some(book.to_str()));
+        for destination in [&book, &root.join("nested").join("..").join("Counts.xlsx")] {
+            let result = s.run(
+                "gp.run",
+                &json!({"tool": "vectorToPmtiles", "params": {
+                    "input": "Points", "minZoom": 0, "maxZoom": 0, "output": destination
+                }}),
+            );
+            assert!(result.is_err(), "export must refuse a loaded workbook: {result:?}");
+            assert!(result.unwrap_err().contains("source of table"));
+            assert_eq!(std::fs::read(&book).unwrap(), bytes);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn native_export_preserves_loaded_source_directories() {
         let root = std::env::temp_dir().join(format!("rustgis-directory-output-{}-{}", std::process::id(), now_ms()));
         let source = root.join("Store.gdb");
