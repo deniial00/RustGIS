@@ -149,6 +149,30 @@ fn table_remove_takes_a_standalone_table_out_of_the_project() {
 }
 
 #[test]
+fn a_saved_selection_is_read_in_range_in_order_and_once() {
+    // A selection edited by hand: a row repeated, out of order, and one past the layer's end.
+    let s = world();
+    let mut v: Value = serde_json::to_value(&s.project).unwrap();
+    let layers = v["maps"][0]["layers"].as_array_mut().unwrap();
+    let i = layers.iter().position(|l| l["name"] == "Countries").unwrap();
+    layers[i]["selection"] = json!([3, 1, 3, 1_000_000]);
+    let p = Project::from_json(&v.to_string()).unwrap();
+    let countries = p.map().layers.iter().find(|l| l.name == "Countries").unwrap();
+    assert_eq!(countries.selection, [1, 3]);
+    // An offline area's snapshot, edited the same way, opens with the selection put right too.
+    let mut s = world();
+    s.run("offline.download", &json!({"name": "Paris", "extent": [1.0, 48.0, 4.0, 50.0]})).unwrap();
+    let cities = s.project.offline_areas[0].data.layers.iter_mut().find(|l| l.name == "Cities").unwrap();
+    let last = cities.dataset.features.len() - 1;
+    cities.selection = vec![last, 0, last, last + 1];
+    s.run("offline.open", &json!({"name": "Paris"})).unwrap();
+    let mut want = vec![0, last];
+    // Row 0 and the last row, once each: one row when the layer has a single feature.
+    want.dedup();
+    assert_eq!(s.map().layer_by_name("Cities").unwrap().selection, want);
+}
+
+#[test]
 fn standalone_tables_keep_their_ids_in_the_project_file() {
     let mut s = world();
     for name in ["sites", "sites", "notes"] {
@@ -8259,6 +8283,15 @@ fn identify_reports_vector_tile_features() {
     assert!(s.run("identify", &json!({"lon": 1.0, "lat": 1.0, "mode": "selectable"})).unwrap().is_null());
     s.run("map.setTiles", &json!({"index": 0, "visible": false})).unwrap();
     assert!(s.run("identify", &json!({"lon": 1.0, "lat": 1.0})).unwrap().is_null());
+    // A basemap from the catalog isn't identified, unless picked in Layers with Selected in Layers.
+    s.run("map.setTiles", &json!({"index": 0, "visible": true})).unwrap();
+    (s.map_mut().tiles[0].id, s.map_mut().tiles[0].overlay) = ("parks-base".into(), false);
+    assert!(s.run("identify", &json!({"lon": 1.0, "lat": 1.0})).unwrap().is_null());
+    let at = json!({"lon": 1.0, "lat": 1.0, "mode": "selectedInContents"});
+    assert!(s.run("identify", &at).unwrap().is_null(), "not picked");
+    s.run("map.selectTiles", &json!({"index": 0})).unwrap();
+    let r = s.run("identify", &at).unwrap();
+    assert_eq!((&r["tileLayer"], &r["attributes"]["name"]), (&json!("parks"), &json!("Central")), "{r}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -8537,7 +8570,9 @@ pub(crate) fn serve(body: &'static [u8], n: usize) -> String {
 #[test]
 fn data_from_a_web_address() {
     const GEOJSON: &[u8] = br#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"n": 1}, "geometry": {"type": "Point", "coordinates": [10, 20]}}]}"#;
-    let base = serve(GEOJSON, 3);
+    // Five requests: an address without a file name is asked for its headers and its first
+    // bytes (is it a GeoTIFF?) before it is downloaded.
+    let base = serve(GEOJSON, 5);
     let mut s = Session::new(Project::default());
     let r = s.run("layer.addUrl", &json!({"url": format!("{base}/places.geojson")})).unwrap();
     assert_eq!(r["features"], 1);
@@ -8547,7 +8582,7 @@ fn data_from_a_web_address() {
     assert!(s.map().layer_by_name("Api").is_some());
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/missing.geojson")})).unwrap_err();
     assert!(e.contains("404"), "{e}");
-    let page = serve(b"<!doctype html><html>not data</html>", 1);
+    let page = serve(b"<!doctype html><html>not data</html>", 3);
     let e = s.run("layer.addUrl", &json!({"url": format!("{page}/index")})).unwrap_err();
     assert!(e.contains("not a data format"), "{e}");
     for bad in ["file:///etc/passwd", "/tmp/x.geojson", "http://169.254.169.254/latest.geojson", ""] {
@@ -8579,7 +8614,7 @@ fn jpeg2000_from_a_web_address() {
     assert_eq!(named("https://x.org/", &codestream).unwrap(), "data.j2k");
     assert!(named("https://x.org/api/tile", br#"<VRTDataset></VRTDataset>"#).unwrap_err().contains("not a data format"));
     if !rustgis_data::raster::gdal::available() {
-        let jp2 = serve(jp2_box, 2);
+        let jp2 = serve(jp2_box, 4);
         for path in ["TCI.jp2", "api/tile"] {
             let e = s.run("layer.addUrl", &json!({"url": format!("{jp2}/{path}")})).unwrap_err();
             assert!(e.contains("needs GDAL"), "{path}: {e}");
@@ -8613,7 +8648,7 @@ fn jpeg2000_from_a_web_address() {
     // stays valid for the server thread's lifetime.
     let bytes = Vec::leak(std::fs::read(&jp2).unwrap());
     let uploaded = base64::engine::general_purpose::STANDARD.encode(&*bytes);
-    let base = serve(bytes, 2);
+    let base = serve(bytes, 4);
     let r = s.run("layer.addUrl", &json!({"url": format!("{base}/tiles/33/T/XN/TCI.jp2")})).unwrap();
     let l = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap();
     assert_eq!(l.name, "TCI");
@@ -9175,6 +9210,102 @@ fn identify_asks_wms_layers() {
     assert!(v.is_null(), "{v}");
     let r = s.run("identify.featureInfo", &json!({"layer": "Roads", "lon": 8.5, "lat": 47.4, "request": true})).unwrap();
     assert_eq!(r, json!({"results": []}));
+}
+
+/// A tile layer picked in Layers (`map.selectTiles`, view state like `layer.select`) is the one
+/// Selected in Layers identifies, whichever it is (a basemap too, which the other modes leave
+/// out); it stays picked when moved, and a map layer made active ends the pick for good.
+#[test]
+fn selected_in_layers_asks_the_tile_layer_picked() {
+    use rustgis_data::{Dataset, GeometryType};
+    const WMS: &str = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink">
+<Service><Title>Test WMS</Title></Service>
+<Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/wms?"/></Get></HTTP></DCPType></GetMap>
+<GetFeatureInfo><Format>application/geo+json</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/info?"/></Get></HTTP></DCPType></GetFeatureInfo></Request>
+<Layer queryable="1"><Title>Root</Title><CRS>EPSG:3857</CRS><Layer><Name>roads</Name><Title>Roads</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+    let mut s = Session::new(Project::default());
+    s.run("service.add", &json!({"url": "https://maps.example.com/wms", "layer": "roads", "text": WMS})).unwrap();
+    // A basemap from the catalog, of the same service.
+    let base = "https://maps.example.com/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=roads&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image/png";
+    s.run("map.addTiles", &json!({"url": base, "name": "Base", "id": "base-wms"})).unwrap();
+    let points = s.map_mut().add_dataset(Dataset::new("Points", GeometryType::Point, vec![]));
+    s.run("layer.select", &json!({"layer": points})).unwrap();
+    s.run("map.goToXY", &json!({"lon": 8.5, "lat": 47.4, "scale": 10000})).unwrap();
+    let identify = |s: &mut Session, mode: &str| s.run("identify", &json!({"lon": 8.5, "lat": 47.4, "mode": mode})).unwrap();
+    let asked = |v: &Value| -> Vec<String> {
+        v["featureInfo"].as_array().into_iter().flatten().map(|a| a["tileLayer"].as_str().unwrap_or_default().to_string()).collect()
+    };
+    // The active layer has nothing there, and no tile layer is asked; the visible mode leaves the
+    // basemap out.
+    assert!(identify(&mut s, "selectedInContents").is_null());
+    assert_eq!(asked(&identify(&mut s, "visible")), ["Roads"]);
+
+    let tiles = |s: &mut Session| s.run("map.tiles", &json!({})).unwrap();
+    let at = |s: &mut Session, name: &str| tiles(s).as_array().unwrap().iter().position(|t| t["name"] == name).unwrap();
+    let (steps, dirty) = (s.undo_depth(), s.dirty());
+    s.run("map.selectTiles", &json!({"name": "Base"})).unwrap();
+    assert_eq!((s.undo_depth(), s.dirty()), (steps, dirty), "no undo step, nothing to save");
+    assert_eq!((s.active_layer, s.selected_tile()), (None, Some(at(&mut s, "Base"))));
+    let listed = tiles(&mut s);
+    let picked: Vec<_> = listed.as_array().unwrap().iter().filter(|t| t["selected"] == true).map(|t| t["name"].clone()).collect();
+    assert_eq!(picked, [json!("Base")], "{listed}");
+    let v = identify(&mut s, "selectedInContents");
+    assert_eq!(asked(&v), ["Base"], "{v}");
+    assert!(v.get("results").is_none(), "{v}");
+    // Only Selected in Layers asks it alone.
+    assert!(identify(&mut s, "selectable").is_null());
+    assert_eq!(asked(&identify(&mut s, "visible")), ["Roads"]);
+
+    // Picking another ends the first pick; moved, it stays picked.
+    s.run("map.selectTiles", &json!({"name": "Roads"})).unwrap();
+    assert_eq!(asked(&identify(&mut s, "selectedInContents")), ["Roads"]);
+    let before = at(&mut s, "Roads");
+    s.run("map.setTiles", &json!({"name": "Roads", "move": "bottom"})).unwrap();
+    assert_ne!(at(&mut s, "Roads"), before, "moved");
+    assert_eq!(s.selected_tile(), Some(at(&mut s, "Roads")));
+    assert_eq!(s.map().tiles.iter().filter(|t| t.selected).count(), 1);
+    assert!(s.run("map.selectTiles", &json!({"name": "Nope"})).is_err());
+    assert!(s.run("map.selectTiles", &json!({})).is_err());
+    // Undo and redo leave the pick as it is: picking isn't a step of theirs.
+    s.run("map.setTiles", &json!({"name": "Base", "opacity": 0.5})).unwrap();
+    s.run("map.selectTiles", &json!({"name": "Base"})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.map().tiles.iter().find(|t| t.name == "Base").map(|t| t.opacity), Some(1.0), "undone");
+    assert_eq!(s.selected_tile(), Some(at(&mut s, "Base")));
+    s.run("map.selectTiles", &json!({"name": "Roads"})).unwrap();
+    s.run("edit.redo", &json!({})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.selected_tile(), Some(at(&mut s, "Roads")));
+    assert_eq!(s.map().tiles.iter().filter(|t| t.selected).count(), 1);
+    // Renamed and picked, then the rename undone: the one layer at its address stays picked.
+    s.run("map.setTiles", &json!({"name": "Base", "rename": "Base 2"})).unwrap();
+    s.run("map.selectTiles", &json!({"name": "Base 2"})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.selected_tile(), Some(at(&mut s, "Base")));
+    // An overlay at the same address and of the same kind isn't taken for it: the role tells.
+    s.run("map.addTiles", &json!({"url": base, "name": "Twin", "overlay": true})).unwrap();
+    s.run("map.setTiles", &json!({"name": "Base", "rename": "Base 2"})).unwrap();
+    s.run("map.selectTiles", &json!({"name": "Base 2"})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.selected_tile(), Some(at(&mut s, "Base")));
+    s.run("map.selectTiles", &json!({"name": "Twin"})).unwrap();
+    s.run("map.setTiles", &json!({"name": "Base", "opacity": 0.2})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.selected_tile(), Some(at(&mut s, "Twin")));
+    // With the same name too.
+    s.run("map.setTiles", &json!({"name": "Twin", "rename": "Base"})).unwrap();
+    let base_layer = s.map().tiles.iter().position(|t| t.name == "Base" && !t.overlay);
+    s.run("map.selectTiles", &json!({"index": base_layer})).unwrap();
+    s.run("map.setTiles", &json!({"index": base_layer, "opacity": 0.3})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.selected_tile(), s.map().tiles.iter().position(|t| t.name == "Base" && !t.overlay));
+
+    // A map layer made active ends it, and no active layer later brings it back.
+    s.run("layer.select", &json!({"layer": points})).unwrap();
+    assert_eq!(s.selected_tile(), None);
+    s.run("layer.remove", &json!({"layer": points})).unwrap();
+    assert_eq!((s.active_layer, s.selected_tile()), (None, None));
+    assert!(identify(&mut s, "selectedInContents").is_null());
 }
 
 /// A service whose answer in one format is its error (swisstopo's MapServer fails to write GeoJSON
@@ -10085,6 +10216,11 @@ fn serve_gated(
                 }
             }
             let req = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+            // A HEAD request is answered with the length alone.
+            if req.starts_with("head ") {
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                continue;
+            }
             let range = req.lines().filter(|_| ranges).find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| {
                 let (a, b) = r.trim().split_once('-')?;
                 // A suffix (`-n`): the last n bytes.
@@ -10750,6 +10886,145 @@ fn cloud_optimised_geotiffs_are_read_in_place() {
     assert!(r.get("inPlace").is_none(), "{r}");
     let id = r["layer"].as_u64().unwrap() as u32;
     assert!(s.map().layer(id).is_some_and(|l| l.is_raster()), "{r}");
+    // So is one at an address without a file name, its first bytes saying GeoTIFF.
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/raster/geotiff?id=1")})).unwrap();
+    assert!(r.get("inPlace").is_none(), "{r}");
+    let id = r["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).is_some_and(|l| l.is_raster()), "{r}");
+}
+
+/// A cloud-optimised GeoTIFF from an API whose address names no file (Vantor's
+/// `…/ortho-with-overviews/geotiff?…`) is read in place, as one named `.tif` is, not downloaded
+/// whole; an address the app has probed (`"cog"`) is read in place without the name either.
+#[test]
+fn unnamed_cloud_optimised_geotiffs_are_read_in_place() {
+    use crate::cmd::layer::is_unnamed_url;
+    assert!(is_unnamed_url(
+        "https://api.vantor.com/analytics/v1/raster/ortho-with-overviews/geotiff?function=pansharp_ortho&p=crs%3D%22EPSG%3A3857%22"
+    ));
+    assert!(is_unnamed_url("https://x.org/api/tile/"));
+    for named in
+        ["https://x.org/a/scene.tif?sig=1", "https://x.org/a.b/data.geojson", "https://x.org", "https://x.org/", "/tmp/geotiff", "geotiff"]
+    {
+        assert!(!is_unnamed_url(named), "{named}");
+    }
+    let file = rustgis_data::raster::cog::example(2048, 256);
+    let total = file.len();
+    let (base, sent) = serve_ranges(file);
+    let url =
+        format!("{base}/analytics/v1/raster/ortho-with-overviews/geotiff?function=pansharp_ortho&p=bands%3D%22red%2Cgreen%2Cblue%22&key=k");
+    let mut s = Session::new(Project::default());
+    let r = s.run("layer.addUrl", &json!({"url": url, "name": "Ortho"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    let t = s.map().tiles.last().unwrap().clone();
+    assert_eq!((t.kind, t.name.as_str(), t.url.as_str()), (rustgis_map::TileKind::Cog, "Ortho", url.as_str()));
+    let read = sent.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(read < total / 4, "{read} of {total} bytes read: only the header, not the whole file");
+    let r = s.run("layer.addUrl", &json!({"url": url, "name": "Probed", "cog": true})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    // `"cog"` holds whatever the name says: a GeoTIFF at a FlatGeobuf's name is read as one,
+    // where without it the FlatGeobuf reader refuses it.
+    let fgb = format!("{base}/scene.fgb");
+    assert!(s.run("layer.addUrl", &json!({"url": fgb, "name": "AsFgb"})).is_err());
+    let r = s.run("layer.addUrl", &json!({"url": fgb, "name": "Flagged", "cog": true})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    // Asked to, it is downloaded whole, named by its contents.
+    let r = s.run("layer.addUrl", &json!({"url": url, "whole": true, "name": "Whole"})).unwrap();
+    assert!(r.get("inPlace").is_none(), "{r}");
+    // Anything else at such an address is downloaded as before, and said not to be data.
+    let (text, _) = serve_file(b"Unauthorized".to_vec(), false);
+    let e = s.run("layer.addUrl", &json!({"url": format!("{text}/api/geotiff?key=bad")})).unwrap_err();
+    assert!(e.contains("not a data format"), "{e}");
+}
+
+/// A server answering every request with `body`, logging each as `HEAD`, `GET` or `GET <range>`.
+/// Its HEAD answers carry `announce` as `X-TIFF-Header-Length`, `kind` as `Content-Type` and,
+/// with `ranges`, `Accept-Ranges: bytes`.
+fn serve_logged(
+    body: Vec<u8>,
+    announce: Option<&'static str>,
+    kind: Option<&'static str>,
+    ranges: bool,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let read = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+            let mut headers = String::new();
+            if let Some(k) = kind {
+                headers.push_str(&format!("Content-Type: {k}\r\n"));
+            }
+            if req.starts_with("head ") {
+                kept.lock().unwrap().push("HEAD".to_string());
+                if let Some(n) = announce {
+                    headers.push_str(&format!("X-TIFF-Header-Length: {n}\r\n"));
+                }
+                if ranges {
+                    headers.push_str("Accept-Ranges: bytes\r\n");
+                }
+                let _ = write!(s, "HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                continue;
+            }
+            let range = req.lines().find_map(|l| l.strip_prefix("range: bytes=")).map(|r| r.trim().to_string());
+            kept.lock().unwrap().push(range.as_ref().map_or("GET".to_string(), |r| format!("GET {r}")));
+            let bounds = range.as_deref().and_then(|r| {
+                let (a, b) = r.split_once('-')?;
+                let a = a.parse::<usize>().ok()?;
+                Some((a, if b.is_empty() { body.len().saturating_sub(1) } else { b.parse::<usize>().ok()? }))
+            });
+            let (status, part) = match bounds {
+                Some((a, b)) if a < body.len() => ("206 Partial Content", &body[a..=b.min(body.len() - 1)]),
+                _ => ("200 OK", &body[..]),
+            };
+            let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", part.len());
+            let _ = s.write_all(part);
+        }
+    });
+    (format!("http://{addr}"), log)
+}
+
+/// A GeoTIFF made on request (Vantor's Transform API) says how long its header is in its HEAD
+/// answer (`X-TIFF-Header-Length`): the header is read in that one request. Without a usable
+/// length, the first 64 KiB are read as for any file; a HEAD answer saying JSON skips the
+/// GeoTIFF read and downloads it.
+#[test]
+fn announced_tiff_header_lengths_read_the_header_in_one_request() {
+    let file = rustgis_data::raster::cog::example(2048, 256);
+    let mut s = Session::new(Project::default());
+    let (base, log) = serve_logged(file.clone(), Some("8192"), Some("image/tiff"), true);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/transform/geotiff?id=1"), "name": "Announced"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    let asked = log.lock().unwrap().clone();
+    assert_eq!(asked.first().map(String::as_str), Some("HEAD"), "{asked:?}");
+    assert_eq!(asked.get(1).map(String::as_str), Some("GET 0-8191"), "the header in one read of its announced length: {asked:?}");
+    // A length that isn't one: the usual first read.
+    let (base, log) = serve_logged(file.clone(), Some("lots"), None, true);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/transform/geotiff?id=2"), "name": "Unannounced"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    assert_eq!(log.lock().unwrap().get(1).map(String::as_str), Some("GET 0-65535"));
+    // A file named .tif isn't asked for its headers.
+    let (base, log) = serve_logged(file.clone(), Some("8192"), None, true);
+    s.run("layer.addUrl", &json!({"url": format!("{base}/scene.tif"), "name": "Named"})).unwrap();
+    assert!(!log.lock().unwrap().iter().any(|r| r == "HEAD"), "{:?}", log.lock().unwrap());
+    // A GeoTIFF labelled as text by a server that answers ranges is still read in place.
+    let (base, log) = serve_logged(file, None, Some("text/plain"), true);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/transform/geotiff?id=3"), "name": "Mislabelled"})).unwrap();
+    assert_eq!(r["inPlace"], true, "{r}");
+    assert_eq!(log.lock().unwrap().get(1).map(String::as_str), Some("GET 0-65535"));
+    // JSON by its HEAD answer, from a server that doesn't say it answers ranges: no GeoTIFF
+    // read, downloaded and added.
+    let geojson = br#"{"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [1, 2]}}"#.to_vec();
+    let (base, log) = serve_logged(geojson, None, Some("application/geo+json"), false);
+    let r = s.run("layer.addUrl", &json!({"url": format!("{base}/api/feature"), "name": "Feature"})).unwrap();
+    assert_eq!(r["features"], 1, "{r}");
+    assert_eq!(*log.lock().unwrap(), ["HEAD", "GET"], "no GeoTIFF read, then the download");
 }
 
 /// OpenStreetMap data for an area through an Overpass server (a local one): a layer per geometry
@@ -13755,6 +14030,33 @@ fn line_of_points_shp(name: &str, n: usize) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!("rustgis-engine-{}-{name}.shp", std::process::id()));
     rustgis_data::io::write_path(&ds, &p).unwrap();
     p
+}
+
+#[test]
+fn shapefiles_too_large_to_load_whole_still_open() {
+    // Few records, but a .shp or .dbf past what the whole-file reader takes (#1055): opened and
+    // kept in place, so it never has to fit in memory whole, rather than refused as too large.
+    // Grown sparse where the file system allows.
+    for grown in ["dbf", "shp"] {
+        let p = line_of_points_shp(&format!("wide-{grown}"), 20);
+        std::fs::OpenOptions::new().write(true).open(p.with_extension(grown)).unwrap().set_len(rustgis_data::io::MAX_BYTES + 1).unwrap();
+        let path = p.display().to_string();
+        // With and without a coordinate system given for it.
+        for params in [json!({"path": path}), json!({"path": path, "crs": "EPSG:4326"})] {
+            let mut s = Session::new(Project::default());
+            let r = s.run("layer.addData", &params).unwrap();
+            assert_eq!(r["features"], 20, "{grown}: {r}");
+            assert_eq!(r["streamed"], true, "{grown}: {r}");
+            assert!(s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().is_streamed());
+        }
+        // "stream": false still asks for the whole-file reader, which refuses it.
+        let mut s = Session::new(Project::default());
+        let e = s.run("layer.addData", &json!({"path": path, "stream": false})).unwrap_err();
+        assert!(e.contains("too large"), "{grown}: {e}");
+        for ext in ["shp", "shx", "dbf", "prj", "cpg"] {
+            let _ = std::fs::remove_file(p.with_extension(ext));
+        }
+    }
 }
 
 #[test]
@@ -16993,6 +17295,34 @@ fn model_graphs(s: &mut Session) {
     }
 }
 
+/// A model from a file, saved as steps, has each step checked with its tool: a tool that writes a
+/// file without naming it (vectorToPmtiles with no `output`) is refused, and a built-in tool's
+/// step that only names its output layer runs (#1043).
+#[test]
+fn a_model_from_a_file_checks_each_step_with_its_tool() {
+    let mut s = Session::new(sample::world_project());
+    s.queue_gp_files = true;
+    let export = json!([{"tool": "vectorToPmtiles", "params": {"input": "Cities", "minZoom": 0, "maxZoom": 0}}]);
+    s.run("model.new", &json!({"name": "Export", "steps": export, "imported": true})).unwrap();
+    let e = s.run("model.run", &json!({"name": "Export"})).unwrap_err();
+    assert!(e.contains("step 1 (vectorToPmtiles)") && e.contains("from a file"), "{e}");
+    assert!(s.take_gp_files().is_empty(), "nothing was exported");
+    // Made here, the same model runs.
+    s.run("model.new", &json!({"name": "Export here", "steps": export})).unwrap();
+    s.run("model.run", &json!({"name": "Export here"})).unwrap();
+    assert_eq!(s.take_gp_files().len(), 1);
+
+    let named = json!([{"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near cities"}}]);
+    s.run("model.new", &json!({"name": "Buffer", "steps": named, "imported": true})).unwrap();
+    s.run("model.run", &json!({"name": "Buffer"})).unwrap();
+    assert!(s.map().layer_by_name("Near cities").is_some());
+    // A path through the output stays refused.
+    let path = json!([{"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "/tmp/near.shp"}}]);
+    s.run("model.new", &json!({"name": "Buffer to a file", "steps": path, "imported": true})).unwrap();
+    let e = s.run("model.run", &json!({"name": "Buffer to a file"})).unwrap_err();
+    assert!(e.contains("from a file"), "{e}");
+}
+
 fn rustgis_engine_graph(v: &Value) -> crate::project::ModelGraph {
     crate::model::graph_from_json(v).unwrap()
 }
@@ -19755,4 +20085,529 @@ fn a_raster_projected_onto_a_chosen_grid() {
     assert_eq!(s.map().layers.len(), before, "nothing added by a refused run");
     let e = s.run("raster.project", &json!({"layer": "the", "crs": 31983, "cellSize": 0.001})).unwrap_err();
     assert!(e.contains("give a larger cellSize"), "{e}");
+}
+
+/// Importing a project must preserve the current map, styles, inherited opacity and undo.
+#[test]
+fn geolibre_import_inline_styles_groups_and_undo() {
+    let mut s = world();
+    let maps = s.project.maps.len();
+    let original = s.map().name.clone();
+    let feature = json!({"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"kind":"a","value":10}}]});
+    let text=json!({"version":"0.2.0","name":"Imported","mapView":{"center":[10,20],"zoom":5,"bearing":15},"basemapStyleUrl":"","layerGroups":[{"id":"g","name":"Half","opacity":0.5,"visible":false}],"layers":[{"id":"a","name":"Points","type":"geojson","geojson":feature,"groupId":"g","opacity":0.5,"style":{"vectorStyleMode":"categorized","vectorStyleProperty":"kind","vectorStyleStops":[{"value":"a","color":"#ff0000"}],"labels":{"enabled":true,"field":"kind"}}}],"bookmarks":[{"name":"Place","lng":1,"lat":2,"zoom":3}]}).to_string();
+    let out = s.run("project.importGeolibre", &json!({"text":text})).unwrap();
+    assert_eq!(out["layers"], json!(["Points"]));
+    assert_eq!(s.project.maps.len(), maps + 1);
+    let layer = &s.map().layers[0];
+    assert!(layer.visible);
+    assert_eq!(layer.transparency, 50.0);
+    assert!(!s.map().groups[0].visible);
+    assert_eq!(s.map().groups[0].transparency, 50.0);
+    assert!(matches!(layer.renderer, rustgis_map::Renderer::Unique { .. }));
+    assert!(layer.labels.enabled);
+    assert_eq!(s.map().groups[0].children, vec![layer.id]);
+    assert_eq!(s.map().bookmarks[0].name, "Place");
+    assert_eq!(s.map().camera.bearing, 15.0);
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.project.maps.len(), maps);
+    assert_eq!(s.map().name, original);
+    assert!(crate::cmd::plugins::user_only("project.importGeolibre"));
+}
+
+#[test]
+fn geolibre_input_channels_missing_sources_and_malformed_data() {
+    use base64::Engine;
+    let text=json!({"version":"0.2.0","name":"Empty","mapView":{},"basemapStyleUrl":"","layers":[{"name":"Missing","type":"geojson","sourcePath":"/no/such/geolibre-data.geojson"},{"name":"Video","type":"video"}]}).to_string();
+    for p in [json!({"text":text}), json!({"data":base64::engine::general_purpose::STANDARD.encode(&text)})] {
+        let mut s = world();
+        let out = s.run("project.importGeolibre", &p).unwrap();
+        assert_eq!(out["layers"], json!([]));
+        assert_eq!(out["notes"].as_array().unwrap().len(), 2);
+    }
+    let mut s = world();
+    let maps = s.project.maps.len();
+    for p in [json!({"text":"{"}), json!({"text":"null"}), json!({"data":"!!!!"}), json!({"url":"file:///etc/passwd"})] {
+        assert!(s.run("project.importGeolibre", &p).is_err());
+        assert_eq!(s.project.maps.len(), maps);
+    }
+}
+
+#[test]
+fn geolibre_moved_local_source_uses_project_directory() {
+    let dir = std::env::temp_dir().join(format!("rustgis-geolibre-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join("points.geojson");
+    std::fs::write(
+        &data,
+        r#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}]}"#,
+    )
+    .unwrap();
+    let path = dir.join("map.geolibre");
+    std::fs::write(&path,json!({"version":"0.2.0","name":"Moved","mapView":{},"basemapStyleUrl":"","layers":[{"name":"Points","type":"geojson","sourcePath":"C:/old/place/points.geojson"}]}).to_string()).unwrap();
+    let mut s = world();
+    let out = s.run("project.importGeolibre", &json!({"path":path})).unwrap();
+    assert_eq!(out["layers"], json!(["Points"]));
+    assert_eq!(s.map().layers[0].dataset.features.len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn geolibre_download_finishes_in_its_original_map_and_position() {
+    let mut s = world();
+    let mut ds = rustgis_data::Dataset::new("Points", rustgis_data::GeometryType::Point, Vec::new());
+    ds.source = Some("geolibre-pending:test".into());
+    let target = s.project.active_map;
+    let id = s.map_mut().add_dataset(ds);
+    s.map_mut().layer_mut(id).unwrap().name = "Renamed while downloading".into();
+    s.map_mut().layer_mut(id).unwrap().visible = false;
+    s.map_mut().layer_mut(id).unwrap().transparency = 35.0;
+    let camera = s.map().camera;
+    s.run("map.new", &json!({"name":"Other"})).unwrap();
+    let active = s.project.active_map;
+    let download = s.download_started();
+    s.download_landed(download,br#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"value":1}}]}"#.to_vec());
+    let out=s.run("layer.addDownload",&json!({"id":download,"url":"https://example.org/points.geojson","name":"Points","geolibreLayer":{"token":"geolibre-pending:test","record":{"style":{"circleRadius":9}}}})).unwrap();
+    assert_eq!(out["layer"], id);
+    assert_eq!(s.project.active_map, active);
+    let map = &s.project.maps[target];
+    let loaded = map.layer(id).unwrap();
+    assert_eq!(loaded.dataset.features.len(), 1);
+    assert_eq!(loaded.name, "Renamed while downloading");
+    assert!(!loaded.visible);
+    assert_eq!(loaded.transparency, 35.0);
+    assert_eq!(loaded.dataset.name, loaded.name);
+    assert_eq!(loaded.renderer.base_symbol().size, 18.0);
+    assert_eq!(map.camera, camera);
+    assert!(s.map().layers.is_empty());
+    // Completion and an earlier map switch must not resurrect the consumed reservation.
+    for _ in 0..2 {
+        s.run("edit.undo", &json!({})).unwrap();
+        assert!(s.project.saved_text(None).is_ok());
+        assert!(s.project.maps.iter().all(|m| m.layers.iter().all(|l| l.dataset.source.as_deref() != Some("geolibre-pending:test"))));
+    }
+    for _ in 0..2 {
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.project.saved_text(None).is_ok());
+    }
+    assert_eq!(s.project.maps[target].layer(id).unwrap().dataset.features.len(), 1);
+}
+
+#[test]
+fn geolibre_tile_sources_keep_visibility_opacity_and_order() {
+    let mut s = world();
+    let layers:Vec<_>=["xyz","wms","wmts","vector-tiles"].into_iter().enumerate().map(|(i,kind)|json!({"id":kind,"name":kind,"type":kind,"visible":false,"opacity":0.3,"source":{"tiles":[format!("https://example.org/{i}/{{z}}/{{x}}/{{y}}.png")]}})).collect();
+    let out = s
+        .run(
+            "project.importGeolibre",
+            &json!({"text":json!({"version":"0.2.0","name":"Tiles","mapView":{},"basemapStyleUrl":"","layers":layers}).to_string()}),
+        )
+        .unwrap();
+    assert_eq!(out["layers"].as_array().unwrap().len(), 4);
+    assert_eq!(s.map().tiles.len(), 4);
+    assert!(s.map().tiles.iter().all(|t| !t.visible && t.opacity == 0.3));
+    assert_eq!(s.map().tiles[0].name, "vector-tiles");
+    assert_eq!(s.map().tiles[3].name, "xyz");
+}
+
+/// Sources authored by this test exercise the dispatch for every supported local data kind.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geolibre_local_source_kinds_and_archives() {
+    let dir = std::env::temp_dir().join(format!("rustgis-geolibre-kinds-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ds,_)=rustgis_data::io::read_bytes("points.geojson",br#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"value":1}}]}"#).unwrap();
+    for (file, ext) in [("points.fgb", "fgb"), ("points.parquet", "parquet")] {
+        std::fs::write(dir.join(file), rustgis_data::io::write_bytes(&ds, ext).unwrap().0).unwrap();
+    }
+    std::fs::write(dir.join("points.las"), las_bytes(&[(10.5, 50.5, 300.0, 2)])).unwrap();
+    let raster = rustgis_data::raster::ascii::read(
+        "ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1 2\n3 4\n",
+        "grid",
+        Some(rustgis_data::raster::Crs::LonLat),
+    )
+    .unwrap();
+    let tif = rustgis_data::raster::geotiff::write(&raster, 0).unwrap();
+    std::fs::write(dir.join("grid.tif"), &tif).unwrap();
+    let mut tile = tiny_skia::Pixmap::new(1, 1).unwrap();
+    tile.fill(tiny_skia::Color::from_rgba8(10, 20, 30, 255));
+    let png = tile.encode_png().unwrap();
+    let archive = crate::render::rustgis_tiles::pmtiles::NewArchive {
+        tile_type: crate::render::rustgis_tiles::pmtiles::TileType::Png,
+        gzipped_tiles: false,
+        bounds: [-180.0, -85.0, 180.0, 85.0],
+        metadata: json!({}),
+    };
+    std::fs::write(
+        dir.join("tiles.pmtiles"),
+        crate::render::rustgis_tiles::pmtiles::write(vec![(0, 0, 0, png.clone())], &archive).unwrap(),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(dir.join("tiles.mbtiles")).unwrap();
+    db.execute_batch("CREATE TABLE metadata(name TEXT,value TEXT); CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB); INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','0');").unwrap();
+    db.execute("INSERT INTO tiles VALUES(0,0,0,?1)", [png]).unwrap();
+    drop(db);
+    let store = dir.join("grid.zarr");
+    std::fs::create_dir_all(&store).unwrap();
+    let arr = |shape: Value, chunks: Value| json!({"zarr_format":2,"shape":shape,"chunks":chunks,"dtype":"<f8","compressor":null,"filters":null,"order":"C","fill_value":null});
+    let meta = json!({"zarr_consolidated_format":1,"metadata":{
+        ".zgroup":{"zarr_format":2},
+        "value/.zarray":arr(json!([2,2,2]),json!([1,2,2])),"value/.zattrs":{"_ARRAY_DIMENSIONS":["time","lat","lon"]},
+        "lat/.zarray":arr(json!([2]),json!([2])),"lat/.zattrs":{"_ARRAY_DIMENSIONS":["lat"],"units":"degrees_north"},
+        "lon/.zarray":arr(json!([2]),json!([2])),"lon/.zattrs":{"_ARRAY_DIMENSIONS":["lon"],"units":"degrees_east"}
+    }});
+    std::fs::write(store.join(".zmetadata"), meta.to_string()).unwrap();
+    for (path, values) in [
+        ("value/0.0.0", vec![1.0f64, 2.0, 3.0, 4.0]),
+        ("value/1.0.0", vec![101.0f64, 102.0, 103.0, 104.0]),
+        ("lat/0", vec![0.5, 1.5]),
+        ("lon/0", vec![0.5, 1.5]),
+    ] {
+        let path = store.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()).unwrap();
+    }
+    let sources = [
+        ("flatgeobuf", "points.fgb"),
+        ("geoparquet", "points.parquet"),
+        ("lidar", "points.las"),
+        ("raster", "grid.tif"),
+        ("cog", "grid.tif"),
+        ("zarr", "grid.zarr"),
+        ("pmtiles", "tiles.pmtiles"),
+        ("mbtiles", "tiles.mbtiles"),
+    ];
+    let layers: Vec<_> = sources
+        .iter()
+        .map(|(kind, file)| json!({"id":kind,"name":kind,"type":kind,"sourcePath":file,"source":{"variable":"value","index":{"time":1}}}))
+        .collect();
+    let mut s = world();
+    let out=s.run("project.importGeolibre",&json!({"dir":dir,"text":json!({"version":"0.2.0","name":"Sources","mapView":{},"basemapStyleUrl":"","layers":layers}).to_string()})).unwrap();
+    assert_eq!(out["layers"].as_array().unwrap().len(), sources.len(), "{out}");
+    assert_eq!(s.map().layers.len(), 6);
+    assert_eq!(s.map().tiles.len(), 2);
+    let raster = s.map().layer_by_name("zarr").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
+    assert!(raster.bands[0].data.iter().all(|v| *v >= 101.0 && *v <= 104.0), "saved time slice must survive native import");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn geolibre_saved_order_overrides_automatic_geometry_ranking() {
+    let mut s = world();
+    let features = [
+        ("point", json!({"type":"Point","coordinates":[0,0]})),
+        ("polygon", json!({"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]})),
+    ];
+    let layers:Vec<_>=features.into_iter().map(|(name,geometry)|json!({"id":name,"name":name,"type":"geojson","geojson":{"type":"FeatureCollection","features":[{"type":"Feature","geometry":geometry,"properties":{}}]}})).collect();
+    s.run(
+        "project.importGeolibre",
+        &json!({"text":json!({"version":"0.2.0","name":"Order","mapView":{},"basemapStyleUrl":"","layers":layers}).to_string()}),
+    )
+    .unwrap();
+    assert_eq!(s.map().layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["polygon", "point"]);
+}
+
+#[test]
+fn geolibre_failed_download_discards_only_its_own_reservation() {
+    let mut s = world();
+    let original = s.map().layers.len();
+    let mut ds = rustgis_data::Dataset::new("Pending", rustgis_data::GeometryType::Point, Vec::new());
+    ds.source = Some("geolibre-pending:failure".into());
+    let id = s.map_mut().add_dataset(ds);
+    let mut group = rustgis_map::LayerGroup::new("Group");
+    group.children.push(id);
+    s.map_mut().add_group(group);
+    s.run("map.new", &json!({"name":"Other"})).unwrap();
+    crate::cmd::geolibre::discard_pending(&mut s, &json!({"geolibreLayer":{"token":"geolibre-pending:failure"}}));
+    assert_eq!(s.project.maps[0].layers.len(), original);
+    assert!(s.project.maps[0].groups.iter().all(|g| !g.children.contains(&id)));
+    assert_eq!(s.map().name, "Other");
+}
+
+#[test]
+fn geolibre_group_without_id_does_not_claim_ungrouped_layers() {
+    let mut s = world();
+    let text = json!({"version":"0.2.0","name":"Groups","mapView":{"center":[0,0],"zoom":3},"basemapStyleUrl":"","layerGroups":[{"name":"Malformed","visible":false}],"layers":[{"id":"p","name":"Point","type":"geojson","geojson":{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}]}}]}).to_string();
+    s.run("project.importGeolibre", &json!({"text":text})).unwrap();
+    assert_eq!(s.map().layers.len(), 1);
+    assert!(s.map().groups.iter().all(|g| g.children.is_empty()));
+    let id = s.map().layers[0].id;
+    assert!(s.map().group_of(id).is_none());
+}
+
+/// Declared COGs stream even without a TIFF suffix; a tile's folder look is baked only once.
+#[test]
+fn geolibre_extensionless_cog_uses_tile_storage_and_inherited_opacity() {
+    let mut s = world();
+    let text = json!({"version":"0.2.0","name":"COG","mapView":{},"basemapStyleUrl":"","layerGroups":[{"id":"g","name":"Folder","opacity":0.5}],"layers":[{"id":"c","name":"Coverage","type":"cog","groupId":"g","opacity":0.6,"source":{"url":"http://127.0.0.1:9/extensionless-coverage"}}]}).to_string();
+    let out = s.run("project.importGeolibre", &json!({"text":text})).unwrap();
+    assert_eq!(out["layers"], json!(["Coverage"]));
+    assert!(s.map().layers.is_empty());
+    assert_eq!(s.map().tiles.len(), 1);
+    assert_eq!(s.map().tiles[0].kind, rustgis_map::tiles::TileKind::Cog);
+    assert!((s.map().tiles[0].opacity - 0.3).abs() < 1e-6);
+    assert!(s.map().groups.iter().all(|g| g.children.is_empty()));
+    assert!(s.take_url_requests().is_empty());
+}
+
+/// Public fetches cannot smuggle importer callbacks past the dedicated user-only command.
+#[test]
+fn geolibre_callback_state_is_rejected_by_public_url_fetches() {
+    let mut s = world();
+    for key in ["geolibreProject", "geolibreLayer", "geolibreZarr"] {
+        let mut p = json!({"url":"http://127.0.0.1:9/data.geojson"});
+        p[key] = json!(true);
+        assert!(s.run("layer.addUrl", &p).unwrap_err().contains("state is internal"));
+    }
+    assert!(crate::cmd::plugins::user_only("layer.addDownload"));
+    assert!(s.take_url_requests().is_empty());
+}
+
+/// A non-tiled TIFF must remain a grouped raster after the native COG probe falls back.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geolibre_remote_plain_tiff_folder_opacity_is_not_baked_twice() {
+    use std::io::{Read, Write};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let raster = rustgis_data::raster::ascii::read(
+        "ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\n1 2\n3 4\n",
+        "plain",
+        Some(rustgis_data::raster::Crs::LonLat),
+    )
+    .unwrap();
+    let bytes = rustgis_data::raster::geotiff::write(&raster, 0).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/plain.tif", listener.local_addr().unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !shutdown.load(Ordering::Relaxed) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            let mut input = [0; 8192];
+            let n = stream.read(&mut input).unwrap_or(0);
+            let request = String::from_utf8_lossy(&input[..n]).to_ascii_lowercase();
+            let range = request.lines().find_map(|line| line.strip_prefix("range: bytes="));
+            let (start, end) = range
+                .and_then(|r| r.split_once('-'))
+                .map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(bytes.len() - 1).min(bytes.len() - 1)))
+                .unwrap_or((0, bytes.len() - 1));
+            let body = bytes.get(start..=end).unwrap_or_default();
+            let status = if range.is_some() { "206 Partial Content" } else { "200 OK" };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nConnection: close\r\n\r\n",
+                body.len(),
+                bytes.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    let mut s = world();
+    let text = json!({"version":"0.2.0","name":"Plain TIFF","mapView":{},"basemapStyleUrl":"","layerGroups":[{"id":"g","name":"Folder","opacity":0.5}],"layers":[{"id":"r","name":"Raster","type":"raster","groupId":"g","opacity":0.6,"source":{"url":url}}]}).to_string();
+    let result = s.run("project.importGeolibre", &json!({"text":text}));
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    let out = result.unwrap();
+    assert_eq!(out["layers"], json!(["Raster"]), "{out}");
+    let layer = s.map().layer_by_name("Raster").unwrap();
+    assert!(layer.is_raster());
+    assert!((layer.transparency - 40.0).abs() < 1e-5);
+    let group = s.map().group_of(layer.id).unwrap();
+    assert_eq!(group.transparency, 50.0);
+    assert!(s.map().tiles.is_empty());
+}
+
+/// Tile names need not be unique; parser notes on skipped sources must not inflate the count.
+#[test]
+fn geolibre_summary_counts_completed_records_instead_of_note_names() {
+    let projects = [
+        (
+            json!([
+                {"id":"a","name":"Same","type":"xyz","source":{"url":"https://example.org/a/{z}/{x}/{y}.png"}},
+                {"id":"b","name":"Same","type":"xyz","source":{"url":"https://example.org/b/{z}/{x}/{y}.png"}}
+            ]),
+            "2 drawn differently, 0 left out",
+        ),
+        (
+            json!([
+                {"id":"good","name":"Good","type":"geojson","geojson":{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}]}},
+                {"id":"bad","name":"Dropped","type":"deckgl-viz","beforeId":"unsupported-anchor"}
+            ]),
+            "0 drawn differently, 1 left out",
+        ),
+    ];
+    for (layers, summary) in projects {
+        let mut s = world();
+        let text = json!({"version":"0.2.0","name":"Summary","mapView":{},"basemapStyleUrl":"","layers":layers}).to_string();
+        let out = s.run("project.importGeolibre", &json!({"text":text})).unwrap();
+        let expected = if summary.starts_with("2 ") { 2 } else { 1 };
+        assert_eq!(out["layers"].as_array().unwrap().len(), expected, "{out}");
+        let notices: Vec<_> = s.notices.iter().map(|n| n.text.as_str()).collect();
+        assert!(notices.iter().any(|n| n.contains(summary)), "expected {summary}, got {notices:?}");
+    }
+}
+
+#[test]
+fn geolibre_pending_layers_cannot_be_saved_as_completed_data() {
+    let mut s = world();
+    let completed = s.map().layers.len();
+    let mut ds = crate::data::Dataset::new("Pending", crate::data::GeometryType::Point, Vec::new());
+    ds.source = Some("geolibre-pending:save-test".into());
+    let id = s.map_mut().add_dataset(ds);
+    assert!(s.project.saved_text(None).unwrap_err().contains("still downloading"));
+    for command in ["project.package", "map.package"] {
+        assert!(s.run(command, &json!({"path":"unused-pending-package.zip"})).unwrap_err().contains("still downloading"));
+    }
+    assert!(crate::cmd::items::item_bytes(&mut s, "template", &json!({})).unwrap_err().contains("still downloading"));
+    let recovered = s.project.clone().recovery_text().unwrap();
+    assert!(!recovered.contains("geolibre-pending:"));
+    let recovered: crate::project::Project = serde_json::from_str(&recovered).unwrap();
+    assert_eq!(recovered.maps[recovered.active_map].layers.len(), completed);
+    assert!(s.map().layer(id).is_some());
+    s.map_mut().layer_mut(id).unwrap().dataset.source = None;
+    assert!(s.project.saved_text(None).is_ok());
+    assert!(s.project.clone().recovery_text().is_ok());
+    let mut tile = rustgis_map::tiles::TileLayer::new("Pending archive", rustgis_map::tiles::TileKind::MbTiles, "upload:pending.mbtiles");
+    tile.id = "geolibre-pending:tile-save-test".into();
+    s.map_mut().tiles.push(tile);
+    assert!(s.project.saved_text(None).unwrap_err().contains("still downloading"));
+    for command in ["project.package", "map.package"] {
+        assert!(s.run(command, &json!({"path":"unused-pending-package.zip"})).unwrap_err().contains("still downloading"));
+    }
+    assert!(crate::cmd::items::item_bytes(&mut s, "template", &json!({})).unwrap_err().contains("still downloading"));
+    let recovered = s.project.clone().recovery_text().unwrap();
+    assert!(!recovered.contains("geolibre-pending:"));
+    let recovered: crate::project::Project = serde_json::from_str(&recovered).unwrap();
+    assert!(recovered.maps[recovered.active_map].tiles.iter().all(|tile| tile.name != "Pending archive"));
+    assert!(s.map().tiles.iter().any(|tile| tile.id.starts_with("geolibre-pending:")));
+}
+
+#[test]
+fn geolibre_text_cannot_read_local_files_without_explicit_directory() {
+    let dir = std::env::temp_dir().join(format!("rustgis-geolibre-local-trust-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("local.geojson");
+    std::fs::write(
+        &path,
+        br#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}]}"#,
+    )
+    .unwrap();
+    let text = json!({"version":"0.2.0","name":"Trust","mapView":{},"basemapStyleUrl":"","layers":[{"name":"Local","type":"geojson","sourcePath":path}]}).to_string();
+    let mut s = world();
+    let out = s.run("project.importGeolibre", &json!({"text":text})).unwrap();
+    assert_eq!(out["layers"], json!([]));
+    let out = s.run("project.importGeolibre", &json!({"text":text,"dir":dir})).unwrap();
+    assert_eq!(out["layers"], json!(["Local"]));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geolibre_archive_completion_preserves_pending_tile_edits() {
+    let dir = std::env::temp_dir().join(format!("rustgis-geolibre-archive-edits-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("archive.mbtiles");
+    let _ = std::fs::remove_file(&path);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE metadata (name text, value text); CREATE TABLE tiles (zoom_level integer, tile_column integer, tile_row integer, tile_data blob); INSERT INTO metadata VALUES ('format','png'),('minzoom','0'),('maxzoom','0');").unwrap();
+    drop(db);
+    let mut s = world();
+    let token = "geolibre-pending:archive-edits";
+    let mut tile = rustgis_map::tiles::TileLayer::new("Original", rustgis_map::tiles::TileKind::MbTiles, "upload:pending-edits.mbtiles");
+    tile.id = token.into();
+    tile.visible = true;
+    tile.opacity = 0.5;
+    s.map_mut().tiles.insert(0, tile);
+    s.run("map.setTiles", &json!({"index":0,"visible":false,"opacity":0.25,"rename":"Edited","blend":"multiply"})).unwrap();
+    let download = s.download_started();
+    s.download_landed(download, std::fs::read(path).unwrap());
+    let out = s.run("layer.addDownload", &json!({"id":download,"url":"https://example.org/archive.mbtiles","geolibreLayer":{"token":token,"record":{"type":"mbtiles","visible":true,"opacity":0.5}}})).unwrap();
+    let tile = &s.map().tiles[out["index"].as_u64().unwrap() as usize];
+    assert_eq!(tile.name, "Edited");
+    assert!(!tile.visible);
+    assert_eq!(tile.opacity, 0.25);
+    assert_eq!(tile.blend.code(), "multiply");
+    assert!(!tile.id.starts_with("geolibre-pending:"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn geolibre_item_exports_check_only_the_selected_map_or_layer() {
+    let mut s = world();
+    let clean = s.map().name.clone();
+    s.run("map.new", &json!({"name":"Pending map"})).unwrap();
+    let mut ds = crate::data::Dataset::new("Pending", crate::data::GeometryType::Point, Vec::new());
+    ds.source = Some("geolibre-pending:export-test".into());
+    let pending = s.map_mut().add_dataset(ds);
+    assert!(crate::cmd::items::item_bytes(&mut s, "map", &json!({})).unwrap_err().contains("still downloading"));
+    assert!(crate::cmd::items::item_bytes(&mut s, "layer", &json!({"layer":pending})).unwrap_err().contains("still downloading"));
+    assert!(crate::cmd::items::item_bytes(&mut s, "map", &json!({"map":clean})).is_ok());
+    s.project.active_map = 0;
+    for kind in ["mapPackage", "mobilePackage"] {
+        assert!(crate::cmd::items::item_bytes(&mut s, kind, &json!({})).is_ok());
+    }
+    assert!(crate::cmd::items::item_bytes(&mut s, "projectPackage", &json!({})).unwrap_err().contains("still downloading"));
+    s.project.active_map = 1;
+    for kind in ["mapPackage", "mobilePackage"] {
+        assert!(crate::cmd::items::item_bytes(&mut s, kind, &json!({})).unwrap_err().contains("still downloading"));
+    }
+    s.map_mut().layer_mut(pending).unwrap().visible = false;
+    assert!(crate::cmd::items::item_bytes(&mut s, "mobilePackage", &json!({})).is_ok());
+    assert!(crate::cmd::items::item_bytes(&mut s, "mapPackage", &json!({})).is_err());
+}
+
+#[test]
+fn geolibre_file_pending_tokens_are_rejected_without_mutating_live_work() {
+    let mut s = world();
+    let mut ds = crate::data::Dataset::new("Forged pending", crate::data::GeometryType::Point, Vec::new());
+    ds.source = Some("geolibre-pending:forged".into());
+    let mut map = rustgis_map::Map::new("Forged map");
+    let id = map.add_dataset(ds);
+    let layer = serde_json::to_string(map.layer(id).unwrap()).unwrap();
+    assert!(crate::cmd::layer::add_layer_text(&mut s, &layer).is_err());
+    let count = s.project.maps.len();
+    assert!(s.run("map.import", &json!({"text":serde_json::to_string(&map).unwrap()})).is_err());
+    assert_eq!(s.project.maps.len(), count);
+    let mut project = crate::project::Project::default();
+    project.maps = vec![map];
+    assert!(crate::project::Project::from_json(&serde_json::to_string(&project).unwrap()).is_err());
+    project.maps[0].layers[0].dataset.source = None;
+    let mut tile = rustgis_map::tiles::TileLayer::new("Forged archive", rustgis_map::tiles::TileKind::MbTiles, "upload:forged.mbtiles");
+    tile.id = "geolibre-pending:forged-tile".into();
+    project.maps[0].tiles.push(tile);
+    assert!(crate::project::Project::from_json(&serde_json::to_string(&project).unwrap()).is_err());
+    assert!(s.project.saved_text(None).is_ok());
+}
+
+#[test]
+fn geolibre_offline_snapshots_cannot_persist_or_restore_pending_downloads() {
+    let mut s = world();
+    s.run("offline.download", &json!({"name":"Completed","extent":[-180,-80,180,80]})).unwrap();
+    let mut ds = crate::data::Dataset::new("Pending", crate::data::GeometryType::Point, Vec::new());
+    ds.source = Some("geolibre-pending:offline-test".into());
+    let id = s.map_mut().add_dataset(ds.clone());
+    assert!(s.run("offline.download", &json!({"name":"Pending","extent":[-180,-80,180,80]})).unwrap_err().contains("still downloading"));
+    assert_eq!(s.project.offline_areas.len(), 1);
+    assert!(s.run("offline.sync", &json!({"name":"Completed"})).unwrap_err().contains("still downloading"));
+    s.map_mut().layer_mut(id).unwrap().dataset.source = None;
+    let area = &mut s.project.offline_areas[0];
+    area.data.add_dataset(ds);
+    let raw = serde_json::to_string(&s.project).unwrap();
+    assert!(crate::project::Project::from_json(&raw).is_err());
+    assert!(s.project.saved_text(None).is_err());
+    assert!(s.run("offline.open", &json!({"name":"Completed"})).is_err());
+    let recovered: crate::project::Project = serde_json::from_str(&s.project.clone().recovery_text().unwrap()).unwrap();
+    assert!(recovered.offline_areas[0].data.layers.iter().all(|l| l.dataset.source.as_deref() != Some("geolibre-pending:offline-test")));
+    assert!(!recovered.offline_areas[0].data.layers.is_empty());
 }
