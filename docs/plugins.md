@@ -255,20 +255,49 @@ can hide it like any other. Declare it in `plugin.json`:
     {
       "label": "Go To",
       "items": [
-        { "menu": "Continent", "icon": "zoom_world", "help": "Go to a continent.", "items": ["go-africa", "go-europe"] },
+        {
+          "menu": "Continent",
+          "icon": "zoom_world",
+          "help": "Go to a continent.",
+          "layout": "small",
+          "items": [
+            "go-africa",
+            { "menu": "Europe", "items": ["go-europe", "go-france"] }
+          ]
+        },
         "random-place"
       ]
     },
-    { "label": "Inspect", "items": ["layer-report", "tool:field-summary"] }
+    {
+      "label": "Inspect",
+      "layout": "small",
+      "items": [
+        "layer-report",
+        "tool:field-summary",
+        { "menu": "More", "items": ["feature-report", "tool:statistics"] },
+        { "menu": "Overview", "layout": "large", "items": ["map-report"] }
+      ]
+    }
   ]
 }
 ```
 
 - `items` lists the buttons. An item is a command id, `tool:<id>` (which opens that tool in the
   Tools pane), `panel` (which opens the plugin's [panel](#a-panel)), or a dropdown `menu` whose
-  `items` are any of those.
-- A tab has 1 to 8 groups, a group has 1 to 16 items, and a menu has 1 to 32 entries. Every
-  entry must name one of the plugin's own commands or tools, or its panel.
+  `items` may also contain nested menus.
+- A group's `layout` is `"large"` by default: full-height ribbon buttons, as in existing
+  manifests. Use `"layout": "small"` for compact controls, stacked three per column.
+  A menu's optional `layout` overrides its ribbon trigger's size; when omitted (or `null`),
+  it inherits the group's layout. Consecutive small controls share three-row columns,
+  including small menu triggers in a large group. A large trigger starts a new column.
+  Column widths follow the translated labels; manifests neither need nor support pixel widths.
+  Layout affects ribbon triggers only: all entries and nested submenu triggers inside a
+  popup remain standard menu rows, regardless of any nested `layout`.
+- A tab has 1 to 8 groups. A large group has 1 to 16 direct items; a small group has 1 to 48.
+  Each menu has 1 to 32 direct items. Menus may nest up to 4 levels, counting the outer menu
+  as level 1. Across the entire tab there may be at most 16,384 items, counting every
+  command/tool/panel entry and every menu at every level. Every entry must name one of the
+  plugin's own commands or tools, or its panel.
 - The label is one line of 1 to 32 characters and can't be the name of one of RustGIS's tabs
   (Home, Data, Style, Analyze, Plugins…), including their older names. The `i18n` translations
   apply to the tab, group and menu labels too.

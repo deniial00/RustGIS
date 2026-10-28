@@ -351,20 +351,31 @@ fn versions_and_translations() {
     assert_eq!(crate::translate("de", "Not a plugin string"), None);
 }
 
+fn parse_tab(tab: Value) -> Result<Manifest, String> {
+    let mut m: Value = serde_json::from_str(&testing::manifest("tabbed", &[])).unwrap();
+    m["tab"] = tab;
+    Manifest::parse(&m.to_string())
+}
+
+fn nested_menu(mut item: Value, levels: usize) -> Value {
+    for _ in 0..levels {
+        item = json!({"menu": "Nested", "items": [item]});
+    }
+    item
+}
+
 /// Ribbon tabs accept declared entries and enforce reserved names, shapes and size limits.
 #[test]
 fn plugin_tabs_are_checked() {
-    let with_tab = |tab: Value| {
-        let mut m: Value = serde_json::from_str(&testing::manifest("tabbed", &[])).unwrap();
-        m["tab"] = tab;
-        Manifest::parse(&m.to_string())
-    };
+    let with_tab = parse_tab;
     let ok = with_tab(json!({"label": "Hello", "groups": [
         {"label": "Run", "items": ["h", "tool:m", {"menu": "More", "icon": "stats", "items": ["f", "tool:x"]}]}
     ]}))
     .unwrap();
     let tab = ok.tab.as_ref().unwrap();
-    assert!(matches!(tab.groups[0].items[2], crate::ItemDecl::Menu(ref m) if m.items.len() == 2));
+    assert!(matches!(&tab.groups[0].items[2], crate::ItemDecl::Menu(m) if m.items.len() == 2));
+    assert_eq!(tab.groups[0].layout, crate::Layout::Large);
+    assert!(matches!(&tab.groups[0].items[2], crate::ItemDecl::Menu(m) if m.layout.is_none()));
     assert!(matches!(ok.entry("tool:m"), Some(crate::Entry::Tool(t)) if t.id == "m"));
     assert!(matches!(ok.entry("h"), Some(crate::Entry::Command(c)) if c.id == "h"));
     for (bad, why) in [
@@ -387,6 +398,131 @@ fn plugin_tabs_are_checked() {
         let e = with_tab(bad.clone()).unwrap_err();
         assert!(e.contains(why), "{bad}: {e}");
     }
+}
+
+#[test]
+fn plugin_tab_layout_defaults_and_overrides() {
+    use crate::{ItemDecl, Layout};
+
+    let m = parse_tab(json!({"label": "Layouts", "groups": [
+        {"label": "Default", "items": [{"menu": "Inherit", "items": ["h"]}]},
+        {"label": "Compact", "layout": "small", "items": [
+            "h",
+            {"menu": "Inherit", "items": ["tool:m"]},
+            {"menu": "Large", "layout": "large", "items": ["f"]},
+            {"menu": "Small", "layout": "small", "items": ["h"]}
+        ]},
+        {"label": "Large", "layout": "large", "items": [
+            {"menu": "Small", "layout": "small", "items": ["h"]},
+            {"menu": "Inherit", "layout": null, "items": ["f"]}
+        ]}
+    ]}))
+    .unwrap();
+    let groups = &m.tab.as_ref().unwrap().groups;
+    assert_eq!(groups[0].layout, Layout::Large);
+    assert_eq!(groups[1].layout, Layout::Small);
+    assert_eq!(groups[2].layout, Layout::Large);
+    for (group, item, declared) in
+        [(0, 0, None), (1, 1, None), (1, 2, Some(Layout::Large)), (1, 3, Some(Layout::Small)), (2, 0, Some(Layout::Small)), (2, 1, None)]
+    {
+        let ItemDecl::Menu(menu) = &groups[group].items[item] else { panic!("expected a menu") };
+        assert_eq!(menu.layout, declared);
+    }
+    assert_eq!(Manifest::parse(&serde_json::to_string(&m).unwrap()).unwrap(), m);
+
+    for bad in [json!("medium"), json!("Small"), json!(7), Value::Null] {
+        let tab = json!({"label": "Layouts", "groups": [{"label": "G", "layout": bad, "items": ["h"]}]});
+        assert!(parse_tab(tab).is_err(), "invalid group layout: {bad}");
+    }
+    for bad in [json!("medium"), json!("Small"), json!(7)] {
+        for levels in [0, 3] {
+            let menu = nested_menu(json!({"menu": "Bad", "layout": bad, "items": ["h"]}), levels);
+            let tab = json!({"label": "Layouts", "groups": [{"label": "G", "items": [menu]}]});
+            assert!(parse_tab(tab).is_err(), "invalid menu layout: {bad}");
+        }
+    }
+}
+
+#[test]
+fn plugin_tab_group_layout_limits() {
+    for (layout, max) in [("large", 16), ("small", 48)] {
+        for count in [1, max] {
+            let group = json!({"label": "G", "layout": layout, "items": vec!["h"; count]});
+            assert!(parse_tab(json!({"label": "Limits", "groups": vec![group; 8]})).is_ok());
+        }
+        for count in [0, max + 1] {
+            let tab = json!({"label": "Limits", "groups": [{"label": "G", "layout": layout, "items": vec!["h"; count]}]});
+            let err = parse_tab(tab).unwrap_err();
+            assert!(err.contains(&format!("1 to {max} items")), "{err}");
+        }
+    }
+}
+
+#[test]
+fn plugin_tab_nested_menus_are_checked() {
+    let tab = |item: Value| json!({"label": "Nested", "groups": [{"label": "G", "items": [item]}]});
+    for entry in ["h", "tool:m"] {
+        let m = parse_tab(tab(nested_menu(json!(entry), 4))).unwrap();
+        assert!(m.validate().is_ok());
+        let err = parse_tab(tab(nested_menu(json!(entry), 5))).unwrap_err();
+        assert!(err.contains("at most 4 levels"), "{err}");
+    }
+    for entry in ["unknown", "tool:unknown", "tool:h", "panel"] {
+        let err = parse_tab(tab(nested_menu(json!(entry), 4))).unwrap_err();
+        assert!(err.contains("isn't one of"), "{entry}: {err}");
+    }
+
+    // A panel reference is resolved at the deepest level just like a command or tool.
+    let mut paneled: Value = serde_json::from_str(&testing::panel_manifest("nested-panel")).unwrap();
+    paneled["tab"] = tab(nested_menu(json!("panel"), 4));
+    assert!(Manifest::parse(&paneled.to_string()).is_ok());
+    paneled["panel"] = Value::Null;
+    assert!(Manifest::parse(&paneled.to_string()).unwrap_err().contains("isn't one of"));
+
+    let long = "x".repeat(2001);
+    for (menu, why) in [
+        (json!({"menu": "", "items": ["h"]}), "menu label"),
+        (json!({"menu": long, "items": ["h"]}), "menu label"),
+        (json!({"menu": "M", "help": long, "items": ["h"]}), "menu help"),
+        (json!({"menu": "M", "icon": long, "items": ["h"]}), "menu icon"),
+        (json!({"menu": "M", "items": []}), "1 to 32 items"),
+        (json!({"menu": "M", "items": vec!["h"; 33]}), "1 to 32 items"),
+    ] {
+        let err = parse_tab(tab(nested_menu(menu, 3))).unwrap_err();
+        assert!(err.contains(why), "{err}");
+    }
+    let full = json!({"menu": "Full", "layout": "small", "items": vec!["h"; 32]});
+    let m = parse_tab(tab(nested_menu(full, 3))).unwrap();
+    assert!(m.validate().is_ok());
+}
+
+#[test]
+fn plugin_tab_total_item_limit_counts_menus_and_entries_across_groups() {
+    // Preserve the full capacity of existing flat manifests and compact groups.
+    for (layout, count) in [("large", 16), ("small", 48)] {
+        let menu = json!({"menu": "M", "items": vec!["h"; 32]});
+        let group = json!({"label": "G", "layout": layout, "items": vec![menu; count]});
+        assert!(parse_tab(json!({"label": "Total", "groups": vec![group; 8]})).is_ok());
+    }
+
+    // Each subtree has 1 root + 28 entries + 3 × (1 submenu + 32 entries) = 128 items.
+    // 8 groups × 16 subtrees × 128 items = 16,384 items.
+    let mut children = vec![json!("h"); 28];
+    children.extend(vec![json!({"menu": "Child", "items": vec!["h"; 32]}); 3]);
+    let menu = json!({"menu": "M", "items": children});
+    let group = json!({"label": "G", "items": vec![menu; 16]});
+    let mut tab = json!({"label": "Total", "groups": vec![group; 8]});
+    let m = parse_tab(tab.clone()).unwrap();
+    assert!(m.validate().is_ok());
+    tab["groups"][0]["items"][0]["items"].as_array_mut().unwrap().push(json!("h"));
+    let err = parse_tab(tab).unwrap_err();
+    assert!(err.contains("more than 16384 total items"), "{err}");
+
+    // A single group can exhaust the same tab-wide budget through nested menus.
+    let branch = json!({"menu": "Branch", "items": vec![json!({"menu": "Leaf", "items": vec!["h"; 32]}); 32]});
+    let tab = json!({"label": "Total", "groups": [{"label": "G", "items": vec![branch; 16]}]});
+    let err = parse_tab(tab).unwrap_err();
+    assert!(err.contains("more than 16384 total items"), "{err}");
 }
 
 #[test]
