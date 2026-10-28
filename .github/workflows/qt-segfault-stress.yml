@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -72,9 +72,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install "$(ls dist/*.whl)[test,geopandas,qt]"
-      - name: Use the original Qt fixtures
+      # The tests as on main (119552a7): environment changed by tests, no shared conftest.
+      - name: Use the original tests
         if: matrix.variant == 'original'
-        run: git show HEAD^:apps/rustgis-python/tests/test_qt.py > apps/rustgis-python/tests/test_qt.py
+        run: |
+          git checkout 119552a7 -- apps/rustgis-python/tests
+          rm -f apps/rustgis-python/tests/conftest.py
       - name: Stress
         working-directory: apps/rustgis-python
         run: bash "$GITHUB_WORKSPACE/.github/stress/qt-segfault-loop.sh"
@@ -84,9 +87,46 @@ jobs:
           name: results-${{ matrix.variant }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/results
 
+  mechanism:
+    name: Mechanism (setenv loop ${{ matrix.race }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        race: ["1", "0"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libxkbcommon0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2t64
+      - name: Install
+        run: python -m pip install "PySide6>=6.6"
+      - name: Run the repro 10 times, each cold
+        env:
+          ENV_RACE: ${{ matrix.race }}
+        run: |
+          set +e
+          crashed=0
+          for i in $(seq 1 10); do
+            cold=$(mktemp -d)
+            HOME="$cold" XDG_CACHE_HOME="$cold/cache" python -X faulthandler .github/stress/env-race.py > "run-$i.log" 2>&1
+            rc=$?
+            rm -rf "$cold"
+            echo "run $i: exit $rc ($(tail -n 1 "run-$i.log"))"
+            if [ "$rc" -ge 128 ]; then crashed=$((crashed + 1)); grep -m1 -A3 'Fatal Python error' "run-$i.log" || true; fi
+          done
+          echo "| setenv loop $ENV_RACE | 10 runs | $crashed crashes |" | tee -a "$GITHUB_STEP_SUMMARY"
+
   report:
     name: Report
-    needs: stress
+    needs: [stress, mechanism]
     if: always()
     runs-on: ubuntu-latest
     steps:
