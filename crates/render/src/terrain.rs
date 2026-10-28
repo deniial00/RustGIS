@@ -118,6 +118,7 @@ impl Ground {
 fn raster_height(r: &Raster, m: Coord) -> Option<f64> {
     let n = r.transformer().from_merc(m)?;
     let (px, py) = r.transform.to_pixel(n);
+    let px = r.wrap_col(px);
     let (fx, fy) = (px - 0.5, py - 0.5);
     if !(fx.is_finite() && fy.is_finite()) {
         return None;

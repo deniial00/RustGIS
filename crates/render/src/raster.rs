@@ -210,6 +210,8 @@ fn draw_with(
         bw,
         grid: &grid,
         gw,
+        // Half a turn of a geographic grid's columns.
+        seam: if r.transformer().is_geographic() { 180.0 / r.transform.pixel_width.abs() } else { f64::INFINITY },
         bands: &bands,
         data: bands.iter().map(|b| r.bands.get(*b).map(|b| b.data.as_slice())).collect(),
         relief,
@@ -291,6 +293,9 @@ struct Pass1<'a> {
     /// Exact source positions every `STEP` pixels, `gw` to a row.
     grid: &'a [Option<(f64, f64)>],
     gw: usize,
+    /// Columns between neighbouring grid points further apart than this straddle a geographic
+    /// grid's jump at the antimeridian (or the map's edge): not interpolated across.
+    seam: f64,
     bands: &'a [usize],
     /// The renderer's bands' values.
     data: Vec<Option<&'a [f32]>>,
@@ -318,7 +323,7 @@ impl Pass1<'_> {
             let g = |x: usize, y: usize| self.grid.get(y * self.gw + x).copied().flatten();
             for (gx, c) in cols.iter_mut().enumerate() {
                 *c = match (g(gx, gy), g(gx, gy + 1)) {
-                    (Some(a), Some(b)) => Some((lerp(a.0, b.0, fy), lerp(a.1, b.1, fy))),
+                    (Some(a), Some(b)) if (a.0 - b.0).abs() <= self.seam => Some((lerp(a.0, b.0, fy), lerp(a.1, b.1, fy))),
                     _ => None,
                 };
             }
@@ -337,13 +342,16 @@ impl Pass1<'_> {
                         let gx = (u / STEP as f64) as usize;
                         let fx = u / STEP as f64 - gx as f64;
                         match (cols.get(gx).copied().flatten(), cols.get(gx + 1).copied().flatten()) {
-                            (Some(a), Some(b)) => Some((lerp(a.0, b.0, fx), lerp(a.1, b.1, fx))),
-                            // Near the edge of the projection's valid area: transform this pixel exactly.
+                            (Some(a), Some(b)) if (a.0 - b.0).abs() <= self.seam => Some((lerp(a.0, b.0, fx), lerp(a.1, b.1, fx))),
+                            // Near the edge of the projection's valid area, or across a seam:
+                            // transform this pixel exactly.
                             _ => source(r, self.view, self.place, self.k, px as f64 + 0.5, py as f64 + 0.5),
                         }
                     }
                 };
                 let Some((c, row)) = pos else { continue };
+                // Wrapped here, not in `source`: the grid's columns run on across a 0..360° seam.
+                let c = r.wrap_col(c);
                 if c < 0.0 || row < 0.0 || c >= r.width as f64 || row >= r.height as f64 {
                     continue;
                 }
@@ -550,5 +558,57 @@ mod tests {
         let far = View { width: 3.0, height: 1.0, pixels_per_point: 2.0, camera: Camera::world(), sky: false };
         let mut tiny = Pixmap::new(6, 2).unwrap();
         draw(&mut tiny, &r, &style, None, &far, 1.0, true, Place::Flat(&Flat::Mercator, "mercator"));
+    }
+
+    /// #1109: a lon/lat grid stored from 0 to 360° draws west of Greenwich too, from its columns
+    /// past 180°, with no smear where the grid's last column meets its first.
+    #[test]
+    fn draws_a_0_to_360_grid_on_both_sides_of_greenwich() {
+        // 36 × 18 cells of 10°, valued by column: 0 at 0–10°E, 35 at 350–360° (10–0°W).
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+        let data: Vec<f32> = (0..36 * 18).map(|i| (i % 36) as f32).collect();
+        let r = Raster::new("world", 36, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let style = RasterStyle::default_for(&r);
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 100_000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 400.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        let mut pm = Pixmap::new(400, 200).unwrap();
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        let at = |lon: f64| {
+            let (x, y) = view.to_screen(lonlat_to_merc(Coord::new(lon, 10.0)));
+            pm.pixel(x as u32, y as u32).map(|p| (p.alpha(), p.red())).unwrap_or((0, 0))
+        };
+        for lon in [-175.0, -100.0, -5.0, 5.0, 80.0, 175.0] {
+            assert_eq!(at(lon).0, 255, "{lon}° is drawn");
+        }
+        // 100°W is column 26 (260°), lighter than column 8 (80°E); 5°W is the last column, 5°E the first.
+        assert!(at(-100.0).1 > at(80.0).1, "{:?} vs {:?}", at(-100.0), at(80.0));
+        assert!(at(-5.0).1 > at(-100.0).1 && at(5.0).1 < at(80.0).1, "{:?} {:?}", at(-5.0), at(5.0));
+    }
+
+    /// A lon/lat grid on a map centred on the Pacific: across 180°, where the source longitude
+    /// jumps from one end of the grid to the other, no strip of values from elsewhere shows.
+    #[test]
+    fn no_smear_where_the_longitudes_jump() {
+        for x0 in [0.0, -180.0] {
+            let gt = GeoTransform { origin_x: x0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+            // Valued by longitude: 17 at 170–180°, 18 at 180–190° (-180 to -170°).
+            let data: Vec<f32> = (0..36 * 18).map(|i| ((x0 / 10.0) as i32 + i % 36).rem_euclid(36) as f32).collect();
+            let r = Raster::new("world", 36, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+            let style = RasterStyle::default_for(&r);
+            let flat = Flat::Custom(std::sync::Arc::new(rustgis_map::projection::Projector::new("robinson +lon_0=150").unwrap()));
+            let camera = Camera { center: Coord::new(0.0, 0.0), res: 100_000.0, bearing: 0.0, pitch: 0.0 };
+            let view = View { width: 400.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+            let mut pm = Pixmap::new(400, 200).unwrap();
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&flat, "robinson +lon_0=150"));
+            let screen = |lon: f64| view.to_screen(flat.forward(Coord::new(lon, 10.0)).unwrap());
+            let red = |x: f64, y: f64| pm.pixel(x as u32, y as u32).map(|p| (p.alpha(), p.red())).unwrap_or((0, 0));
+            let ((xa, y), (xb, _)) = (screen(170.5), screen(-170.5));
+            let (lo, hi) = (red(xa, y).1.min(red(xb, y).1), red(xa, y).1.max(red(xb, y).1));
+            assert!(xa < xb && hi > lo, "{x0}: {xa} {xb} {lo} {hi}");
+            for x in xa as u32..=xb as u32 {
+                let (a, v) = red(f64::from(x), y);
+                assert!(a == 255 && (lo..=hi).contains(&v), "{x0}: {v} at x {x}, outside {lo}–{hi}");
+            }
+        }
     }
 }

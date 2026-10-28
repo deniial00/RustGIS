@@ -411,6 +411,11 @@ impl Transformer {
         out.is_finite().then_some(out)
     }
 
+    /// Whether the raster's own coordinates are longitude/latitude degrees.
+    pub fn is_geographic(&self) -> bool {
+        matches!(self.kind, Kind::LonLat | Kind::Proj { geographic: true, .. })
+    }
+
     /// Web Mercator to native coordinates (the renderer's direction).
     pub fn from_merc(&self, c: Coord) -> Option<Coord> {
         match &self.kind {
