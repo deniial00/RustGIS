@@ -8400,6 +8400,11 @@ fn tile_source_layers_can_be_hidden() {
     let mut reopened = Session::new(Project::default());
     reopened.run("project.openText", &json!({"text": damaged})).unwrap();
     assert_eq!(reopened.map().tiles[0].hidden_layers, ["parks"]);
+    // Repeats don't use up the cap: each name counts once.
+    let repeated = format!(r#""hiddenLayers":[{}"roads"]"#, r#""parks","#.repeat(300));
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.openText", &json!({"text": text.replace(r#""hiddenLayers":["parks"]"#, &repeated)})).unwrap();
+    assert_eq!(reopened.map().tiles[0].hidden_layers, ["parks", "roads"]);
     // Bad lists, and a raster layer's, are refused and change nothing.
     let too_many: Vec<String> = (0..=rustgis_map::tiles::MAX_SOURCE_LAYERS).map(|i| format!("l{i}")).collect();
     for bad in [json!("parks"), json!([1]), json!({"parks": true}), json!(too_many)] {

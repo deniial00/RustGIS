@@ -269,13 +269,20 @@ pub fn is_source_layer_name(name: &str) -> bool {
 }
 
 /// Source layer names as a tile layer keeps them (as the archive spells them, spaces too): each
-/// a [source layer name](is_source_layer_name), once, at most [`MAX_SOURCE_LAYERS`], sorted so
-/// the same set is the same list.
+/// a [source layer name](is_source_layer_name), once, the first [`MAX_SOURCE_LAYERS`] distinct
+/// ones, sorted so the same set is the same list.
 pub fn checked_source_layers<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut kept: Vec<String> = names.into_iter().filter(|n| is_source_layer_name(n)).take(MAX_SOURCE_LAYERS).map(str::to_string).collect();
+    let mut kept: Vec<&str> = Vec::new();
+    for name in names.into_iter().filter(|n| is_source_layer_name(n)) {
+        if kept.len() == MAX_SOURCE_LAYERS {
+            break;
+        }
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+    }
     kept.sort_unstable();
-    kept.dedup();
-    kept
+    kept.into_iter().map(str::to_string).collect()
 }
 
 /// A project's hidden source layers, checked; a name that isn't text is left out, and a value
