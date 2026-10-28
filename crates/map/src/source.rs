@@ -163,6 +163,14 @@ pub struct GpkgEdit {
     pub geometry: String,
     /// The source SRS when these rows were loaded.
     pub srs_id: i64,
+    /// The declared geometry type (uppercase) and Z/M flags when these rows were loaded.
+    /// Missing in a project means unknown: saving refuses until Discard Edits reloads them.
+    #[serde(default)]
+    pub geometry_type: String,
+    #[serde(default)]
+    pub z: i64,
+    #[serde(default)]
+    pub m: i64,
     /// The table's durable revision, checked before saving pending inserts.
     pub revision: String,
     pub writable: bool,

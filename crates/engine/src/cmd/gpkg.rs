@@ -108,12 +108,16 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
         let empty_before = s.map().layers.is_empty();
         let id = super::layer::add_dataset(s, ds);
         if let Some(l) = s.map_mut().layer_mut(id) {
+            let (geometry_type, z, m) = src.declaration();
             l.gpkg = Some(rustgis_map::source::GpkgEdit {
                 path,
                 table: src.table().to_string(),
                 key: src.key().to_string(),
                 geometry: src.geometry_column().to_string(),
                 srs_id: src.srs_id(),
+                geometry_type: geometry_type.to_string(),
+                z,
+                m,
                 revision: editable.revision,
                 writable: editable.writable,
                 limit,
@@ -159,9 +163,15 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         }
         let err = |e: rustgis_data::DataError| format!("{name}: nothing was saved to {table}: {e}");
         let src = EditTable::open(path, table).map_err(err)?;
+        // `src` is opened just now, so its declaration is compared with the one loaded; the save
+        // transaction then compares `src` with the table again before writing.
+        let (geometry_type, z, m) = src.declaration();
         if !src.key().eq_ignore_ascii_case(&edit.key)
             || !src.geometry_column().eq_ignore_ascii_case(&edit.geometry)
             || src.srs_id() != edit.srs_id
+            || !geometry_type.eq_ignore_ascii_case(&edit.geometry_type)
+            || z != edit.z
+            || m != edit.m
         {
             return Err(format!("{name}: {table} changed shape since it was loaded, so nothing was saved. Discard Edits loads it again"));
         }
@@ -295,6 +305,10 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
             g.key = src.key().to_string();
             g.geometry = src.geometry_column().to_string();
             g.srs_id = src.srs_id();
+            let (geometry_type, z, m) = src.declaration();
+            g.geometry_type = geometry_type.to_string();
+            g.z = z;
+            g.m = m;
             g.revision = editable.revision;
         }
         s.notify(format!("{name}: edits discarded; {n} rows loaded again from {}", edit.table), false);

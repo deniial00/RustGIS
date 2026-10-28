@@ -729,9 +729,12 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
             if !same_rows || la.dataset.features.shares(&lb.dataset.features) {
                 continue;
             }
+            // A layer bound to both sources (a hand-made project) reserves both baselines' keys.
+            let also = la.postgis.as_ref().and(la.gpkg.as_ref()).map(|g| &g.versions);
+            let loaded = |id: u64| versions.get(id).is_some() || also.is_some_and(|v| v.get(id).is_some());
             let had: std::collections::HashSet<u64> = lb.dataset.features.iter().map(|f| f.id).collect();
             let reused: Vec<usize> = (0..la.dataset.features.len())
-                .filter(|&i| la.dataset.features.get(i).is_some_and(|f| !had.contains(&f.id) && versions.get(f.id).is_some()))
+                .filter(|&i| la.dataset.features.get(i).is_some_and(|f| !had.contains(&f.id) && loaded(f.id)))
                 .collect();
             if reused.is_empty() {
                 continue;
@@ -743,6 +746,7 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
                 .iter()
                 .map(|f| f.id)
                 .chain(versions.iter().map(|(k, _)| k))
+                .chain(also.into_iter().flat_map(|v| v.iter().map(|(k, _)| k)))
                 .filter(|&k| k.cast_signed() >= 0)
                 .max()
                 .unwrap_or(0);

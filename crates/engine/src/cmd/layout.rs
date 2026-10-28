@@ -1501,6 +1501,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     // (Sharing the rows: `Features` is copy-on-write, replaced just below.)
                     let mut layer = l.clone();
                     layer.renew_instance_id();
+                    // Simplified sketches aren't the source's rows: saving them would overwrite it.
+                    layer.gpkg = None;
+                    layer.postgis = None;
                     layer.dataset.features = l
                         .dataset
                         .features

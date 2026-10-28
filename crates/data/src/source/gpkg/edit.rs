@@ -105,6 +105,11 @@ impl EditTable {
         self.srs_id
     }
 
+    /// The declared geometry type (uppercase), Z and M flags as read when opened.
+    pub fn declaration(&self) -> (&str, i64, i64) {
+        (&self.geometry_type, self.z, self.m)
+    }
+
     pub fn read_editable(&self, limit: usize) -> Result<Editable> {
         let guard = self.src.conn.lock().map_err(|_| DataError::Format("GeoPackage connection poisoned".into()))?;
         let conn = guard.as_ref().ok_or_else(|| DataError::Format("GeoPackage connection closed".into()))?;
@@ -215,6 +220,8 @@ impl EditTable {
             .map(|k| (k, false))
             .collect();
         let reserved_high_water = if edits.inserts.is_empty() { 0 } else { residents.keys().copied().max().unwrap_or(0).max(0) };
+        // Residents already gone (deleted elsewhere since loading) aren't evicted by this save.
+        let absent_before = self.missing_keys(&tx, &residents.keys().copied().collect::<Vec<_>>())?;
         let feature_writes = watch_feature_writes(&tx, self.table(), self.key(), residents)?;
         let mut direct_changes = 0_u64;
         let mut saved = Saved::default();
@@ -332,6 +339,10 @@ impl EditTable {
         // Spatial/metadata repair must not itself trigger more feature writes after the snapshot.
         feature_writes.allowed.store(false, Ordering::Relaxed);
         let affected = feature_writes.affected()?;
+        // A conflict-REPLACE delete fires no delete trigger (recursive_triggers is off), so a
+        // resident row it evicted is found only by checking each unmarked resident still exists.
+        let unmarked: Vec<i64> = feature_writes.unmarked()?.into_iter().filter(|k| absent_before.binary_search(k).is_err()).collect();
+        let evicted = self.missing_keys(&tx, &unmarked)?;
         let mut keys: Vec<i64> = edits
             .updates
             .iter()
@@ -344,8 +355,9 @@ impl EditTable {
         let additional: Vec<i64> = affected.iter().copied().filter(|k| keys.binary_search(k).is_err()).collect();
         keys.extend(&additional);
         let rows = self.fetch_rows(&tx, &columns, key, &keys)?;
-        let mut removed: Vec<u64> = affected.iter().filter(|k| !rows.contains_key(*k)).map(|k| k.cast_unsigned()).collect();
+        let mut removed: Vec<u64> = affected.iter().filter(|k| !rows.contains_key(*k)).chain(&evicted).map(|k| k.cast_unsigned()).collect();
         removed.sort_unstable();
+        removed.dedup();
         saved.deleted = edits.deletes.iter().filter(|(k, _)| !rows.contains_key(&k.cast_signed())).count();
         let mut features = Vec::with_capacity(keys.len());
         let originals = edits
@@ -378,7 +390,7 @@ impl EditTable {
         }
         // Standard spatial triggers only write the R-tree. A trigger that writes feature rows
         // can affect keys outside this edit batch, so those saves need a complete spatial scan.
-        let rebuild = feature_writes.count.load(Ordering::Relaxed) != direct_changes;
+        let rebuild = feature_writes.count.load(Ordering::Relaxed) != direct_changes || !evicted.is_empty();
         let mut written_extent = Extent::EMPTY;
         if rebuild {
             written_extent = rebuild_spatial(&tx, self.table(), self.key(), self.geometry_column(), self.src.rtree.as_deref())?;
@@ -510,6 +522,24 @@ impl EditTable {
         Ok(Sql::Blob(header_blob(&body, &extent, srs)))
     }
 
+    /// Keys among `keys` with no row now, read through the key column only.
+    fn missing_keys(&self, conn: &Connection, keys: &[i64]) -> Result<Vec<i64>> {
+        let mut present = std::collections::HashSet::with_capacity(keys.len());
+        for chunk in keys.chunks(CHUNK) {
+            let pk = quote(self.key());
+            let mut st = conn
+                .prepare(&format!("SELECT {pk} FROM {} WHERE {pk} IN ({})", quote(self.table()), vec!["?"; chunk.len()].join(",")))
+                .map_err(err)?;
+            let mut rows = st.query(params_from_iter(chunk.iter())).map_err(err)?;
+            while let Some(row) = rows.next().map_err(err)? {
+                present.insert(row.get::<_, i64>(0).map_err(err)?);
+            }
+        }
+        let mut missing: Vec<i64> = keys.iter().copied().filter(|k| !present.contains(k)).collect();
+        missing.sort_unstable();
+        Ok(missing)
+    }
+
     fn fetch_rows(&self, conn: &Connection, columns: &[String], key: usize, keys: &[i64]) -> Result<HashMap<i64, Vec<Sql>>> {
         let mut out = HashMap::new();
         for chunk in keys.chunks(CHUNK) {
@@ -545,6 +575,12 @@ impl FeatureWrites {
         let mut keys: Vec<i64> = residents.iter().filter_map(|(&k, &changed)| changed.then_some(k)).collect();
         keys.sort_unstable();
         Ok(keys)
+    }
+
+    /// Residents no write was observed on.
+    fn unmarked(&self) -> Result<Vec<i64>> {
+        let residents = self.residents.lock().map_err(|_| DataError::Format("GeoPackage write observer poisoned".into()))?;
+        Ok(residents.iter().filter_map(|(&k, &changed)| (!changed).then_some(k)).collect())
     }
 }
 
@@ -1154,6 +1190,32 @@ mod tests {
             .query_row("SELECT min_x,min_y,max_x,max_y FROM gpkg_contents", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap();
         assert_eq!(bounds, (0.0, 0.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn gpkg_conflict_replace_evictions_are_removed_but_earlier_external_deletes_are_not() {
+        let (_dir, path) = fixture();
+        let conn = Connection::open(&path).unwrap();
+        // INSERT OR REPLACE on a unique column deletes row 2 without firing a delete trigger.
+        conn.execute_batch(
+            "INSERT INTO roads (fid, name) VALUES (2, 'two'), (3, 'three');
+             CREATE UNIQUE INDEX roads_name ON roads(name);
+             CREATE TRIGGER evict AFTER UPDATE OF name ON roads WHEN NEW.fid = 1
+             BEGIN INSERT OR REPLACE INTO roads (fid, name) VALUES (9, 'two'); END;",
+        )
+        .unwrap();
+        let table = EditTable::open(&path, "roads").unwrap();
+        let read = table.read_editable(MAX_EDITABLE).unwrap();
+        assert_eq!(read.features.iter().map(|f| f.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        // Deleted by someone else before this save: not this save's eviction.
+        conn.execute("DELETE FROM roads WHERE fid = 3", []).unwrap();
+        let mut changed = read.features[0].clone();
+        changed.attrs[0] = Value::Text("changed".into());
+        let edits = Edits { updates: vec![(changed, read.versions[0].1)], ..Default::default() };
+        let saved = table.save(&edits, &table.info().fields, read.versions.iter().map(|(k, _)| *k), &read.revision).unwrap().unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM roads WHERE fid = 2", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(saved.removed, vec![2], "the evicted resident row is reported; the earlier external delete isn't");
+        assert!(saved.features.iter().all(|f| f.id != 9), "an unknown trigger-inserted row must not join the loaded scope");
     }
 
     #[test]

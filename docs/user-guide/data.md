@@ -302,8 +302,8 @@ keep known bounds unless a trigger writes feature rows. Such trigger writes requ
 spatial rebuild in the transaction; unreadable nonempty geometry, including a body hidden behind
 a valid header envelope, makes that rebuild refuse the entire save rather than guess its index
 coverage. Metadata or index-repair triggers that would change features after the final snapshot
-are also refused, with the transaction rolled back. A changed geometry type, Z/M declaration or SRS
-between loading and the write transaction also refuses the save.
+are also refused, with the transaction rolled back. A geometry type, Z/M declaration or SRS that
+changed since the layer was loaded also refuses the save until Discard Edits reloads it.
 
 **Discard GeoPackage Edits…** (`gpkg.discardEdits`) reloads the scoped rows as they are in the
 file now, including renamed columns and its current geometry type and coordinate system; Undo
@@ -316,7 +316,8 @@ Save and Discard dialogs remain bound to the project, map and specific layer ins
 opened. Switching maps or projects, or undoing and re-adding a layer, requires reopening or
 choosing again; a reused layer ID cannot retarget another file.
 Feature-less project templates retain the layer's schema and styling, but no source-edit binding:
-opening a template cannot turn its absent features into source-row deletions.
+opening a template cannot turn its absent features into source-row deletions. The same holds for
+the simplified layers a publication layout's globe locator map keeps: they can't be saved back.
 
 Geometry is converted back to the table's coordinate system and must match its declared family.
 Single-part columns reject multipart features; collection, curve and surface columns cannot

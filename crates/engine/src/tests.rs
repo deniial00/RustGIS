@@ -19330,6 +19330,118 @@ fn geopackage_insert_reserves_externally_deleted_loaded_keys() {
     assert_gpkg_regression_clean(&mut s);
 }
 
+/// The declaration is compared with the one loaded, not with a table reopened just before saving.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_command_save_refuses_a_declaration_changed_since_loading() {
+    for (mutation, label) in [
+        ("UPDATE gpkg_geometry_columns SET geometry_type_name = 'MULTIPOINT'", "type"),
+        ("UPDATE gpkg_geometry_columns SET z = 1", "z"),
+        ("UPDATE gpkg_geometry_columns SET m = 1", "m"),
+    ] {
+        let fixture = GpkgRegressionFixture::new(&format!("declaration-{label}"));
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        let name_of = || -> String { db.query_row("SELECT name FROM roads WHERE fid = 1", [], |r| r.get(0)).unwrap() };
+        let mut s = fixture.session();
+        let p = json!({"layer": "R"});
+        db.execute(mutation, []).unwrap();
+        s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "must not save"})).unwrap();
+        let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+        assert!(e.contains("changed shape"), "{label}: {e}");
+        assert_eq!(name_of(), "a", "{label}");
+        // Discard reloads the current declaration, after which attribute saves work again.
+        s.run("gpkg.discardEdits", &p).unwrap();
+        s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "after reload"})).unwrap();
+        assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1, "{label}");
+        assert_eq!(name_of(), "after reload", "{label}");
+    }
+}
+
+/// Reopened projects keep exact coordinates (no edits appear, nothing is rewritten), and the
+/// globe locator's simplified sketches can't be saved over the source.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_reopened_polygons_stay_clean_and_locator_sketches_are_unbound() {
+    use rustgis_data::raster::Crs;
+    use rustgis_data::source::gpkg;
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value};
+
+    let fixture = GpkgRegressionFixture::new("locator-sketch");
+    let path = fixture.dir.join("parcels.gpkg");
+    let mut data = Dataset::new("parcels", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+    for k in 1..=3 {
+        let centre = 10.0 * f64::from(k);
+        // Many irregular vertices: coordinates whose shortest decimal form needs exact parsing.
+        let ring = (0..=64)
+            .map(|i| {
+                let j = i % 64;
+                let a = std::f64::consts::TAU * f64::from(j) / 64.0;
+                Coord::new(centre + 5.0 * a.cos() + 0.01 * f64::from(j % 3), centre + 5.0 * a.sin())
+            })
+            .collect();
+        data.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text(format!("p{k}"))]);
+    }
+    gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let blobs = || -> Vec<Vec<u8>> {
+        db.prepare("SELECT geom FROM parcels ORDER BY fid").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    let before = blobs();
+    let mut s = Session::new(Project::default());
+    s.run("gpkg.addLayer", &json!({"path": path, "table": "parcels", "name": "P"})).unwrap();
+    let project = fixture.dir.join("parcels.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+
+    let mut s = Session::new(Project::default());
+    s.run("project.open", &json!({"path": project})).unwrap();
+    s.map_mut().editing.settings.enabled = true;
+    let p = json!({"layer": "P"});
+    let pending = s.run("gpkg.pendingEdits", &p).unwrap();
+    assert_eq!((pending["inserts"].as_u64(), pending["updates"].as_u64(), pending["deletes"].as_u64()), (Some(0), Some(0), Some(0)));
+    assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+    assert_eq!(blobs(), before, "reopening a project must not rewrite untouched rows");
+
+    let locator = s.run("layout.publication", &json!({"locator": "globe"})).unwrap()["locator"].as_str().unwrap().to_string();
+    let sketch = s.project.maps.iter().find(|m| m.name == locator).unwrap();
+    let layer = sketch.layer_by_name("P").unwrap();
+    assert!(layer.gpkg.is_none() && layer.postgis.is_none(), "a simplified sketch must not keep the source binding");
+    s.run("map.activate", &json!({"name": locator})).unwrap();
+    let e = s.run("gpkg.saveEdits", &p).unwrap_err();
+    assert!(e.contains("not a GeoPackage layer loaded for editing"), "{e}");
+    assert_eq!(blobs(), before);
+}
+
+/// A layer bound to both sources (a hand-made project) reserves both baselines' keys.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_new_features_avoid_keys_of_either_bound_baseline() {
+    let fixture = GpkgRegressionFixture::new("dual-binding");
+    let mut s = fixture.session();
+    let id = s.map().layer_by_name("R").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().postgis = Some(rustgis_map::source::PostgisEdit {
+        origin: rustgis_map::source::PostgisOrigin {
+            database: "postgres:host=127.0.0.1 port=1 dbname=gis".into(),
+            table: "roads".into(),
+            family: None,
+            crs: None,
+        },
+        key: "fid".into(),
+        srid: 4326,
+        writable: false,
+        condition: None,
+        limit: 0,
+        versions: Default::default(),
+    });
+    let r3 = s.map().layer(id).unwrap().dataset.features.iter().position(|f| f.id == 3).unwrap();
+    s.map_mut().layer_mut(id).unwrap().selection = vec![r3];
+    s.active_layer = Some(id);
+    s.run("edit.delete", &json!({})).unwrap();
+    s.run("edit.addFeature", &json!({"layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]}})).unwrap();
+    let ids: Vec<u64> = s.map().layer(id).unwrap().dataset.features.iter().map(|f| f.id).collect();
+    assert!(!ids.contains(&3), "a new feature must not take the GeoPackage key it deleted: {ids:?}");
+    assert!(ids.iter().any(|&k| k > 3), "{ids:?}");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn geopackage_discard_refreshes_renamed_key_and_geometry() {
