@@ -17153,6 +17153,13 @@ fn outline_commands_indent_and_outdent_one_level_in_one_step() {
     assert!(s.run("group.setParent", &json!({"group": "G", "parent": "L7"})).unwrap_err().contains("levels"));
     s.run("group.setParent", &json!({"group": "G", "parent": "L5", "before": null})).unwrap();
     assert_eq!(s.map().group_depth(g), 6);
+    // A group with no layers put at the end of a level goes after the others there.
+    s.run("group.add", &json!({"name": "E1"})).unwrap();
+    s.run("group.add", &json!({"name": "E2"})).unwrap();
+    let (e1, e2) = (group_named(&s, "E1"), group_named(&s, "E2"));
+    s.run("group.setParent", &json!({"group": "E1", "parent": null, "before": null})).unwrap();
+    let top = s.map().outline(None);
+    assert_eq!(top.iter().rev().take(2).collect::<Vec<_>>(), [&rustgis_map::Outline::Group(e1), &rustgis_map::Outline::Group(e2)]);
 }
 
 #[test]

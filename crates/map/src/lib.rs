@@ -1701,8 +1701,15 @@ impl Map {
             }
         }
         if members.is_empty() {
-            // Nothing to place: a group with no layers lists at the end of its level.
+            // Nothing to place: a group with no layers lists at the end of its level, in the
+            // order of the map's groups; at the end (`before` none), after the others there.
             self.set_parent_of(group, parent);
+            if before.is_none()
+                && let Some(i) = self.groups.iter().position(|g| g.id == group)
+            {
+                let g = self.groups.remove(i);
+                self.groups.push(g);
+            }
             return Ok(());
         }
         let places = self.pin_tile_places();
