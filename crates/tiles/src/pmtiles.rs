@@ -1042,6 +1042,7 @@ pub(crate) mod tests {
             attribution: String::new(),
             layers: Vec::new(),
             style_layers: String::new(),
+            hidden_layers: Vec::new(),
         };
         let mut resolved = crate::source::resolve(&spec);
         for _ in 0..200 {

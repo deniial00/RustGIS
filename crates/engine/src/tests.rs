@@ -8316,6 +8316,106 @@ fn identify_reports_vector_tile_features() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A vector archive's source layers are listed by `map.tiles`; one switched off with
+/// `map.setTiles {hiddenLayers}` isn't identified, the setting undoes and is kept with the project,
+/// and a bad list is refused without changing anything.
+#[test]
+fn tile_source_layers_can_be_hidden() {
+    use crate::render::rustgis_tiles::{mvt, pmtiles};
+    let feature = |kind, geometry: Vec<Vec<[f32; 2]>>, name: &str| mvt::Feature {
+        id: None,
+        kind,
+        geometry,
+        props: vec![("name".into(), mvt::Value::String(name.into()))],
+    };
+    let park = feature(
+        mvt::GeomKind::Polygon,
+        vec![vec![[1024.0, 1024.0], [3072.0, 1024.0], [3072.0, 3072.0], [1024.0, 3072.0], [1024.0, 1024.0]]],
+        "Central",
+    );
+    // Across the park, through the middle of the world.
+    let road = feature(mvt::GeomKind::LineString, vec![vec![[0.0, 2048.0], [4096.0, 2048.0]]], "Equator Road");
+    let layer = |name: &str, f| mvt::Layer { name: name.into(), extent: 4096, features: vec![f] };
+    let tile = mvt::encode(&mvt::Tile { layers: vec![layer("parks", park), layer("roads", road)] });
+    let new = pmtiles::NewArchive {
+        tile_type: pmtiles::TileType::Mvt,
+        gzipped_tiles: false,
+        bounds: [-180.0, -85.0, 180.0, 85.0],
+        metadata: json!({"vector_layers": [{"id": "parks"}, {"id": "roads"}]}),
+    };
+    let dir = std::env::temp_dir().join(format!("rustgis-tile-source-layers-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("city.pmtiles");
+    std::fs::write(&path, pmtiles::write(vec![(0, 0, 0, tile)], &new).unwrap()).unwrap();
+
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    s.map_mut().camera.center = rustgis_geom::Coord::new(0.0, 0.0);
+    s.map_mut().camera.res = 2.0 * 20_037_508.342_789_244 / 256.0;
+    // The archive's header arrives in the background.
+    let mut listed = Value::Null;
+    for _ in 0..500 {
+        listed = s.run("map.tiles", &json!({})).unwrap()[0].clone();
+        if listed.get("sourceLayers").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(listed["sourceLayers"], json!(["parks", "roads"]), "{listed}");
+    assert!(listed.get("hiddenLayers").is_none());
+    let found = |s: &mut Session| -> Vec<String> {
+        // The tile arrives in the background too.
+        for _ in 0..500 {
+            let r = s.run("identify", &json!({"lon": 1.0, "lat": 0.0, "mode": "visible"})).unwrap();
+            if !r.is_null() {
+                let mut names: Vec<String> =
+                    r["results"].as_array().unwrap().iter().map(|x| x["sourceLayer"].as_str().unwrap_or_default().to_string()).collect();
+                names.sort();
+                return names;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Vec::new()
+    };
+    assert_eq!(found(&mut s), ["parks", "roads"]);
+    s.run("map.setTiles", &json!({"index": 0, "hiddenLayers": ["parks"]})).unwrap();
+    assert_eq!(s.map().tiles[0].hidden_layers, ["parks"]);
+    assert_eq!(s.run("map.tiles", &json!({})).unwrap()[0]["hiddenLayers"], json!(["parks"]));
+    assert_eq!(found(&mut s), ["roads"]);
+    // Undone, the park is back; redone, it's hidden again.
+    s.run("edit.undo", &json!({})).unwrap();
+    assert!(s.map().tiles[0].hidden_layers.is_empty());
+    assert_eq!(found(&mut s), ["parks", "roads"]);
+    s.run("edit.redo", &json!({})).unwrap();
+    assert_eq!(found(&mut s), ["roads"]);
+    // Kept with the project.
+    let text = serde_json::to_string(&s.project).unwrap();
+    assert!(text.contains(r#""hiddenLayers":["parks"]"#), "{text}");
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.openText", &json!({"text": text})).unwrap();
+    assert_eq!(reopened.map().tiles[0].hidden_layers, ["parks"]);
+    // A damaged entry in a project is dropped, not fatal.
+    let damaged = text.replace(r#""hiddenLayers":["parks"]"#, r#""hiddenLayers":[3,"parks",""]"#);
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.openText", &json!({"text": damaged})).unwrap();
+    assert_eq!(reopened.map().tiles[0].hidden_layers, ["parks"]);
+    // Bad lists, and a raster layer's, are refused and change nothing.
+    let too_many: Vec<String> = (0..=rustgis_map::tiles::MAX_SOURCE_LAYERS).map(|i| format!("l{i}")).collect();
+    for bad in [json!("parks"), json!([1]), json!({"parks": true}), json!(too_many)] {
+        assert!(s.run("map.setTiles", &json!({"index": 0, "hiddenLayers": bad, "opacity": 0.5})).is_err(), "{bad}");
+    }
+    assert_eq!((s.map().tiles[0].hidden_layers.clone(), s.map().tiles[0].opacity), (vec!["parks".to_string()], 1.0));
+    s.run("map.addTiles", &json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png", "name": "Imagery"})).unwrap();
+    assert!(s.run("map.setTiles", &json!({"name": "Imagery", "hiddenLayers": ["parks"]})).is_err());
+    // Each name once; null shows them all again.
+    s.run("map.setTiles", &json!({"name": "city", "hiddenLayers": ["roads", "parks", "roads"]})).unwrap();
+    let city = s.map().tiles.iter().position(|t| t.name == "city").unwrap();
+    assert_eq!(s.map().tiles[city].hidden_layers, ["parks", "roads"]);
+    s.run("map.setTiles", &json!({"name": "city", "hiddenLayers": null})).unwrap();
+    assert!(s.map().tiles[city].hidden_layers.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A tile-less PMTiles archive (an empty root directory) whose header gives these bounds
 /// (west, south, east, north).
 fn empty_pmtiles(bounds: [f64; 4]) -> Vec<u8> {

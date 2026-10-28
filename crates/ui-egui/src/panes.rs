@@ -1552,15 +1552,23 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reord
     active_outline(ui, r, picked, t);
     // Lined up with the layer rows' arrows, checkboxes, icons and names.
     let cy = r.min.y + 13.0;
-    // A WMS or WMTS layer's legend opens under it, as a feature layer's classes do.
+    // A WMS or WMTS layer's legend, a vector archive's source layers, open under it, as a feature
+    // layer's classes do.
     let has_legend = !tile.legends.is_empty();
+    let sources = rustgis_engine::render::tile_source_layers(tile).filter(|n| !n.is_empty());
+    let expands = has_legend || sources.is_some();
     let ar = Rect::from_center_size(pos2(r.min.x + 16.0, cy), vec2(14.0, 14.0));
-    if has_legend {
+    if expands {
         icons::paint(ui.painter(), ar, if tile.expanded { "chevron_down" } else { "chevron_right" }, t.text_dim, t.accent);
     }
-    let ar_resp = has_legend.then(|| {
+    let ar_resp = expands.then(|| {
         let r = ui.interact(hit(ar), egui::Id::unique(("tile_expand", i)), Sense::click());
-        let what = if tile.expanded { tl!("Hide legend") } else { tl!("Show legend") };
+        let what = match (tile.expanded, has_legend) {
+            (true, true) => tl!("Hide legend"),
+            (false, true) => tl!("Show legend"),
+            (true, false) => tl!("Hide source layers"),
+            (false, false) => tl!("Show source layers"),
+        };
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, what));
         r
     });
@@ -1644,10 +1652,42 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reord
     if has_legend && tile.expanded {
         crate::tilelegend::show(app, ui, i, tile, t);
     }
+    if let Some(names) = sources.filter(|_| tile.expanded)
+        && let Some(a) = source_layer_rows(ui, i, tile, &names, t)
+    {
+        action = Some(a);
+    }
     if let Some((cmd, p)) = action {
         let _ = app.run(cmd, p);
     }
     r
+}
+
+/// A vector archive's source layers under its row (tile layer `i`), each with its checkbox; a
+/// click switches one on or off (`map.setTiles` with the new `hiddenLayers`).
+fn source_layer_rows(ui: &mut Ui, i: usize, tile: &TileLayer, names: &[String], t: &Tokens) -> Option<(&'static str, Value)> {
+    let mut action = None;
+    for (k, name) in names.iter().enumerate() {
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+        let shown = !tile.hidden_layers.contains(name);
+        let cb = Rect::from_center_size(pos2(r.min.x + crate::tilelegend::INDENT + 7.0, r.center().y), vec2(14.0, 14.0));
+        let cb_resp = ui.interact(hit(cb), egui::Id::unique(("tile_source", i, k)), Sense::click());
+        cb_resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, shown, name));
+        visibility_box(ui, cb, shown, t);
+        let color = if shown && tile.draws() { t.text } else { t.text_disabled };
+        let x = cb.max.x + 8.0;
+        let clip = Rect::from_min_max(pos2(x, r.min.y), pos2(r.max.x - 8.0, r.max.y));
+        ui.painter().with_clip_rect(clip).text(pos2(x, r.center().y), Align2::LEFT_CENTER, name, regular(11.5), color);
+        if cb_resp.clicked() {
+            let hidden: Vec<&str> = if shown {
+                tile.hidden_layers.iter().map(String::as_str).chain([name.as_str()]).collect()
+            } else {
+                tile.hidden_layers.iter().map(String::as_str).filter(|h| h != name).collect()
+            };
+            action = Some(("map.setTiles", json!({"index": i, "hiddenLayers": hidden})));
+        }
+    }
+    action
 }
 
 /// The hit target of a row's 14-point arrow or box at `at`: wider, and the first line's full
@@ -6056,6 +6096,72 @@ mod tests {
         h.run_steps(2);
         assert_eq!(names(&h), ["Cities", "Rivers", "Lakes", "Depths", "Countries"]);
         assert!(y(&h, "Lakes") < y(&h, "Depths") && y(&h, "Depths") < y(&h, "Countries"));
+    }
+
+    /// A vector archive's source layers open under its row, each with a checkbox that switches
+    /// it off and on again (`map.setTiles` with `hiddenLayers`, an edit to undo).
+    #[test]
+    fn a_vector_archives_source_layers_open_under_it() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        use rustgis_engine::render::rustgis_tiles::{mvt, pmtiles};
+        let new = pmtiles::NewArchive {
+            tile_type: pmtiles::TileType::Mvt,
+            gzipped_tiles: false,
+            bounds: [-180.0, -85.0, 180.0, 85.0],
+            metadata: json!({"vector_layers": [{"id": "water"}, {"id": "roads"}]}),
+        };
+        let dir = std::env::temp_dir().join(format!("rustgis-ui-source-layers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("town.pmtiles");
+        std::fs::write(&path, pmtiles::write(vec![(0, 0, 0, mvt::encode(&mvt::Tile::default()))], &new).unwrap()).unwrap();
+        let mut app = RustGisApp::with_sample();
+        for c in ["Cities", "Countries"] {
+            app.run("layer.expand", json!({"layer": c, "on": false})).unwrap();
+        }
+        app.run("layer.addData", json!({"path": path.display().to_string()})).unwrap();
+        // The archive's header arrives in the background.
+        for _ in 0..500 {
+            if rustgis_engine::render::tile_source_layers(&app.session.map().tiles[0]).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_max_steps(64).build_ui_state(
+            |ui, app: &mut RustGisApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(4);
+        assert!(h.query_by_role_and_label(egui::Role::CheckBox, "roads").is_none(), "closed at first");
+        h.get_by_label("Show source layers").click();
+        h.run_steps(4);
+        assert!(h.state().session.map().tiles[0].expanded);
+        let ticked = |h: &egui_kittest::Harness<'_, RustGisApp>, name: &str| {
+            h.get_by_role_and_label(egui::Role::CheckBox, name).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+        };
+        assert!(ticked(&h, "water") && ticked(&h, "roads"));
+        // Listed under the archive's row, in the archive's order.
+        let (row, water, roads) = (
+            h.get_by_label("town").rect(),
+            h.get_by_role_and_label(egui::Role::CheckBox, "water").rect(),
+            h.get_by_role_and_label(egui::Role::CheckBox, "roads").rect(),
+        );
+        assert!(row.max.y <= water.min.y && water.max.y <= roads.min.y, "{row:?} {water:?} {roads:?}");
+        h.get_by_role_and_label(egui::Role::CheckBox, "roads").click();
+        h.run_steps(4);
+        assert_eq!(h.state().session.map().tiles[0].hidden_layers, ["roads"]);
+        assert!(ticked(&h, "water") && !ticked(&h, "roads"));
+        assert_eq!(h.state().session.undo_label(), Some("Tile Layer Properties"));
+        h.get_by_role_and_label(egui::Role::CheckBox, "roads").click();
+        h.run_steps(4);
+        assert!(h.state().session.map().tiles[0].hidden_layers.is_empty());
+        h.get_by_label("Hide source layers").click();
+        h.run_steps(4);
+        assert!(h.query_by_role_and_label(egui::Role::CheckBox, "roads").is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A tile layer's row is picked with a click, as a layer's is (the Selected in Layers pop-up

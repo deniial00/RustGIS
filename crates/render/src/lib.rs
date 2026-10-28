@@ -32,7 +32,7 @@ mod tiles;
 pub use tiles::{Live, live as live_tiles};
 
 pub use rustgis_tiles;
-pub use tiles::{spec as tile_spec, style_view};
+pub use tiles::{source_layers as tile_source_layers, spec as tile_spec, style_view};
 
 /// Natural Earth 1:110m sample data (public domain), fetched by `build.rs` from rustgis-assets.
 pub mod sample_data {
