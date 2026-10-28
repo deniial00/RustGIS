@@ -147,6 +147,123 @@ fn geopackage_edit_dialogs_target_numeric_ids_with_duplicate_names() {
     assert_eq!(h.state().dialogs.gpkg_layer, Some(upper), "a non-editable active layer falls back to the first editable ID");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn write_dialog_gpkg(path: &std::path::Path) {
+    use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value, raster::Crs, source::gpkg};
+    let mut data = Dataset::new("roads", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    for x in [0.0, 1.0, 2.0] {
+        data.push(Some(Geometry::Point(Coord::new(x, 20.0))), vec![Value::Text("original".into())]);
+    }
+    gpkg::write_in(&data, path, Crs::LonLat).unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_edit_dialogs_refuse_map_and_project_identity_changes() {
+    use rustgis_engine::data::{Value, source::gpkg::edit::EditTable};
+    for project_switch in [false, true] {
+        for (dialog, button) in [("gpkgSave", "Save"), ("gpkgDiscard", "Discard")] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("a.gpkg");
+            let b = dir.path().join("b.gpkg");
+            write_dialog_gpkg(&a);
+            write_dialog_gpkg(&b);
+            let mut h = harness();
+            h.state_mut().run("map.new", json!({"name": "Editable A"})).unwrap();
+            let id = h.state_mut().run("gpkg.addLayer", json!({"path": a, "table": "roads", "name": "R"})).unwrap()["layer"]
+                .as_u64()
+                .unwrap() as u32;
+            h.state_mut().run("edit.enable", json!({"on": true})).unwrap();
+            h.state_mut().run("edit.setValue", json!({"layer": id, "row": 0, "field": "name", "value": "A pending"})).unwrap();
+            let project = dir.path().join("other.rgis");
+            if project_switch {
+                // Same map index, map name and layer ID: only the opened-project generation differs.
+                let mut other = h.state().session.project.clone();
+                let index = other.active_map;
+                let layer = other.maps[index].layer_mut(id).unwrap();
+                layer.gpkg.as_mut().unwrap().path = b.to_string_lossy().into_owned();
+                layer.dataset.features[0].attrs[0] = Value::Text("B pending".into());
+                let mut session = rustgis_engine::Session::new(other);
+                session.run("project.saveAs", &json!({"path": project})).unwrap();
+            } else {
+                h.state_mut().run("map.new", json!({"name": "Editable B"})).unwrap();
+                let other_id = h.state_mut().run("gpkg.addLayer", json!({"path": b, "table": "roads", "name": "R"})).unwrap()["layer"]
+                    .as_u64()
+                    .unwrap() as u32;
+                assert_eq!(id, other_id, "layer IDs collide across maps");
+                h.state_mut().run("edit.enable", json!({"on": true})).unwrap();
+                h.state_mut().run("edit.setValue", json!({"layer": id, "row": 0, "field": "name", "value": "B pending"})).unwrap();
+                h.state_mut().run("map.activate", json!({"name": "Editable A"})).unwrap();
+            }
+            h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+            h.run_steps(3);
+            assert_eq!(h.state().dialogs.list[4], a.to_string_lossy());
+            if project_switch {
+                h.state_mut().run("project.open", json!({"path": project})).unwrap();
+            } else {
+                h.state_mut().run("map.activate", json!({"name": "Editable B"})).unwrap();
+            }
+            h.run_steps(3);
+            assert!(h.state().dialogs.list.is_empty(), "the old source preview must disappear");
+            h.get_by_role_and_label(egui::accesskit::Role::Button, button).click();
+            h.run_steps(3);
+            assert_eq!(h.state().dialogs.open, Some(dialog));
+            assert!(h.state().dialogs.error.is_some());
+            assert_eq!(h.state().session.map().layer(id).unwrap().dataset.features[0].attrs[0], Value::Text("B pending".into()));
+            assert_eq!(h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap()["updates"], 1);
+            for path in [&a, &b] {
+                let stored = EditTable::open(path, "roads").unwrap().read_editable(10).unwrap();
+                assert_eq!(stored.features[0].attrs[0], Value::Text("original".into()), "{project_switch}: {button}: {path:?}");
+            }
+            h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+            h.run_steps(3);
+            assert_eq!(h.state().dialogs.list[4], b.to_string_lossy(), "reopening targets the current owner");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_load_dialog_rejects_fractional_row_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rows.gpkg");
+    write_dialog_gpkg(&path);
+    let mut h = harness();
+    h.state_mut().run("ui.dialog", json!({"name": "gpkgAddLayer"})).unwrap();
+    h.state_mut().dialogs.a = path.to_string_lossy().into_owned();
+    h.state_mut().dialogs.c = "roads".into();
+    for input in ["1.5", "0.5", "-1", "1,5", "1,,000", "12,34"] {
+        h.state_mut().dialogs.e = input.into();
+        h.run_steps(3);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Load").click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.open, Some("gpkgAddLayer"));
+        assert!(h.state().dialogs.error.is_some());
+        assert!(h.state().session.map().layers.iter().all(|l| l.gpkg.is_none()));
+    }
+    h.state_mut().dialogs.e = "1".into();
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Load").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
+    let layer = h.state().session.map().layers.iter().find(|l| l.gpkg.is_some()).unwrap();
+    assert_eq!(layer.dataset.features.len(), 1);
+    assert_eq!(
+        layer.dataset.features[0].geometry,
+        Some(rustgis_engine::data::Geometry::Point(rustgis_engine::data::Coord::new(0.0, 20.0)))
+    );
+    h.state_mut().run("ui.dialog", json!({"name": "gpkgAddLayer"})).unwrap();
+    h.state_mut().dialogs.a = path.to_string_lossy().into_owned();
+    h.state_mut().dialogs.c = "roads".into();
+    h.state_mut().dialogs.e = "1,000".into();
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Load").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
+    let layer = h.state().session.map().layers.iter().find(|l| l.gpkg.is_some()).unwrap();
+    assert_eq!(layer.dataset.features.len(), 3, "valid thousands grouping must still load all available rows");
+}
+
 /// Both No Fill controls preserve unique-value styling and undo, and stay hidden for points.
 #[test]
 fn polygon_no_fill_is_reachable_from_the_pane_and_the_ribbon() {
