@@ -231,6 +231,7 @@ impl EditTable {
 
         let table = quote(self.table());
         let pk = quote(self.key());
+        let mut spatial_changed = !edits.inserts.is_empty() || !edits.deletes.is_empty();
         for (f, _) in &edits.updates {
             let row = current.get(&f.id.cast_signed()).ok_or_else(|| self.shape_error())?;
             let mut sets = Vec::new();
@@ -246,6 +247,7 @@ impl EditTable {
             }
             let old = ValueRef::from(row.get(geom).ok_or_else(|| self.shape_error())?);
             let geometry_changed = self.geometry(old).ok_or_else(|| self.shape_error())? != f.geometry;
+            spatial_changed |= geometry_changed;
             if geometry_changed {
                 let blob = self.geometry_blob(f.geometry.as_ref(), Some((f.id, old)))?;
                 sets.push(format!("{} = ?", quote(self.geometry_column())));
@@ -260,6 +262,7 @@ impl EditTable {
                 tx.execute(&format!("UPDATE {table} SET {} WHERE {pk} = ?", sets.join(", ")), params_from_iter(args)).map_err(err)? as u64;
             saved.updated += 1;
         }
+        drop(current);
         // Reserve the loaded baseline as well as live and historical keys. A deleted source row
         // can still be present in the layer, so SQLite's ordinary rowid allocation is not enough.
         let mut high_water = 0;
@@ -305,7 +308,6 @@ impl EditTable {
         for (k, _) in &edits.deletes {
             let deleted = tx.execute(&format!("DELETE FROM {table} WHERE {pk} = ?1"), [k.cast_signed()]).map_err(err)?;
             direct_changes += deleted as u64;
-            saved.deleted += deleted;
         }
         // Spatial/metadata repair must not itself trigger more feature writes after the snapshot.
         feature_writes.allowed.store(false, Ordering::Relaxed);
@@ -317,18 +319,20 @@ impl EditTable {
             .chain(edits.deletes.iter().map(|(k, _)| k.cast_signed()))
             .collect();
         let rows = self.fetch_rows(&tx, &columns, key, &keys)?;
-        let mut features = Vec::with_capacity(edits.updates.len() + edits.inserts.len());
+        saved.deleted = edits.deletes.iter().filter(|(k, _)| !rows.contains_key(&k.cast_signed())).count();
+        let mut features = Vec::with_capacity(edits.updates.len() + edits.inserts.len() + edits.deletes.len() - saved.deleted);
         let originals = edits
             .updates
             .iter()
-            .map(|(f, _)| (f, f.id.cast_signed()))
-            .chain(edits.inserts.iter().zip(&saved.inserted).map(|(f, (_, k))| (f, k.cast_signed())));
+            .map(|(f, _)| (Some(f), f.id.cast_signed()))
+            .chain(edits.inserts.iter().zip(&saved.inserted).map(|(f, (_, k))| (Some(f), k.cast_signed())))
+            .chain(edits.deletes.iter().filter(|(k, _)| rows.contains_key(&k.cast_signed())).map(|(k, _)| (None, k.cast_signed())));
         for (original, k) in originals {
             let row = rows.get(&k).ok_or_else(|| DataError::Format(format!("row {k}: it was removed while saving")))?;
             let geometry = self
                 .geometry(ValueRef::from(row.get(geom).ok_or_else(|| self.shape_error())?))
                 .ok_or_else(|| DataError::Format(format!("row {k}: its stored geometry can't be read, so nothing was saved")))?;
-            let mut feature = original.clone();
+            let mut feature = original.cloned().unwrap_or_else(|| Feature { id: k.cast_unsigned(), geometry: None, attrs: Vec::new() });
             feature.id = k.cast_unsigned();
             feature.geometry = geometry;
             feature.attrs.resize(fields.len(), Value::Null);
@@ -352,7 +356,6 @@ impl EditTable {
                     .transpose()?
                     .unwrap_or(Extent::EMPTY);
                 maintain_rtree(&tx, self.src.rtree.as_deref(), k, &extent)?;
-                written_extent = written_extent.union(&extent);
             }
         }
         let unknown_bounds: bool = tx
@@ -363,30 +366,23 @@ impl EditTable {
                 |r| r.get(0),
             )
             .map_err(err)?;
-        if unknown_bounds && rebuild {
+        if rebuild {
             let extent = (!written_extent.is_empty()).then_some(written_extent);
             tx.execute(
                 "UPDATE gpkg_contents SET min_x = ?2, min_y = ?3, max_x = ?4, max_y = ?5 WHERE lower(table_name) = lower(?1)",
                 params![self.table(), extent.map(|e| e.min_x), extent.map(|e| e.min_y), extent.map(|e| e.max_x), extent.map(|e| e.max_y)],
             )
             .map_err(err)?;
-        } else if unknown_bounds {
-            // Unknown bounds must include untouched rows too. One aggregate scan, in native CRS.
-            let geom = quote(self.geometry_column());
+        } else if spatial_changed || unknown_bounds {
+            // Keep untouched unreadable rows and their index entries; bounds cover readable geometry.
+            let geometry = quote(self.geometry_column());
             tx.execute(
                 &format!(
                     "UPDATE gpkg_contents SET (min_x, min_y, max_x, max_y) =
-                     (SELECT min(ST_MinX({geom})), min(ST_MinY({geom})), max(ST_MaxX({geom})), max(ST_MaxY({geom})) FROM {table})
+                     (SELECT min(ST_MinX({geometry})), min(ST_MinY({geometry})), max(ST_MaxX({geometry})), max(ST_MaxY({geometry})) FROM {table})
                      WHERE lower(table_name) = lower(?1)"
                 ),
                 [self.table()],
-            )
-            .map_err(err)?;
-        } else if !written_extent.is_empty() {
-            tx.execute(
-                "UPDATE gpkg_contents SET min_x = min(min_x, ?2), min_y = min(min_y, ?3), max_x = max(max_x, ?4), max_y = max(max_y, ?5)
-                 WHERE lower(table_name) = lower(?1)",
-                params![self.table(), written_extent.min_x, written_extent.min_y, written_extent.max_x, written_extent.max_y],
             )
             .map_err(err)?;
         }
@@ -870,7 +866,7 @@ mod tests {
             let bounds: (f64, f64, f64, f64) = conn
                 .query_row("SELECT min_x, min_y, max_x, max_y FROM gpkg_contents", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
                 .unwrap();
-            assert_eq!(bounds, (0.0, 0.0, 91.0, 3.0), "{coverage}");
+            assert_eq!(bounds, (60.0, 2.0, 91.0, 3.0), "{coverage}");
             conn.execute_batch(
                 "CREATE TRIGGER keep_deleted AFTER DELETE ON roads WHEN OLD.fid = 1 BEGIN
                    INSERT INTO roads (fid, geom, name) SELECT OLD.fid, geom, 'kept' FROM moves WHERE kind = 'delete';
@@ -878,12 +874,20 @@ mod tests {
             )
             .unwrap();
             let edits = Edits { deletes: saved.changes.versions, ..Default::default() };
-            table.save(&edits, &table.info().fields, [1, 2].into_iter(), &saved.revision).unwrap().unwrap();
+            let restored = table.save(&edits, &table.info().fields, [1, 2].into_iter(), &saved.revision).unwrap().unwrap();
+            assert_eq!(restored.changes.deleted, 1);
+            assert_eq!(restored.features[0].id, 1);
+            assert_eq!(restored.features[0].geometry, Some(line(40.0)));
+            assert_eq!(restored.features[0].attrs[0], Value::Text("kept".into()));
+            assert_eq!(restored.changes.versions, table.read_editable(MAX_EDITABLE).unwrap().versions);
             let index: (i64, f64, f64) =
                 conn.query_row("SELECT id, minx, maxx FROM rtree_roads_geom", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
             assert_eq!(index, (1, 40.0, 41.0), "{coverage}");
             assert_eq!(conn.query_row("SELECT count(*) FROM rtree_roads_geom", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-            assert_eq!(conn.query_row("SELECT max_x FROM gpkg_contents", [], |r| r.get::<_, f64>(0)).unwrap(), 91.0);
+            let bounds: (f64, f64, f64, f64) = conn
+                .query_row("SELECT min_x, min_y, max_x, max_y FROM gpkg_contents", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap();
+            assert_eq!(bounds, (40.0, 2.0, 41.0, 3.0), "{coverage}");
         }
     }
 
@@ -935,7 +939,10 @@ mod tests {
                 let batch = source.read(&Request { extent: Some(Extent::new(x, 1.0, x + 0.1, 4.0)), limit: 100 }).unwrap();
                 assert_eq!(batch.features.iter().map(|f| f.id).collect::<Vec<_>>(), expected, "indexed={indexed}");
             }
-            assert_eq!(conn.query_row("SELECT max_x FROM gpkg_contents", [], |r| r.get::<_, f64>(0)).unwrap(), 61.0);
+            let bounds: (f64, f64, f64, f64) = conn
+                .query_row("SELECT min_x, min_y, max_x, max_y FROM gpkg_contents", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap();
+            assert_eq!(bounds, (1.0, 2.0, 61.0, 3.0), "indexed={indexed}");
             if indexed {
                 let keys = conn
                     .prepare("SELECT id FROM rtree_roads_geom ORDER BY id")
@@ -947,6 +954,82 @@ mod tests {
                 assert_eq!(keys, vec![1, 2, 7]);
             }
         }
+    }
+
+    #[test]
+    fn gpkg_bounds_shrink_on_geometry_edits_and_deletes_and_clear_when_empty() {
+        let (_dir, path) = fixture();
+        let conn = Connection::open(&path).unwrap();
+        let g = line(30.0);
+        conn.execute("INSERT INTO roads (fid, geom) VALUES (2, ?1)", [header_blob(&wkb::encode_single(&g).unwrap(), &g.extent(), 4326)])
+            .unwrap();
+        conn.execute("UPDATE gpkg_contents SET min_x=-100, min_y=-100, max_x=100, max_y=100", []).unwrap();
+        let bounds = || {
+            conn.query_row("SELECT min_x,min_y,max_x,max_y FROM gpkg_contents", [], |r| {
+                Ok((r.get::<_, Option<f64>>(0)?, r.get::<_, Option<f64>>(1)?, r.get::<_, Option<f64>>(2)?, r.get::<_, Option<f64>>(3)?))
+            })
+            .unwrap()
+        };
+        let table = EditTable::open(&path, "roads").unwrap();
+        let read = table.read_editable(MAX_EDITABLE).unwrap();
+        let mut moved = read.features[1].clone();
+        moved.geometry = Some(line(-10.0));
+        let edits = Edits { updates: vec![(moved, read.versions[1].1)], ..Default::default() };
+        table.save(&edits, &table.info().fields, [1, 2].into_iter(), &read.revision).unwrap().unwrap();
+        assert_eq!(bounds(), (Some(-10.0), Some(2.0), Some(2.0), Some(3.0)));
+        for (key, expected) in [(2, (Some(1.0), Some(2.0), Some(2.0), Some(3.0))), (1, (None, None, None, None))] {
+            let read = table.read_editable(MAX_EDITABLE).unwrap();
+            let version = read.versions.iter().find(|(id, _)| *id == key).unwrap().1;
+            let edits = Edits { deletes: vec![(key, version)], ..Default::default() };
+            let saved = table.save(&edits, &table.info().fields, [1, 2].into_iter(), &read.revision).unwrap().unwrap();
+            assert_eq!(saved.changes.deleted, 1);
+            assert_eq!(bounds(), expected);
+        }
+        assert_eq!(conn.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn gpkg_unreadable_untouched_geometry_refuses_trigger_rebuild_without_partial_writes() {
+        let (_dir, path) = fixture();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO roads (fid, geom, name, lanes) VALUES (2,x'00','unreadable',2);
+             CREATE VIRTUAL TABLE rtree_roads_geom USING rtree(id,minx,maxx,miny,maxy);
+             INSERT INTO rtree_roads_geom VALUES(1,1,2,2,3),(2,5,6,2,3);
+             CREATE TRIGGER modify_other AFTER UPDATE OF name ON roads WHEN NEW.fid=1
+             BEGIN UPDATE roads SET lanes=7 WHERE fid=2; END;",
+        )
+        .unwrap();
+        let index = || {
+            conn.prepare("SELECT id,minx,maxx,miny,maxy FROM rtree_roads_geom ORDER BY id")
+                .unwrap()
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before_index = index();
+        let table = EditTable::open(&path, "roads").unwrap();
+        let read = table.read_editable(MAX_EDITABLE).unwrap();
+        assert_eq!(read.skipped, 1);
+        let mut feature = read.features[0].clone();
+        feature.attrs[0] = Value::Text("must roll back".into());
+        let edits = Edits { updates: vec![(feature, read.versions[0].1)], ..Default::default() };
+        let error = table.save(&edits, &table.info().fields, [1].into_iter(), &read.revision).unwrap_err();
+        assert!(error.to_string().contains("stored geometry can't be read"), "{error}");
+        let after = table.read_editable(MAX_EDITABLE).unwrap();
+        assert_eq!(after.features, read.features);
+        assert_eq!(after.versions, read.versions);
+        assert_eq!(after.revision, read.revision);
+        assert_eq!(index(), before_index);
+        let bad: (Vec<u8>, i64) = conn.query_row("SELECT geom, lanes FROM roads WHERE fid=2", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(bad, (vec![0], 2));
+        let bounds: (f64, f64, f64, f64) = conn
+            .query_row("SELECT min_x,min_y,max_x,max_y FROM gpkg_contents", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        assert_eq!(bounds, (0.0, 0.0, 2.0, 3.0));
     }
 
     #[test]

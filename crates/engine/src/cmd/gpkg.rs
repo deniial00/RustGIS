@@ -198,6 +198,12 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
                     *feature = row;
                 }
             }
+            for (key, _) in &edits.deletes {
+                if let Some(row) = stored.remove(key) {
+                    l.dataset.features.push(row);
+                    geometry_changed = true;
+                }
+            }
             if geometry_changed {
                 l.touch_geometry();
             }

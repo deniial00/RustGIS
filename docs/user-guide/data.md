@@ -273,8 +273,10 @@ connect or save at all.
 On the desktop, **Home › Add › Add Data › Edit GeoPackage Table…** (`gpkg.addLayer`) loads one
 feature table of an existing local `.gpkg` for editing. Choose its table with **List Tables**
 when the file has several. The table needs one `INTEGER PRIMARY KEY`. At most 100,000 rows
-are loaded; **Most rows** can lower that limit. Rows outside that load, including rows with
-unreadable geometry, are left untouched when saving.
+are loaded; **Most rows** can lower that limit. Whole numbers may use comma-grouped thousands
+(for example, `1,000`); fractional values are rejected. RustGIS does not
+directly edit rows outside that load, including rows with unreadable geometry. File-owned
+triggers can change other rows.
 
 **Edit › Manage Edits › Save to GeoPackage…** (`gpkg.saveEdits`) writes pending inserts, updates
 and deletes to that table in one SQLite transaction. If any row you changed or deleted has
@@ -282,7 +284,8 @@ changed or disappeared in the file since it was loaded, nothing is saved. A cons
 trigger failure also rolls everything back; pending edits remain in the layer. New features
 get source-assigned keys that cannot alias loaded rows, and unrelated columns and tables remain
 intact. The saved rows are read back within the transaction, so the layer keeps values assigned
-by defaults and triggers before it starts tracking its next edits.
+by defaults and triggers before it starts tracking its next edits. If a DELETE trigger recreates
+a target row, that stored row reappears in the layer and is not counted as deleted.
 
 New-feature saves also check the table's persisted `last_change` revision. If it changed since
 the layer was loaded, the save is refused rather than risking duplicate inserts from an older
@@ -290,10 +293,13 @@ project or an undone save reopened in another session. Pending edits remain avai
 Discard Edits reloads the source and drops those pending edits. Identical feature values are not
 used to guess whether a new row was saved before.
 
-Spatial indexes and bounds use the final stored geometry after table triggers run. A trigger
-that can write other feature rows requires a whole-table spatial rebuild in the transaction.
-Metadata or index-repair triggers that would change features after that final snapshot are refused,
-with the transaction rolled back.
+Spatial indexes use the final stored geometry after table triggers run. Bounds are refreshed
+from the whole table's readable native extents after inserts, geometry edits or deletes; they
+can shrink, and become NULL when no readable nonempty geometry remains. Attribute-only saves
+keep known bounds unless a trigger writes feature rows. Such trigger writes require a whole-table
+spatial rebuild in the transaction; unreadable nonempty geometry makes that rebuild refuse the
+entire save rather than guess its index coverage. Metadata or index-repair triggers that would
+change features after the final snapshot are also refused, with the transaction rolled back.
 
 **Discard GeoPackage Edits…** (`gpkg.discardEdits`) reloads the scoped rows as they are in the
 file now, including renamed columns and its current geometry type and coordinate system; Undo
@@ -302,6 +308,8 @@ default. Saving refuses a changed source SRS until the layer is reloaded.
 Undoing a save does not undo file writes: Redo or Discard Edits is needed before saving again.
 Saving the project keeps pending edits in the project only; exporting writes a new file rather
 than changing this table.
+Save and Discard dialogs remain bound to the project and map where they opened. After switching
+maps or projects, reopen the dialog for the intended layer; confirmation cannot retarget another file.
 Feature-less project templates retain the layer's schema and styling, but no source-edit binding:
 opening a template cannot turn its absent features into source-row deletions.
 

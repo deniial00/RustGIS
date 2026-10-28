@@ -18864,6 +18864,45 @@ fn assert_gpkg_regression_clean(s: &mut Session) {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn geopackage_delete_trigger_restored_rows_rejoin_the_saved_baseline() {
+    use rustgis_data::{Coord, Geometry, Value};
+    let fixture = GpkgRegressionFixture::new("restored-delete");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER restore_deleted AFTER DELETE ON roads WHEN OLD.fid=1 BEGIN
+         INSERT INTO roads(fid,geom,name,lanes) VALUES(OLD.fid,OLD.geom,'restored',9); END;",
+    )
+    .unwrap();
+    let mut s = fixture.session();
+    s.run("select.rows", &json!({"layer":"R","rows":[0,1]})).unwrap();
+    s.run("edit.delete", &json!({})).unwrap();
+    let result = s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap();
+    assert_eq!(result["deleted"], 1, "only key 2 remained deleted after triggers");
+    let layer = s.map().layer_by_name("R").unwrap();
+    let mut keys: Vec<_> = layer.dataset.features.iter().map(|f| f.id).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec![1, 3]);
+    let row = layer.dataset.features.iter().position(|f| f.id == 1).unwrap();
+    assert_eq!(layer.dataset.value(row, layer.dataset.field_index("name").unwrap()), &Value::Text("restored".into()));
+    assert_eq!(layer.dataset.value(row, layer.dataset.field_index("lanes").unwrap()), &Value::Int(9));
+    assert_eq!(layer.dataset.features[row].geometry, Some(Geometry::Point(Coord::new(1.0, 20.0))));
+    assert_gpkg_regression_clean(&mut s);
+    s.run("edit.setValue", &json!({"layer":"R","row":row,"field":"name","value":"next"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap()["updated"], 1);
+    let stored: (String, i64) = db.query_row("SELECT name,lanes FROM roads WHERE fid=1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(stored, ("next".into(), 9));
+    assert_eq!(db.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_gpkg_regression_clean(&mut s);
+    let project = fixture.dir.join("restored.rgis");
+    s.run("project.saveAs", &json!({"path":project})).unwrap();
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.open", &json!({"path":project})).unwrap();
+    assert_gpkg_regression_clean(&mut reopened);
+    assert_eq!(reopened.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap()["saved"], false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn geopackage_template_drops_edit_binding() {
     let fixture = GpkgRegressionFixture::new("template");
     let db = rusqlite::Connection::open(fixture.path()).unwrap();
