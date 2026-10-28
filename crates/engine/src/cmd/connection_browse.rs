@@ -5,6 +5,7 @@
 //! `connection.test`: `probe` names the address a level reads, the app fetches it and asks again
 //! with the `answer`. Without an answer, the command line and the assistant read it themselves.
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 
@@ -13,7 +14,7 @@ use crate::connections::{Connection, DESKTOP_ONLY};
 use crate::render::rustgis_tiles::{address, s3, stac};
 use crate::{CmdResult, Session};
 
-/// The most children of a non-database level; databases list all schemas and their tables.
+/// The most children of a non-database level; database levels use the provider's catalog.
 const MAX_CHILDREN: usize = 500;
 /// The items of a STAC collection that are listed.
 const ITEMS: usize = 20;
@@ -70,7 +71,13 @@ fn level(c: &Connection, node: &str) -> Result<Level, String> {
         if !matches!(kind, "postgres" | "mysql" | "sqlserver") || schema.is_empty() {
             return Err(not_a_node());
         }
-        return Ok(Level::DatabaseSchema { schema: schema.to_string() });
+        let schema = URL_SAFE_NO_PAD
+            .decode(schema)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(not_a_node)?;
+        return Ok(Level::DatabaseSchema { schema });
     }
     if let Some(id) = node.strip_prefix("collection:") {
         if kind != "stac" || id.is_empty() {
@@ -261,7 +268,9 @@ fn schemas(tables: &[Value]) -> Found {
         children: names
             .into_iter()
             .map(|schema| {
-                let node = format!("schema:{schema}");
+                let mut node = String::with_capacity(7 + schema.len().div_ceil(3) * 4);
+                node.push_str("schema:");
+                URL_SAFE_NO_PAD.encode_string(schema, &mut node);
                 json!({"key": node, "node": node, "name": schema, "what": "schema"})
             })
             .collect(),
@@ -604,6 +613,35 @@ mod tests {
         assert_eq!(public.matched, None);
         assert_eq!(public.children[0]["name"], "t_0001");
         assert_eq!(public.children.last().unwrap()["add"]["params"]["layer"], "public.t_0832");
+    }
+
+    #[test]
+    fn schema_nodes_round_trip_unusual_identifiers() {
+        for name in ["line\nbreak", "tab\tname", "quote\"\\:name", "réseau\u{85}", "日本語"] {
+            let tables = [table(name, "roads"), table("other", "parks")];
+            let root = super::schemas(&tables);
+            let child = root.children.iter().find(|child| child["name"] == name).unwrap();
+            let node = child["node"].as_str().unwrap();
+            assert!(super::node_ok(node), "generated schema node must pass command validation: {node:?}");
+            for kind in ["postgres", "mysql", "sqlserver"] {
+                let connection = crate::connections::Connection { kind: kind.into(), ..Default::default() };
+                let super::Level::DatabaseSchema { schema } = super::level(&connection, node).unwrap() else {
+                    panic!("schema node must select a database schema");
+                };
+                assert_eq!(schema, name);
+                let found = super::schema_tables(&tables, &schema, "database");
+                assert_eq!(found.children.len(), 1);
+                assert_eq!(found.children[0]["add"]["params"]["layer"], format!("{name}.roads"));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_encoded_schema_nodes_are_rejected() {
+        let connection = crate::connections::Connection { kind: "postgres".into(), ..Default::default() };
+        for node in ["schema:", "schema:!", "schema:_w", "schema:YQ=="] {
+            assert!(super::level(&connection, node).is_err(), "{node}");
+        }
     }
 
     #[test]
