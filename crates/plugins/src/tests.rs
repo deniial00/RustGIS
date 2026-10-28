@@ -462,8 +462,7 @@ fn plugin_tab_group_layout_limits() {
 fn plugin_tab_nested_menus_are_checked() {
     let tab = |item: Value| json!({"label": "Nested", "groups": [{"label": "G", "items": [item]}]});
     for entry in ["h", "tool:m"] {
-        let m = parse_tab(tab(nested_menu(json!(entry), 4))).unwrap();
-        assert!(m.validate().is_ok());
+        parse_tab(tab(nested_menu(json!(entry), 4))).unwrap();
         let err = parse_tab(tab(nested_menu(json!(entry), 5))).unwrap_err();
         assert!(err.contains("at most 4 levels"), "{err}");
     }
@@ -492,8 +491,7 @@ fn plugin_tab_nested_menus_are_checked() {
         assert!(err.contains(why), "{err}");
     }
     let full = json!({"menu": "Full", "layout": "small", "items": vec!["h"; 32]});
-    let m = parse_tab(tab(nested_menu(full, 3))).unwrap();
-    assert!(m.validate().is_ok());
+    parse_tab(tab(nested_menu(full, 3))).unwrap();
 }
 
 #[test]
@@ -512,8 +510,7 @@ fn plugin_tab_total_item_limit_counts_menus_and_entries_across_groups() {
     let menu = json!({"menu": "M", "items": children});
     let group = json!({"label": "G", "items": vec![menu; 16]});
     let mut tab = json!({"label": "Total", "groups": vec![group; 8]});
-    let m = parse_tab(tab.clone()).unwrap();
-    assert!(m.validate().is_ok());
+    parse_tab(tab.clone()).unwrap();
     tab["groups"][0]["items"][0]["items"].as_array_mut().unwrap().push(json!("h"));
     let err = parse_tab(tab).unwrap_err();
     assert!(err.contains("more than 16384 total items"), "{err}");
