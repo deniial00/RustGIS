@@ -1266,7 +1266,12 @@ pub(crate) mod tests {
             }
         }
         // A hidden source layer is left out of the style: not picked, the others still are.
-        assert_eq!(crate::source::source_layers(spec.kind, &spec.url).unwrap(), ["parks", "roads", "pois", "plots"]);
+        assert_eq!(crate::source::source_layers(spec.kind, &spec.url, |_| true, 256).unwrap(), ["parks", "roads", "pois", "plots"]);
+        assert_eq!(
+            crate::source::source_layers(spec.kind, &spec.url, |n| n != "parks", 2).unwrap(),
+            ["roads", "pois"],
+            "what `keep` takes, at most `max`"
+        );
         let without_roads = Spec { hidden_layers: vec!["roads".into()], ..spec.clone() };
         let (x, y) = at(2048.0, 2048.0);
         assert_eq!(pick(&without_roads, x, y, m_per_px, 3.0, 10).len(), 1, "the park is still there");

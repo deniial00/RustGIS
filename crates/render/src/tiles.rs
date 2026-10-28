@@ -129,20 +129,17 @@ pub fn spec(t: &TileLayer) -> Spec {
     }
 }
 
-/// A vector PMTiles or MBTiles archive's source layers (`vector_layers`), in its order: those
-/// with a [name a tile layer keeps](rustgis_map::tiles::is_source_layer_name), at most
-/// [`MAX_SOURCE_LAYERS`](rustgis_map::tiles::MAX_SOURCE_LAYERS). `None` for other tile layers,
-/// and while the archive's header is on its way.
+/// A vector PMTiles or MBTiles archive's source layers (`vector_layers`), each once in its
+/// order: those with a [name a tile layer keeps](rustgis_map::tiles::is_source_layer_name), at
+/// most [`MAX_SOURCE_LAYERS`](rustgis_map::tiles::MAX_SOURCE_LAYERS). `None` for other tile
+/// layers, and while the archive's header is on its way.
 pub fn source_layers(t: &TileLayer) -> Option<Vec<String>> {
     let kind = match t.kind {
         TileKind::PmTiles => Kind::PmTiles,
         TileKind::MbTiles => Kind::MbTiles,
         _ => return None,
     };
-    let mut names = rustgis_tiles::source::source_layers(kind, &t.url)?;
-    names.retain(|n| rustgis_map::tiles::is_source_layer_name(n));
-    names.truncate(rustgis_map::tiles::MAX_SOURCE_LAYERS);
-    Some(names)
+    rustgis_tiles::source::source_layers(kind, &t.url, rustgis_map::tiles::is_source_layer_name, rustgis_map::tiles::MAX_SOURCE_LAYERS)
 }
 
 /// Where a MapLibre style layer's root properties place the map; `Ok(None)` while the style is

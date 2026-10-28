@@ -6108,7 +6108,8 @@ mod tests {
             tile_type: pmtiles::TileType::Mvt,
             gzipped_tiles: false,
             bounds: [-180.0, -85.0, 180.0, 85.0],
-            metadata: json!({"vector_layers": [{"id": "water"}, {"id": "roads"}]}),
+            // `water` twice: listed once.
+            metadata: json!({"vector_layers": [{"id": "water"}, {"id": "roads"}, {"id": "water"}]}),
         };
         let dir = std::env::temp_dir().join(format!("rustgis-ui-source-layers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -6143,6 +6144,7 @@ mod tests {
             h.get_by_role_and_label(egui::Role::CheckBox, name).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
         };
         assert!(ticked(&h, "water") && ticked(&h, "roads"));
+        assert_eq!(h.query_all_by_role_and_label(egui::Role::CheckBox, "water").count(), 1);
         // Listed under the archive's row, in the archive's order.
         let (row, water, roads) = (
             h.get_by_label("town").rect(),
