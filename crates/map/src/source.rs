@@ -161,11 +161,14 @@ pub struct GpkgEdit {
     /// Its INTEGER PRIMARY KEY column.
     pub key: String,
     pub geometry: String,
+    /// The source SRS when these rows were loaded.
+    pub srs_id: i64,
+    /// The table's durable revision, checked before saving pending inserts.
+    pub revision: String,
     pub writable: bool,
     #[serde(default)]
     pub limit: usize,
     /// Every column's stored fingerprint and the loaded feature's hash, by key.
-    #[serde(default)]
     pub versions: Versions,
 }
 

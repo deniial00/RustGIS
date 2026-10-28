@@ -18476,7 +18476,7 @@ impl GpkgRegressionFixture {
              INSERT INTO gpkg_spatial_ref_sys VALUES ('WGS 84', 4326, 'EPSG', 4326, '', '');
              CREATE TABLE gpkg_contents (table_name TEXT PRIMARY KEY, data_type TEXT, identifier TEXT,
                  description TEXT, last_change TEXT, min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE, srs_id INTEGER);
-             INSERT INTO gpkg_contents (table_name, data_type, srs_id) VALUES ('roads', 'features', 4326);
+             INSERT INTO gpkg_contents (table_name, data_type, srs_id, last_change) VALUES ('roads', 'features', 4326, '2000-01-01T00:00:00.000Z');
              CREATE TABLE gpkg_geometry_columns (table_name TEXT, column_name TEXT, geometry_type_name TEXT,
                  srs_id INTEGER, z TINYINT, m TINYINT);
              INSERT INTO gpkg_geometry_columns VALUES ('roads', 'geom', 'POINT', 4326, 0, 0);
@@ -18557,6 +18557,118 @@ fn geopackage_template_drops_edit_binding() {
     let error = restored.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap_err();
     assert!(error.contains("not a GeoPackage layer loaded for editing"), "{error}");
     assert_eq!(rows(), before, "saving a feature-less template must not delete or modify its original source");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_stale_project_insert_replay_is_refused() {
+    for undo_before_project_save in [false, true] {
+        let fixture = GpkgRegressionFixture::new("stale-insert");
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        let mut s = fixture.session();
+        let project = fixture.dir.join("pending.rgis");
+        s.run(
+            "edit.addFeature",
+            &json!({
+                "layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]},
+                "attributes": {"name": "one new row"}
+            }),
+        )
+        .unwrap();
+        if undo_before_project_save {
+            s.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap();
+            assert!(s.undo());
+            s.run("project.saveAs", &json!({"path": project})).unwrap();
+        } else {
+            s.run("project.saveAs", &json!({"path": project})).unwrap();
+            // Pending inserts from a project are safe before their source revision changes.
+            let mut fresh = Session::new(Project::default());
+            fresh.run("project.open", &json!({"path": project})).unwrap();
+            assert_eq!(fresh.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["inserted"], 1);
+        }
+        let mut reopened = Session::new(Project::default());
+        reopened.run("project.open", &json!({"path": project})).unwrap();
+        assert!(reopened.run("gpkg.saveEdits", &json!({"layer": "R"})).is_err());
+        assert_eq!(db.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+        assert_eq!(reopened.run("gpkg.pendingEdits", &json!({"layer": "R"})).unwrap()["inserts"], 1);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_project_requires_a_baseline_but_allows_an_empty_loaded_table() {
+    let fixture = GpkgRegressionFixture::new("required-baseline");
+    let mut s = fixture.session();
+    let project = fixture.dir.join("missing.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    saved["maps"][0]["layers"][0]["gpkg"].as_object_mut().unwrap().remove("versions");
+    std::fs::write(&project, serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert!(Session::new(Project::default()).run("project.open", &json!({"path": project})).is_err());
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM roads", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+
+    db.execute("DELETE FROM roads", []).unwrap();
+    let mut empty = Session::new(Project::default());
+    empty.run("gpkg.addLayer", &json!({"path": fixture.path(), "table": "roads", "name": "R"})).unwrap();
+    empty.map_mut().editing.settings.enabled = true;
+    empty
+        .run(
+            "edit.addFeature",
+            &json!({
+                "layer": "R", "geometry": {"type": "Point", "coordinates": [10, 20]}, "attributes": {"name": "first"}
+            }),
+        )
+        .unwrap();
+    empty.run("project.saveAs", &json!({"path": project})).unwrap();
+    let mut reopened = Session::new(Project::default());
+    reopened.run("project.open", &json!({"path": project})).unwrap();
+    assert_eq!(reopened.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["inserted"], 1);
+    assert_eq!(db.query_row("SELECT name FROM roads", [], |r| r.get::<_, String>(0)).unwrap(), "first");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_srs_change_refuses_attribute_save_until_discard() {
+    let fixture = GpkgRegressionFixture::new("changed-srs");
+    let mut s = fixture.session();
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let before: Vec<u8> = db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get(0)).unwrap();
+    db.execute("UPDATE gpkg_geometry_columns SET srs_id = 3857", []).unwrap();
+    s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "pending"})).unwrap();
+    assert!(s.run("gpkg.saveEdits", &json!({"layer": "R"})).is_err());
+    assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), before);
+    assert_eq!(db.query_row("SELECT name FROM roads WHERE fid = 1", [], |r| r.get::<_, String>(0)).unwrap(), "a");
+    assert_eq!(s.run("gpkg.pendingEdits", &json!({"layer": "R"})).unwrap()["updates"], 1);
+    s.run("gpkg.discardEdits", &json!({"layer": "R"})).unwrap();
+    s.run("edit.setValue", &json!({"layer": "R", "row": 0, "field": "name", "value": "after reload"})).unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["updated"], 1);
+    assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid = 1", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), before);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_discard_refreshes_geometry_family_and_visible_point_symbols() {
+    let fixture = GpkgRegressionFixture::new("changed-geometry-family");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch("UPDATE gpkg_geometry_columns SET geometry_type_name = 'LINESTRING'; UPDATE roads SET geom = NULL;").unwrap();
+    let mut s = fixture.session();
+    db.execute("UPDATE gpkg_geometry_columns SET geometry_type_name = 'POINT'", []).unwrap();
+    db.execute("UPDATE roads SET geom = ?1 WHERE fid = 1", [GpkgRegressionFixture::point_blob(10.0, 20.0)]).unwrap();
+    s.run("gpkg.discardEdits", &json!({"layer": "R"})).unwrap();
+    let layer = s.map().layer_by_name("R").unwrap();
+    assert_eq!(layer.geometry_type(), rustgis_data::GeometryType::Point);
+    assert!(layer.renderer.base_symbol().size > 0.0, "reloaded point features need visible markers");
+    s.run(
+        "edit.addFeature",
+        &json!({
+            "layer": "R", "geometry": {"type": "Point", "coordinates": [11, 21]}, "attributes": {"name": "new point"}
+        }),
+    )
+    .unwrap();
+    assert_eq!(s.run("gpkg.saveEdits", &json!({"layer": "R"})).unwrap()["inserted"], 1);
+    let stored: Vec<u8> = db.query_row("SELECT geom FROM roads WHERE name = 'new point'", [], |r| r.get(0)).unwrap();
+    assert_eq!(rustgis_data::wkb::decode(&stored[40..]), Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(11.0, 21.0))));
 }
 
 #[cfg(not(target_arch = "wasm32"))]

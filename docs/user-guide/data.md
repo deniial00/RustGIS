@@ -284,11 +284,24 @@ get source-assigned keys that cannot alias loaded rows, and unrelated columns an
 intact. The saved rows are read back within the transaction, so the layer keeps values assigned
 by defaults and triggers before it starts tracking its next edits.
 
+New-feature saves also check the table's persisted `last_change` revision. If it changed since
+the layer was loaded, the save is refused rather than risking duplicate inserts from an older
+project or an undone save reopened in another session. Pending edits remain available to export;
+Discard Edits reloads the source and drops those pending edits. Identical feature values are not
+used to guess whether a new row was saved before.
+
+Spatial indexes and bounds use the final stored geometry after table triggers run. A trigger
+that can write other feature rows requires a whole-table spatial rebuild in the transaction.
+Metadata or index-repair triggers that would change features after that final snapshot are refused,
+with the transaction rolled back.
+
 **Discard GeoPackage Edits…** (`gpkg.discardEdits`) reloads the scoped rows as they are in the
-file now, including renamed key and geometry columns; Undo restores the discarded layer edits.
-Undoing a save does not undo file writes:
-Redo or Discard Edits is needed before saving again. Saving the project keeps pending edits
-in the project only, while exporting writes a new file rather than changing this table.
+file now, including renamed columns and its current geometry type and coordinate system; Undo
+restores the discarded layer edits. A changed geometry family resets its renderer to a compatible
+default. Saving refuses a changed source SRS until the layer is reloaded.
+Undoing a save does not undo file writes: Redo or Discard Edits is needed before saving again.
+Saving the project keeps pending edits in the project only; exporting writes a new file rather
+than changing this table.
 Feature-less project templates retain the layer's schema and styling, but no source-edit binding:
 opening a template cannot turn its absent features into source-row deletions.
 

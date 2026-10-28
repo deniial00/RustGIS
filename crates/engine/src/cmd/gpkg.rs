@@ -113,6 +113,8 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
                 table: src.table().to_string(),
                 key: src.key().to_string(),
                 geometry: src.geometry_column().to_string(),
+                srs_id: src.srs_id(),
+                revision: editable.revision,
                 writable: editable.writable,
                 limit,
                 versions,
@@ -157,12 +159,15 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         }
         let err = |e: rustgis_data::DataError| format!("{name}: nothing was saved to {table}: {e}");
         let src = EditTable::open(path, table).map_err(err)?;
-        if !src.key().eq_ignore_ascii_case(&edit.key) || !src.geometry_column().eq_ignore_ascii_case(&edit.geometry) {
+        if !src.key().eq_ignore_ascii_case(&edit.key)
+            || !src.geometry_column().eq_ignore_ascii_case(&edit.geometry)
+            || src.srs_id() != edit.srs_id
+        {
             return Err(format!("{name}: {table} changed shape since it was loaded, so nothing was saved. Discard Edits loads it again"));
         }
         let rows = changes.insert_rows;
         let edits = rustgis_data::source::edits::Edits { updates: changes.updates, deletes: changes.deletes, inserts: changes.inserts };
-        let saved_rows = match src.save(&edits, &fields, edit.versions.iter().map(|(key, _)| key)).map_err(err)? {
+        let saved_rows = match src.save(&edits, &fields, edit.versions.iter().map(|(key, _)| key), &edit.revision).map_err(err)? {
             Ok(saved) => saved,
             Err(conflicts) => {
                 let mut said: Vec<String> = conflicts.iter().take(20).map(ToString::to_string).collect();
@@ -199,6 +204,7 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
             let baseline = versions_of(&l.dataset.features, &edit.versions, &versions);
             if let Some(g) = &mut l.gpkg {
                 g.versions = baseline;
+                g.revision = saved_rows.revision;
             }
         }
         s.saved_over.retain(rustgis_map::source::Versions::held_elsewhere);
@@ -250,6 +256,12 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
         let read = editable.versions.iter().copied().collect();
         let n = editable.features.len();
         let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
+        let geometry_type = src.info().geometry_type;
+        if l.dataset.geometry_type != geometry_type {
+            l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(geometry_type, id));
+        }
+        l.dataset.geometry_type = geometry_type;
+        l.dataset.crs = src.crs();
         l.dataset.fields = src.info().fields.clone();
         l.dataset.features = editable.features.into();
         l.selection.clear();
@@ -260,6 +272,8 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
             g.writable = editable.writable;
             g.key = src.key().to_string();
             g.geometry = src.geometry_column().to_string();
+            g.srs_id = src.srs_id();
+            g.revision = editable.revision;
         }
         s.notify(format!("{name}: edits discarded; {n} rows loaded again from {}", edit.table), false);
         Ok(json!({"features": n, "matched": editable.matched}))
