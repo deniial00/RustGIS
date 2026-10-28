@@ -565,17 +565,20 @@ databases). For non-database kinds, pass that response text as `answer` with the
 to parse it without a network request. Database kinds ignore `answer` and test through their
 driver. An anonymous S3 test needs at least one named bucket.
 
-`connection.browse` lists what a connection offers, a level at a time: the tables of a database
-(under their schemas), the layers of a service, the records of a catalogue with the services and
-files they link to, the collections of a STAC API and the items and assets of a collection (for a
-static STAC catalog, its catalogs, collections and items, each item opened for its assets), or
-the buckets, folders and files of an S3 connection. Each child has a `key`, a `name` and what it
-is (`what`); a child with a `node` is browsed by asking again with that `node`; one with `add`
-names the command and parameters that add it (`service.add`, `layer.addDatabase`,
-`stac.addAsset`, `layer.addUrl`). A level lists at most 500 children and says `truncated` when
-it left some out. Like `connection.test`, it reads the address itself on the desktop and the
-command line; with `probe: true` it returns the address to fetch, and the app passes what it
-fetched back as `answer` (and further `documents` when a service asks for them, as `next`).
+`connection.browse` lists what a connection offers, a level at a time: database roots list each
+schema containing geometry tables; opening a schema lists its geometry tables. Services list their
+layers, catalogues their records with the services and files they link to, STAC APIs their
+collections, items and assets (for a static STAC catalog, its catalogs, collections and items,
+each item opened for its assets), and S3 connections their buckets, folders and files. Each child
+has a `key`, a `name` and what it is (`what`); a child with a `node` is browsed by asking again with
+that `node`; one with
+`add` names the command and parameters that add it (`service.add`, `layer.addDatabase`,
+`stac.addAsset`, `layer.addUrl`). A database root lists each schema containing geometry tables;
+opening a schema lists all of its tables, including those beyond the former 500-table limit.
+Other levels list at most 500 children and say `truncated` when they leave some out. Like
+`connection.test`, it reads the address itself on the desktop and the command line; with
+`probe: true` it returns the address to fetch, and the app passes what it fetched back as `answer`
+(and further `documents` when a service asks for them, as `next`).
 Browsing never changes the project. When a saved database password turns out to be missing, or
 to have been saved for another address, the connection loses its **Saved password** marker; the
 stored entry itself is left for **Forget Saved Password**, an address edit or a removal to delete.
