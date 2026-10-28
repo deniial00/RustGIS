@@ -8341,7 +8341,8 @@ fn tile_source_layers_can_be_hidden() {
         tile_type: pmtiles::TileType::Mvt,
         gzipped_tiles: false,
         bounds: [-180.0, -85.0, 180.0, 85.0],
-        metadata: json!({"vector_layers": [{"id": "parks"}, {"id": "roads"}]}),
+        // A name no tile layer keeps (empty, too long) isn't listed.
+        metadata: json!({"vector_layers": [{"id": "parks"}, {"id": ""}, {"id": "x".repeat(300)}, {"id": "roads"}]}),
     };
     let dir = std::env::temp_dir().join(format!("rustgis-tile-source-layers-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

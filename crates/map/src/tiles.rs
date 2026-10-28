@@ -263,16 +263,16 @@ pub const MAX_SOURCE_LAYERS: usize = 256;
 /// The longest source layer name kept, in characters.
 const MAX_SOURCE_LAYER_NAME: usize = 256;
 
-/// Source layer names as a tile layer keeps them (as the archive spells them, spaces too): none
-/// empty or too long, each once, at most [`MAX_SOURCE_LAYERS`], sorted so the same set is the
-/// same list.
+/// Whether a source layer name is one a tile layer lists or hides: not empty, not too long.
+pub fn is_source_layer_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().count() <= MAX_SOURCE_LAYER_NAME
+}
+
+/// Source layer names as a tile layer keeps them (as the archive spells them, spaces too): each
+/// a [source layer name](is_source_layer_name), once, at most [`MAX_SOURCE_LAYERS`], sorted so
+/// the same set is the same list.
 pub fn checked_source_layers<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut kept: Vec<String> = names
-        .into_iter()
-        .filter(|n| !n.is_empty() && n.chars().count() <= MAX_SOURCE_LAYER_NAME)
-        .take(MAX_SOURCE_LAYERS)
-        .map(str::to_string)
-        .collect();
+    let mut kept: Vec<String> = names.into_iter().filter(|n| is_source_layer_name(n)).take(MAX_SOURCE_LAYERS).map(str::to_string).collect();
     kept.sort_unstable();
     kept.dedup();
     kept
