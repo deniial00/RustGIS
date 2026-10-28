@@ -1071,7 +1071,8 @@ fn plugin_small_ribbon_columns_and_nested_menus_preserve_actions() {
         {"kind": "text", "id": "marker", "label": "Compact panel marker", "text": "Panel is open"}
     ]});
     m["i18n"] = json!({"de": {
-        "Width Probe": "Eine besonders lange\nübersetzte Beschriftung für diese Schaltfläche"
+        "Width Probe": "Eine besonders lange\nübersetzte Beschriftung für diese Schaltfläche",
+        "Nested Tools": "Nested\nTools"
     }});
     m["tab"] = json!({"label": "Compact Tab", "groups": [
         {"label": "Compact controls", "layout": "small", "items": [
@@ -1085,7 +1086,7 @@ fn plugin_small_ribbon_columns_and_nested_menus_preserve_actions() {
         {"label": "Mixed controls", "items": [
             "h-large",
             {"menu": "Small Override", "layout": "small", "items": [
-                {"menu": "Nested Command", "items": ["e"]}
+                {"menu": "Nested\nCommand", "items": ["e"]}
             ]},
             {"menu": "Small Neighbor", "layout": "small", "items": ["h"]}
         ]}
@@ -1143,11 +1144,14 @@ fn plugin_small_ribbon_columns_and_nested_menus_preserve_actions() {
     assert_eq!(h.state().gp.tool, Some("plugin:ui-small/m"));
     h.get_by_label("Inherited Menu").click();
     h.run_steps(4);
-    h.get_by_label("Nested Tools").click();
+    let nested_tools = h.get_by_label("Nested Tools");
+    let submenu_height = nested_tools.rect().height();
+    nested_tools.click();
     h.run_steps(4);
     // Choose the popup row, not the identically named ribbon button.
     let nested_select = h.query_all_by_label("Compact Select").find(|n| n.rect().top() > inherited.bottom()).unwrap();
     assert!(nested_select.rect().height() < large.height(), "nested entries remain ordinary menu rows");
+    assert!((submenu_height - nested_select.rect().height()).abs() < 1.0, "translated submenu labels must stay on one standard-height row");
     nested_select.click();
     h.run_steps(2);
     assert_eq!(h.state().gp.tool, Some("plugin:ui-small/x"), "the nested leaf must activate its tool");

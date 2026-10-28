@@ -293,6 +293,7 @@ can hide it like any other. Declare it in `plugin.json`:
   Column widths follow the translated labels; manifests neither need nor support pixel widths.
   Layout affects ribbon triggers only: all entries and nested submenu triggers inside a
   popup remain standard menu rows, regardless of any nested `layout`.
+  Popup labels stay on one line: line breaks in labels or their translations become spaces.
 - A tab has 1 to 8 groups. A large group has 1 to 16 direct items; a small group has 1 to 48.
   Each menu has 1 to 32 direct items. Menus may nest up to 4 levels, counting the outer menu
   as level 1. Across the entire tab there may be at most 16,384 items, counting every

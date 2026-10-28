@@ -3306,7 +3306,13 @@ fn plugin_menu_items(
             ItemDecl::Entry(e) => plugin_entry(app, ui, m, lang, e, None),
             ItemDecl::Menu(menu) => {
                 let icon = if crate::icons::ALL.contains(&menu.icon.as_str()) { menu.icon.as_str() } else { "plugin" };
-                submenu_row(ui, icon, m.translate(lang, &menu.menu), |ui| plugin_menu_items(app, ui, m, lang, &menu.items));
+                let label = m.translate(lang, &menu.menu);
+                let label = if label.contains('\n') {
+                    std::borrow::Cow::Owned(label.replace('\n', " "))
+                } else {
+                    std::borrow::Cow::Borrowed(label)
+                };
+                submenu_row(ui, icon, &label, |ui| plugin_menu_items(app, ui, m, lang, &menu.items));
             }
         });
     }
