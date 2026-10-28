@@ -1,8 +1,11 @@
 name: Qt segfault stress
 
-# Temporary investigation of opengeos/RustGIS#1113: the Qt-enabled Python 3.12 job segfaults in
-# about 2% of runs. Runs the same suite many times with the original Qt fixtures and with the
-# fixture change, on the same runner image, and keeps a native backtrace of every crash.
+# Temporary verification for opengeos/RustGIS#1113. The crashing thread in the CI cores is
+# WebEngine's GPU thread in glibc getenv, called by Mesa's driCreateNewScreen3 (EGL setup).
+# The fix runs the Qt tests with --webEngineArgs --disable-gpu.
+#   attribution: which threads run driCreateNewScreen3, original tests vs fixed tests (gdb).
+#   mechanism:   a repro that churns the environment while WebEngine starts, default vs GPU off.
+#   suite:       the fixed suite, many cold runs.
 
 on:
   push:
@@ -10,7 +13,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  ITERATIONS: 20
 
 permissions:
   contents: read
@@ -39,24 +41,21 @@ jobs:
           name: test-wheel
           path: apps/rustgis-python/dist
 
-  stress:
-    name: Stress (${{ matrix.variant }}, shard ${{ matrix.shard }})
+  attribution:
+    name: Attribution (${{ matrix.variant }} tests)
     needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         variant: [original, fixed]
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
       RUSTGIS_TEST_QT: "1"
-      VARIANT: ${{ matrix.variant }}
-      SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          fetch-depth: 3
+          fetch-depth: 10
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -72,29 +71,41 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install "$(ls dist/*.whl)[test,geopandas,qt]"
-      # The tests as on main (119552a7): environment changed by tests, no shared conftest.
-      - name: Use the original tests
+      - name: Use the tests as on main
         if: matrix.variant == 'original'
-        run: |
-          git checkout 119552a7 -- apps/rustgis-python/tests
-          rm -f apps/rustgis-python/tests/conftest.py
-      - name: Stress
+        run: git checkout 119552a7 -- apps/rustgis-python/tests
+      - name: Suite under gdb, three cold runs
         working-directory: apps/rustgis-python
-        run: bash "$GITHUB_WORKSPACE/.github/stress/qt-segfault-loop.sh"
+        run: |
+          set +e
+          out="$RUNNER_TEMP/results/attr-${{ matrix.variant }}"
+          mkdir -p "$out"
+          for i in 1 2 3; do
+            cold=$(mktemp -d)
+            HOME="$cold" XDG_CACHE_HOME="$cold/cache" XDG_DATA_HOME="$cold/data" XDG_CONFIG_HOME="$cold/config" \
+              gdb -batch -nx -x "$GITHUB_WORKSPACE/.github/stress/egl-attribution.gdb" \
+              --args python -X faulthandler -m pytest -q -p no:cacheprovider >"$out/run-$i.log" 2>&1
+            rm -rf "$cold"
+            main=$(grep -c 'EGL-SETUP .* gdb thread 1$' "$out/run-$i.log")
+            other=$(grep 'EGL-SETUP' "$out/run-$i.log" | grep -vc ' gdb thread 1$')
+            result=$(grep -E '[0-9]+ passed|failed|error' "$out/run-$i.log" | tail -n 1)
+            echo "attr-${{ matrix.variant }} $i $main $other $result" | tee -a "$out/attribution.txt"
+          done
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: results-${{ matrix.variant }}-${{ matrix.shard }}
+          name: results-attr-${{ matrix.variant }}
           path: ${{ runner.temp }}/results
 
   mechanism:
-    name: Mechanism (setenv loop ${{ matrix.race }})
+    name: Mechanism (GPU ${{ matrix.gpu }}, shard ${{ matrix.shard }})
     needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        race: ["1", "0"]
+        gpu: [default, disabled]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -102,31 +113,94 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Install Qt system libraries
+      - name: Install Qt system libraries and gdb
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libxkbcommon0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2t64
+          sudo apt-get install -y --no-install-recommends libegl1 libxkbcommon0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2t64 gdb
       - name: Install
         run: python -m pip install "PySide6>=6.6"
-      - name: Run the repro 10 times, each cold
-        env:
-          ENV_RACE: ${{ matrix.race }}
+      - name: Repro, ten cold runs with the environment churning
         run: |
           set +e
-          crashed=0
+          out="$RUNNER_TEMP/results/mech-${{ matrix.gpu }}-${{ matrix.shard }}"
+          mkdir -p "$out" /tmp/cores
+          sudo sysctl -q -w kernel.core_pattern=/tmp/cores/core.%p
+          ulimit -c unlimited
+          python_bin=$(python -c 'import os, sys; print(os.path.realpath(sys.executable))')
+          flags=""
+          [ "${{ matrix.gpu }}" = disabled ] && flags="--disable-gpu"
+          passed=0 crashed=0 failed=0
           for i in $(seq 1 10); do
+            rm -f /tmp/cores/core.*
             cold=$(mktemp -d)
-            HOME="$cold" XDG_CACHE_HOME="$cold/cache" python -X faulthandler .github/stress/env-race.py > "run-$i.log" 2>&1
+            HOME="$cold" XDG_CACHE_HOME="$cold/cache" python -X faulthandler .github/stress/env-race.py $flags >"$out/run-$i.log" 2>&1
             rc=$?
             rm -rf "$cold"
-            echo "run $i: exit $rc ($(tail -n 1 "run-$i.log"))"
-            if [ "$rc" -ge 128 ]; then crashed=$((crashed + 1)); grep -m1 -A3 'Fatal Python error' "run-$i.log" || true; fi
+            if [ "$rc" -eq 0 ]; then
+              passed=$((passed + 1))
+            elif [ "$rc" -ge 128 ]; then
+              crashed=$((crashed + 1))
+              for core in /tmp/cores/core.*; do
+                [ -e "$core" ] || continue
+                gdb -batch -nx -ex 'bt 12' "$python_bin" "$core" >"$out/run-$i.bt" 2>&1
+                echo "run $i crashed; faulting thread:"
+                grep -E '^#[0-9]' "$out/run-$i.bt" | head -n 8
+              done
+            else
+              failed=$((failed + 1))
+            fi
           done
-          echo "| setenv loop $ENV_RACE | 10 runs | $crashed crashes |" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "mech-${{ matrix.gpu }} ${{ matrix.shard }} $passed $crashed $failed" | tee "$out/summary.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-mech-${{ matrix.gpu }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results
+
+  suite:
+    name: Suite (fixed, shard ${{ matrix.shard }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    env:
+      RUSTGIS_TEST_QT: "1"
+      VARIANT: suite-fixed
+      SHARD: ${{ matrix.shard }}
+      ITERATIONS: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Qt system libraries and gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libxkbcommon0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2t64 gdb
+      - uses: actions/download-artifact@v8
+        with:
+          name: test-wheel
+          path: dist
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "$(ls dist/*.whl)[test,geopandas,qt]"
+      - name: Stress
+        working-directory: apps/rustgis-python
+        run: bash "$GITHUB_WORKSPACE/.github/stress/qt-segfault-loop.sh"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-suite-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results
 
   report:
     name: Report
-    needs: [stress, mechanism]
+    needs: [attribution, mechanism, suite]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -138,9 +212,11 @@ jobs:
       - name: Summarize
         run: |
           {
-            echo "| Variant | Runs | Passed | Native crashes | Test failures |"
+            echo "| Arm | Runs | Passed | Native crashes | Other failures |"
             echo "|---|---|---|---|---|"
             cat results/*/summary.txt | awk '{p[$1]+=$3; c[$1]+=$4; f[$1]+=$5} END {for (v in p) printf "| %s | %d | %d | %d | %d |\n", v, p[v]+c[v]+f[v], p[v], c[v], f[v]}'
             echo
-            echo "Backtraces: $(ls results/*/*.bt 2>/dev/null | wc -l)"
+            echo "| Attribution | Run | driCreateNewScreen3 on main thread | on other threads | Suite result |"
+            echo "|---|---|---|---|---|"
+            cat results/*/attribution.txt | awk '{r=""; for (i=5; i<=NF; i++) r=r" "$i; printf "| %s | %s | %s | %s |%s |\n", $1, $2, $3, $4, r}'
           } | tee -a "$GITHUB_STEP_SUMMARY"

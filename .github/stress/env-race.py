@@ -1,10 +1,11 @@
-"""Changes the environment from Python while Qt WebEngine starts its GPU thread (#1113).
+"""Changes the environment from Python while Qt WebEngine starts up (#1113).
 
-If the crash is glibc setenv racing getenv on WebEngine's GPU thread, this dies with SIGSEGV;
-without the setenv loop (ENV_RACE=0) it exits cleanly.
+Usage: python env-race.py [WebEngine flags...]; the flags go after --webEngineArgs.
+ENV_RACE=1 (default) adds and removes environment variables every round; ENV_RACE=0 does not.
 """
 
 import os
+import sys
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,7 +13,8 @@ from PySide6.QtCore import QUrl  # noqa: E402
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-app = QApplication([])
+flags = sys.argv[1:]
+app = QApplication(["env-race", "--webEngineArgs", *flags] if flags else ["env-race"])
 views = []
 end = time.monotonic() + 20
 i = 0

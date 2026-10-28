@@ -17,12 +17,13 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def desktop(config_dir):
+def desktop(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(tmp_path))
     connections = {"connections": [{
         "id": "c1", "kind": "s3", "name": "Work", "address": "https://s3.example.org",
         "options": {"credentials": "keys"},
     }]}
-    (config_dir / "prefs.json").write_text(json.dumps({"connections": json.dumps(connections)}))
+    (tmp_path / "prefs.json").write_text(json.dumps({"connections": json.dumps(connections)}))
     yield
     _rustgis.install_test_store(None)
 

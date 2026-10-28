@@ -28,8 +28,14 @@ NOWHERE = "http://127.0.0.1:9/"
 
 @pytest.fixture(scope="session")
 def app():
-    """Keep the application alive until every test's native widgets have been destroyed."""
-    return QApplication.instance() or QApplication([])
+    """The application the widgets need, kept alive until every test's widgets are destroyed.
+
+    WebEngine runs without the GPU. With it, WebEngine's GPU thread sets up EGL (Mesa reads the
+    environment with getenv there) while the tests go on, and a test or library that adds an
+    environment variable at that moment can crash the process: glibc's setenv may move and free
+    the environment array that getenv is reading (#1113). The tests never draw the page.
+    """
+    return QApplication.instance() or QApplication(["rustgis-tests", "--webEngineArgs", "--disable-gpu"])
 
 
 @pytest.fixture

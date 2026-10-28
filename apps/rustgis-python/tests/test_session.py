@@ -23,13 +23,14 @@ def test_version_matches_the_engine():
     assert rustgis.__version__.count(".") >= 2
 
 
-def test_use_saved_secrets_loads_the_desktop_connections(config_dir):
+def test_use_saved_secrets_loads_the_desktop_connections(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(tmp_path))
     connections = json.dumps({"next": 2, "connections": [{
         "id": "c1", "kind": "postgres", "name": "Work",
         "address": "postgres:host=127.0.0.1 port=1 user=u dbname=gis",
         "remembered": True,
     }]})
-    (config_dir / "prefs.json").write_text(json.dumps({"connections": connections}))
+    (tmp_path / "prefs.json").write_text(json.dumps({"connections": connections}))
     assert rustgis.Session(use_saved_secrets=True).run("connection.list")["connections"][0]["name"] == "Work"
     assert rustgis.Session().run("connection.list")["connections"] == []
 
