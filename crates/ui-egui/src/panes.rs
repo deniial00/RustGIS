@@ -1563,11 +1563,13 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reord
     }
     let ar_resp = expands.then(|| {
         let r = ui.interact(hit(ar), egui::Id::unique(("tile_expand", i)), Sense::click());
-        let what = match (tile.expanded, has_legend) {
-            (true, true) => tl!("Hide legend"),
-            (false, true) => tl!("Show legend"),
-            (true, false) => tl!("Hide source layers"),
-            (false, false) => tl!("Show source layers"),
+        let what = match (tile.expanded, has_legend, sources.is_some()) {
+            (true, true, true) => tl!("Hide legend and source layers"),
+            (false, true, true) => tl!("Show legend and source layers"),
+            (true, true, false) => tl!("Hide legend"),
+            (false, true, false) => tl!("Show legend"),
+            (true, false, _) => tl!("Hide source layers"),
+            (false, false, _) => tl!("Show source layers"),
         };
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, what));
         r
@@ -6163,6 +6165,14 @@ mod tests {
         h.get_by_label("Hide source layers").click();
         h.run_steps(4);
         assert!(h.query_by_role_and_label(egui::Role::CheckBox, "roads").is_none());
+        // With a legend too, the arrow says it opens both (a local-network legend isn't fetched).
+        h.state_mut().session.run("map.setTiles", &json!({"index": 0, "legend": "http://127.0.0.1/legend.png"})).unwrap();
+        h.run_steps(4);
+        assert!(h.query_by_label("Show legend").is_none() && h.query_by_label("Show source layers").is_none());
+        h.get_by_label("Show legend and source layers").click();
+        h.run_steps(4);
+        assert!(h.query_by_label("Hide legend and source layers").is_some());
+        assert!(h.query_by_role_and_label(egui::Role::CheckBox, "roads").is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 
