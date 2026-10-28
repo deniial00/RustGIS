@@ -523,8 +523,9 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             if b.command == "layout.duplicateElement" && (!element || typing) {
                 continue;
             }
-            // With a layout element selected, the arrows nudge it (below), whatever else they run.
-            if element && matches!(b.chord.key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown) {
+            // With a layout element selected, the arrows nudge it (below), whatever else they run;
+            // the nudge never takes Ctrl (⌘), so a shortcut with it still runs.
+            if element && !b.chord.command && matches!(b.chord.key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown) {
                 continue;
             }
             if i.consume_shortcut(&KeyboardShortcut::new(b.chord.modifiers(), b.chord.key)) {
