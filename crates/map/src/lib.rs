@@ -980,7 +980,7 @@ impl LayerGroup {
 }
 
 /// An item at one level of the Layers pane's outline (#836, [`Map::outline`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Outline {
     /// A map layer, by id.
     Layer(u32),
@@ -1405,6 +1405,7 @@ impl Map {
     pub fn outline(&self, parent: Option<u32>) -> Vec<Outline> {
         let chains = self.layer_chains();
         let mut out: Vec<Outline> = Vec::new();
+        let mut seen: std::collections::HashSet<Outline> = std::collections::HashSet::new();
         for l in &self.layers {
             let chain = chains.get(&l.id).map_or(&[][..], Vec::as_slice);
             let item = match parent {
@@ -1418,7 +1419,7 @@ impl Map {
                     None => continue,
                 },
             };
-            if !out.contains(&item) {
+            if seen.insert(item) {
                 out.push(item);
             }
         }
@@ -1429,7 +1430,7 @@ impl Map {
                 None => tops.get(&g.id).and_then(|c| c.last()) == Some(&g.id),
                 Some(p) => g.parent == Some(p) && g.id != p,
             };
-            if here && !out.contains(&Outline::Group(g.id)) {
+            if here && seen.insert(Outline::Group(g.id)) {
                 out.push(Outline::Group(g.id));
             }
         }
