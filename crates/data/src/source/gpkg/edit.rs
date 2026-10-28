@@ -13,7 +13,7 @@ use rustgis_geom::Extent;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -36,9 +36,13 @@ pub struct Editable {
 #[derive(Debug)]
 pub struct SavedRows {
     pub changes: Saved,
-    /// Every requested update (even unchanged) followed by inserts, with committed keys.
-    /// Attributes follow the supplied fields; fields absent from the table retain submitted values.
+    /// Requested snapshots, followed by final snapshots of trigger-affected resident keys.
+    /// Attributes follow supplied fields; absent columns retain submitted values when available.
     pub features: Vec<Feature>,
+    /// Affected known resident keys absent after triggers, in unsigned key order.
+    pub removed: Vec<u64>,
+    /// Supplied field positions that have no stored column.
+    pub unstored_fields: Vec<usize>,
     pub revision: String,
 }
 
@@ -186,8 +190,12 @@ impl EditTable {
                 self.table()
             )));
         }
-        let srs_id: i64 = tx
-            .query_row("SELECT srs_id FROM gpkg_geometry_columns WHERE lower(table_name) = lower(?1)", [self.table()], |r| r.get(0))
+        let (geometry_type, srs_id, z, m) = tx
+            .query_row(
+                "SELECT geometry_type_name, srs_id, z, m FROM gpkg_geometry_columns WHERE lower(table_name) = lower(?1)",
+                [self.table()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)),
+            )
             .map_err(err)?;
         if srs_id != self.srs_id {
             return Err(DataError::Format(format!(
@@ -195,13 +203,24 @@ impl EditTable {
                 self.table()
             )));
         }
+        if !geometry_type.eq_ignore_ascii_case(&self.geometry_type) || z != self.z || m != self.m {
+            return Err(self.shape_error());
+        }
         let columns: Vec<String> = table_columns(&tx, self.table())?.into_iter().map(|c| c.name).collect();
         let (key, geom) = self.positions(&columns)?;
-        let feature_writes = watch_feature_writes(&tx, self.table())?;
+        let residents: HashMap<i64, bool> = reserved
+            .map(u64::cast_signed)
+            .chain(edits.updates.iter().map(|(f, _)| f.id.cast_signed()))
+            .chain(edits.deletes.iter().map(|(k, _)| k.cast_signed()))
+            .map(|k| (k, false))
+            .collect();
+        let reserved_high_water = if edits.inserts.is_empty() { 0 } else { residents.keys().copied().max().unwrap_or(0).max(0) };
+        let feature_writes = watch_feature_writes(&tx, self.table(), self.key(), residents)?;
         let mut direct_changes = 0_u64;
         let mut saved = Saved::default();
         let mut targets = Vec::new();
         let mut snapshot_columns = Vec::new();
+        let mut unstored_fields = Vec::new();
         for (i, f) in fields.iter().enumerate() {
             if let Some(c) = columns.iter().position(|c| c.eq_ignore_ascii_case(&f.name)) {
                 snapshot_columns.push((i, c));
@@ -212,6 +231,7 @@ impl EditTable {
                 }
             } else {
                 saved.skipped_fields.push(f.name.clone());
+                unstored_fields.push(i);
             }
         }
         let keys: Vec<i64> =
@@ -267,7 +287,7 @@ impl EditTable {
         // can still be present in the layer, so SQLite's ordinary rowid allocation is not enough.
         let mut high_water = 0;
         if !edits.inserts.is_empty() {
-            high_water = reserved.filter_map(|k| i64::try_from(k).ok()).max().unwrap_or(0).max(0);
+            high_water = reserved_high_water;
             let current_max: Option<i64> = tx.query_row(&format!("SELECT max({pk}) FROM {table}"), [], |r| r.get(0)).map_err(err)?;
             high_water = high_water.max(current_max.unwrap_or(0));
             let has_sequence: bool = tx
@@ -311,33 +331,47 @@ impl EditTable {
         }
         // Spatial/metadata repair must not itself trigger more feature writes after the snapshot.
         feature_writes.allowed.store(false, Ordering::Relaxed);
-        let keys: Vec<i64> = edits
+        let affected = feature_writes.affected()?;
+        let mut keys: Vec<i64> = edits
             .updates
             .iter()
             .map(|(f, _)| f.id.cast_signed())
             .chain(saved.inserted.iter().map(|(_, k)| k.cast_signed()))
             .chain(edits.deletes.iter().map(|(k, _)| k.cast_signed()))
             .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let additional: Vec<i64> = affected.iter().copied().filter(|k| keys.binary_search(k).is_err()).collect();
+        keys.extend(&additional);
         let rows = self.fetch_rows(&tx, &columns, key, &keys)?;
+        let mut removed: Vec<u64> = affected.iter().filter(|k| !rows.contains_key(*k)).map(|k| k.cast_unsigned()).collect();
+        removed.sort_unstable();
         saved.deleted = edits.deletes.iter().filter(|(k, _)| !rows.contains_key(&k.cast_signed())).count();
-        let mut features = Vec::with_capacity(edits.updates.len() + edits.inserts.len() + edits.deletes.len() - saved.deleted);
+        let mut features = Vec::with_capacity(keys.len());
         let originals = edits
             .updates
             .iter()
             .map(|(f, _)| (Some(f), f.id.cast_signed()))
             .chain(edits.inserts.iter().zip(&saved.inserted).map(|(f, (_, k))| (Some(f), k.cast_signed())))
-            .chain(edits.deletes.iter().filter(|(k, _)| rows.contains_key(&k.cast_signed())).map(|(k, _)| (None, k.cast_signed())));
+            .chain(edits.deletes.iter().filter(|(k, _)| rows.contains_key(&k.cast_signed())).map(|(k, _)| (None, k.cast_signed())))
+            .chain(additional.iter().filter(|k| rows.contains_key(*k)).map(|k| (None, *k)));
         for (original, k) in originals {
             let row = rows.get(&k).ok_or_else(|| DataError::Format(format!("row {k}: it was removed while saving")))?;
             let geometry = self
                 .geometry(ValueRef::from(row.get(geom).ok_or_else(|| self.shape_error())?))
                 .ok_or_else(|| DataError::Format(format!("row {k}: its stored geometry can't be read, so nothing was saved")))?;
-            let mut feature = original.cloned().unwrap_or_else(|| Feature { id: k.cast_unsigned(), geometry: None, attrs: Vec::new() });
-            feature.id = k.cast_unsigned();
-            feature.geometry = geometry;
-            feature.attrs.resize(fields.len(), Value::Null);
+            let mut feature = Feature { id: k.cast_unsigned(), geometry, attrs: vec![Value::Null; fields.len()] };
+            if let Some(original) = original {
+                for &i in &unstored_fields {
+                    if let (Some(target), Some(submitted)) = (feature.attrs.get_mut(i), original.attrs.get(i)) {
+                        target.clone_from(submitted);
+                    }
+                }
+            }
             for &(i, c) in &snapshot_columns {
-                feature.attrs[i] = value(ValueRef::from(row.get(c).ok_or_else(|| self.shape_error())?), fields[i].ty);
+                let field = fields.get(i).ok_or_else(|| self.shape_error())?;
+                let attr = feature.attrs.get_mut(i).ok_or_else(|| self.shape_error())?;
+                *attr = value(ValueRef::from(row.get(c).ok_or_else(|| self.shape_error())?), field.ty);
             }
             saved.versions.push((k.cast_unsigned(), fingerprint(row.iter().map(ValueRef::from))));
             features.push(feature);
@@ -352,7 +386,7 @@ impl EditTable {
             for k in keys {
                 let extent = rows
                     .get(&k)
-                    .map(|row| stored_extent(ValueRef::from(row.get(geom).ok_or_else(|| self.shape_error())?), k))
+                    .map(|row| stored_extent(ValueRef::from(row.get(geom).ok_or_else(|| self.shape_error())?), k, false))
                     .transpose()?
                     .unwrap_or(Extent::EMPTY);
                 maintain_rtree(&tx, self.src.rtree.as_deref(), k, &extent)?;
@@ -366,23 +400,14 @@ impl EditTable {
                 |r| r.get(0),
             )
             .map_err(err)?;
-        if rebuild {
-            let extent = (!written_extent.is_empty()).then_some(written_extent);
+        if rebuild || spatial_changed || unknown_bounds {
+            // Ordinary saves keep unreadable rows and index entries untouched, while bounds
+            // fold every readable native extent once (including untouched rows).
+            let extent = if rebuild { written_extent } else { readable_bounds(&tx, self.table(), self.geometry_column())? };
+            let extent = (!extent.is_empty()).then_some(extent);
             tx.execute(
                 "UPDATE gpkg_contents SET min_x = ?2, min_y = ?3, max_x = ?4, max_y = ?5 WHERE lower(table_name) = lower(?1)",
                 params![self.table(), extent.map(|e| e.min_x), extent.map(|e| e.min_y), extent.map(|e| e.max_x), extent.map(|e| e.max_y)],
-            )
-            .map_err(err)?;
-        } else if spatial_changed || unknown_bounds {
-            // Keep untouched unreadable rows and their index entries; bounds cover readable geometry.
-            let geometry = quote(self.geometry_column());
-            tx.execute(
-                &format!(
-                    "UPDATE gpkg_contents SET (min_x, min_y, max_x, max_y) =
-                     (SELECT min(ST_MinX({geometry})), min(ST_MinY({geometry})), max(ST_MaxX({geometry})), max(ST_MaxY({geometry})) FROM {table})
-                     WHERE lower(table_name) = lower(?1)"
-                ),
-                [self.table()],
             )
             .map_err(err)?;
         }
@@ -395,7 +420,7 @@ impl EditTable {
         .map_err(err)?;
         let revision = self.revision(&tx)?;
         tx.commit().map_err(err)?;
-        Ok(Ok(SavedRows { changes: saved, features, revision }))
+        Ok(Ok(SavedRows { changes: saved, features, removed, unstored_fields, revision }))
     }
 
     fn revision(&self, conn: &Connection) -> Result<String> {
@@ -511,41 +536,88 @@ impl EditTable {
 struct FeatureWrites {
     count: AtomicU64,
     allowed: AtomicBool,
+    residents: Mutex<HashMap<i64, bool>>,
 }
 
-fn watch_feature_writes(conn: &Connection, table: &str) -> Result<Arc<FeatureWrites>> {
-    let state = Arc::new(FeatureWrites { count: AtomicU64::new(0), allowed: AtomicBool::new(true) });
+impl FeatureWrites {
+    fn affected(&self) -> Result<Vec<i64>> {
+        let residents = self.residents.lock().map_err(|_| DataError::Format("GeoPackage write observer poisoned".into()))?;
+        let mut keys: Vec<i64> = residents.iter().filter_map(|(&k, &changed)| changed.then_some(k)).collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+}
+
+fn watch_feature_writes(conn: &Connection, table: &str, key: &str, residents: HashMap<i64, bool>) -> Result<Arc<FeatureWrites>> {
+    let state = Arc::new(FeatureWrites { count: AtomicU64::new(0), allowed: AtomicBool::new(true), residents: Mutex::new(residents) });
     let observed = state.clone();
-    conn.create_scalar_function("rustgis_feature_write", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, move |_| {
+    conn.create_scalar_function("rustgis_feature_write", 2, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS, move |ctx| {
         if !observed.allowed.load(Ordering::Relaxed) {
             return Err(rusqlite::Error::UserFunctionError(Box::new(std::io::Error::other(
                 "metadata or spatial-index triggers cannot change feature rows after the saved snapshot",
             ))));
         }
         observed.count.fetch_add(1, Ordering::Relaxed);
+        let old = ctx.get::<Option<i64>>(0)?;
+        let new = ctx.get::<Option<i64>>(1)?;
+        let mut residents = observed
+            .residents
+            .lock()
+            .map_err(|_| rusqlite::Error::UserFunctionError(Box::new(std::io::Error::other("GeoPackage write observer poisoned"))))?;
+        for key in old.into_iter().chain(new) {
+            if let Some(changed) = residents.get_mut(&key) {
+                *changed = true;
+            }
+        }
         Ok(0_i64)
     })
     .map_err(err)?;
-    // Connection-local observers also see writes from file-owned triggers. They never alter
-    // the file's schema and disappear when the write connection closes.
+    // Connection-local observers see file-owned triggers without growing beyond resident keys.
     let table = quote(table);
-    for event in ["INSERT", "UPDATE", "DELETE"] {
+    let key = quote(key);
+    for (event, old, new) in [
+        ("INSERT", "NULL".to_string(), format!("NEW.{key}")),
+        ("UPDATE", format!("OLD.{key}"), format!("NEW.{key}")),
+        ("DELETE", format!("OLD.{key}"), "NULL".to_string()),
+    ] {
         conn.execute_batch(&format!(
             "CREATE TEMP TRIGGER rustgis_observe_{event} AFTER {event} ON main.{table}
-             BEGIN SELECT rustgis_feature_write(); END;"
+             BEGIN SELECT rustgis_feature_write({old}, {new}); END;"
         ))
         .map_err(err)?;
     }
     Ok(state)
 }
 
-fn stored_extent(value: ValueRef<'_>, key: i64) -> Result<Extent> {
+fn stored_extent(value: ValueRef<'_>, key: i64, strict: bool) -> Result<Extent> {
     match value {
         ValueRef::Null => Ok(Extent::EMPTY),
         ValueRef::Blob(bytes) if is_empty_blob(bytes) => Ok(Extent::EMPTY),
-        value => native_extent(value)
-            .ok_or_else(|| DataError::Format(format!("row {key}: its stored geometry can't be read, so nothing was saved"))),
+        value => {
+            let extent = if strict {
+                match value {
+                    ValueRef::Blob(bytes) => split_blob(bytes)
+                        .and_then(|(envelope, body)| wkb::decode(body).map(|geometry| envelope.unwrap_or_else(|| geometry.extent()))),
+                    _ => None,
+                }
+            } else {
+                native_extent(value)
+            };
+            extent.ok_or_else(|| DataError::Format(format!("row {key}: its stored geometry can't be read, so nothing was saved")))
+        }
     }
+}
+
+fn readable_bounds(conn: &Connection, table: &str, geometry: &str) -> Result<Extent> {
+    let mut statement = conn.prepare(&format!("SELECT {} FROM {}", quote(geometry), quote(table))).map_err(err)?;
+    let mut rows = statement.query([]).map_err(err)?;
+    let mut bounds = Extent::EMPTY;
+    while let Some(row) = rows.next().map_err(err)? {
+        if let Some(extent) = native_extent(row.get_ref(0).map_err(err)?) {
+            bounds = bounds.union(&extent);
+        }
+    }
+    Ok(bounds)
 }
 
 fn rebuild_spatial(conn: &Connection, table: &str, key: &str, geometry: &str, rtree: Option<&str>) -> Result<Extent> {
@@ -560,7 +632,7 @@ fn rebuild_spatial(conn: &Connection, table: &str, key: &str, geometry: &str, rt
     let mut bounds = Extent::EMPTY;
     while let Some(row) = rows.next().map_err(err)? {
         let key = row.get::<_, i64>(0).map_err(err)?;
-        let extent = stored_extent(row.get_ref(1).map_err(err)?, key)?;
+        let extent = stored_extent(row.get_ref(1).map_err(err)?, key, true)?;
         if !extent.is_empty() {
             if let Some(index) = &mut index {
                 index.execute(params![key, extent.min_x, extent.max_x, extent.min_y, extent.max_y]).map_err(err)?;
@@ -745,25 +817,32 @@ mod tests {
     }
 
     #[test]
-    fn gpkg_rechecks_srs_inside_write_transaction() {
-        let (_dir, path) = fixture();
-        let table = EditTable::open(&path, "roads").unwrap();
-        assert_eq!(table.srs_id(), 4326);
-        let before = table.read_editable(MAX_EDITABLE).unwrap();
-        let mut changed = before.features[0].clone();
-        changed.attrs[0] = Value::Text("must not save".into());
-        let edits = Edits {
-            updates: vec![(changed, before.versions[0].1)],
-            inserts: vec![Feature { id: 100, geometry: Some(line(4.0)), attrs: vec![] }],
-            ..Default::default()
-        };
-        Connection::open(&path).unwrap().execute("UPDATE gpkg_geometry_columns SET srs_id = 3857", []).unwrap();
-        let error = table.save(&edits, &table.info().fields, [1].into_iter(), &before.revision).unwrap_err();
-        assert!(error.to_string().contains("SRS changed"), "{error}");
-        let after = table.read_editable(MAX_EDITABLE).unwrap();
-        assert_eq!(after.features, before.features);
-        assert_eq!(after.versions, before.versions);
-        assert_eq!(after.revision, before.revision);
+    fn gpkg_rechecks_geometry_declaration_inside_write_transaction() {
+        for (declaration, message) in [
+            ("srs_id = 3857", "SRS changed"),
+            ("geometry_type_name = 'POINT'", "changed shape"),
+            ("z = 1", "changed shape"),
+            ("m = 1", "changed shape"),
+        ] {
+            for spatial in [false, true] {
+                let (_dir, path) = fixture();
+                let table = EditTable::open(&path, "roads").unwrap();
+                let before = table.read_editable(MAX_EDITABLE).unwrap();
+                let mut changed = before.features[0].clone();
+                changed.attrs[0] = Value::Text("must not save".into());
+                if spatial {
+                    changed.geometry = Some(line(8.0));
+                }
+                let edits = Edits { updates: vec![(changed, before.versions[0].1)], ..Default::default() };
+                Connection::open(&path).unwrap().execute(&format!("UPDATE gpkg_geometry_columns SET {declaration}"), []).unwrap();
+                let error = table.save(&edits, &table.info().fields, [1].into_iter(), &before.revision).unwrap_err();
+                assert!(error.to_string().contains(message), "{declaration}: {error}");
+                let after = table.read_editable(MAX_EDITABLE).unwrap();
+                assert_eq!(after.features, before.features);
+                assert_eq!(after.versions, before.versions);
+                assert_eq!(after.revision, before.revision);
+            }
+        }
     }
 
     #[test]
@@ -933,7 +1012,12 @@ mod tests {
             let mut feature = loaded.features[0].clone();
             feature.attrs[0] = Value::Text("move other rows".into());
             let edits = Edits { updates: vec![(feature, loaded.versions[0].1)], ..Default::default() };
-            table.save(&edits, &table.info().fields, [1, 2, 3].into_iter(), &loaded.revision).unwrap().unwrap();
+            let saved = table.save(&edits, &table.info().fields, [1, 2, 3].into_iter(), &loaded.revision).unwrap().unwrap();
+            assert_eq!(saved.features.iter().map(|f| f.id).collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(saved.features[1].geometry, Some(moved.clone()));
+            assert_eq!(saved.changes.versions.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(saved.removed, vec![3]);
+            assert_eq!(saved.changes.deleted, 0, "trigger-only deletion is not a submitted deletion");
             let source = GpkgSource::open(&path, Some("roads")).unwrap();
             for (x, expected) in [(30.5, vec![2]), (60.5, vec![7]), (4.5, vec![])] {
                 let batch = source.read(&Request { extent: Some(Extent::new(x, 1.0, x + 0.1, 4.0)), limit: 100 }).unwrap();
@@ -954,6 +1038,43 @@ mod tests {
                 assert_eq!(keys, vec![1, 2, 7]);
             }
         }
+    }
+
+    #[test]
+    fn gpkg_observes_both_primary_keys_without_duplicate_resident_snapshots() {
+        let (_dir, path) = fixture();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO roads(fid,name) VALUES(-2,'negative'),(2,'positive');
+             CREATE TRIGGER replace_resident_key AFTER UPDATE OF name ON roads WHEN NEW.fid=1 BEGIN
+             DELETE FROM roads WHERE fid=-2;
+             UPDATE roads SET fid=-2,name='trigger result',lanes=9 WHERE fid=2;
+             UPDATE roads SET lanes=10 WHERE fid=-2;
+             INSERT INTO roads(fid,name) VALUES(-3,'outside scope');
+             END;",
+        )
+        .unwrap();
+        let table = EditTable::open(&path, "roads").unwrap();
+        let loaded = table.read_editable(MAX_EDITABLE).unwrap();
+        let mut feature = loaded.features.iter().find(|f| f.id == 1).unwrap().clone();
+        feature.attrs[0] = Value::Text("change residents".into());
+        let version = loaded.versions.iter().find(|(k, _)| *k == 1).unwrap().1;
+        let edits = Edits { updates: vec![(feature, version)], ..Default::default() };
+        let saved = table.save(&edits, &table.info().fields, [(-2_i64).cast_unsigned(), 2].into_iter(), &loaded.revision).unwrap().unwrap();
+        assert_eq!(saved.features.iter().map(|f| f.id.cast_signed()).collect::<Vec<_>>(), vec![1, -2]);
+        assert_eq!(saved.changes.versions.iter().map(|(k, _)| k.cast_signed()).collect::<Vec<_>>(), vec![1, -2]);
+        assert_eq!(saved.removed, vec![2]);
+        let negative = saved.features[1].clone();
+        let lanes = table.info().fields.iter().position(|f| f.name == "lanes").unwrap();
+        assert_eq!(negative.attrs[lanes], Value::Int(10));
+        let mut next = negative;
+        next.attrs[0] = Value::Text("next".into());
+        let edits = Edits { updates: vec![(next, saved.changes.versions[1].1)], ..Default::default() };
+        let saved = table.save(&edits, &table.info().fields, [1, (-2_i64).cast_unsigned()].into_iter(), &saved.revision).unwrap().unwrap();
+        assert_eq!(saved.changes.updated, 1);
+        let stored: (String, i64) =
+            conn.query_row("SELECT name,lanes FROM roads WHERE fid=-2", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, ("next".into(), 10));
     }
 
     #[test]
@@ -1000,6 +1121,9 @@ mod tests {
              BEGIN UPDATE roads SET lanes=7 WHERE fid=2; END;",
         )
         .unwrap();
+        // A valid XY envelope must not hide an unreadable WKB body during a strict rebuild.
+        let unreadable = header_blob(&[0], &Extent::new(5.0, 2.0, 6.0, 3.0), 4326);
+        conn.execute("UPDATE roads SET geom = ?1 WHERE fid = 2", [&unreadable]).unwrap();
         let index = || {
             conn.prepare("SELECT id,minx,maxx,miny,maxy FROM rtree_roads_geom ORDER BY id")
                 .unwrap()
@@ -1025,7 +1149,7 @@ mod tests {
         assert_eq!(after.revision, read.revision);
         assert_eq!(index(), before_index);
         let bad: (Vec<u8>, i64) = conn.query_row("SELECT geom, lanes FROM roads WHERE fid=2", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(bad, (vec![0], 2));
+        assert_eq!(bad, (unreadable, 2));
         let bounds: (f64, f64, f64, f64) = conn
             .query_row("SELECT min_x,min_y,max_x,max_y FROM gpkg_contents", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap();
@@ -1391,6 +1515,7 @@ mod tests {
         assert_eq!((saved.changes.unchanged, saved.changes.updated), (1, 0));
         assert_eq!(saved.changes.inserted, vec![(100, 2)]);
         assert_eq!(saved.features.len(), 2);
+        assert_eq!(saved.unstored_fields, vec![1]);
         assert_eq!(saved.features[0].attrs[1], Value::Text("kept".into()));
         assert_eq!(saved.features[0].attrs[4], Value::Int(1));
         assert_eq!(

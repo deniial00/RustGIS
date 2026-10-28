@@ -192,8 +192,24 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
             let mut geometry_changed = false;
+            if !saved_rows.removed.is_empty() {
+                let selected: std::collections::HashSet<_> =
+                    l.selection.iter().filter_map(|&row| l.dataset.features.get(row).map(|f| f.id)).collect();
+                let before = l.dataset.features.len();
+                l.dataset.features.retain(|f| saved_rows.removed.binary_search(&f.id).is_err());
+                if l.dataset.features.len() != before {
+                    geometry_changed = true;
+                    l.selection =
+                        l.dataset.features.iter().enumerate().filter_map(|(row, f)| selected.contains(&f.id).then_some(row)).collect();
+                }
+            }
             for feature in l.dataset.features.iter_mut() {
-                if let Some(row) = stored.remove(&feature.id) {
+                if let Some(mut row) = stored.remove(&feature.id) {
+                    for &i in &saved_rows.unstored_fields {
+                        if let (Some(stored), Some(local)) = (row.attrs.get_mut(i), feature.attrs.get_mut(i)) {
+                            std::mem::swap(stored, local);
+                        }
+                    }
                     geometry_changed |= row.geometry != feature.geometry;
                     *feature = row;
                 }

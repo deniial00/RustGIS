@@ -18903,6 +18903,170 @@ fn geopackage_delete_trigger_restored_rows_rejoin_the_saved_baseline() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn geopackage_cross_row_triggers_refresh_residents_without_expanding_scope() {
+    use rustgis_data::{Coord, Geometry, Value};
+    for deleted in [false, true] {
+        let fixture = GpkgRegressionFixture::new("resident-triggers");
+        let db = rusqlite::Connection::open(fixture.path()).unwrap();
+        let mut s = fixture.session();
+        let p = json!({"layer":"R"});
+        s.run("edit.addField", &json!({"layer":"R","name":"local","type":"text"})).unwrap();
+        for row in 0..3 {
+            s.run("edit.setValue", &json!({"layer":"R","row":row,"field":"local","value":format!("local {row}")})).unwrap();
+        }
+        s.run("gpkg.saveEdits", &p).unwrap();
+        assert_gpkg_regression_clean(&mut s);
+        s.run("gpkg.addLayer", &json!({"path":fixture.path(),"table":"roads","name":"Other"})).unwrap();
+        let action = if deleted {
+            "DELETE FROM roads WHERE fid=2;"
+        } else {
+            "UPDATE roads SET name='intermediate',lanes=8 WHERE fid=2;
+             UPDATE roads SET name='trigger result',lanes=9,geom=(SELECT geom FROM roads WHERE fid=3) WHERE fid=2;"
+        };
+        db.execute_batch(&format!(
+            "CREATE TRIGGER affect_resident AFTER UPDATE OF name ON roads WHEN NEW.fid=1 AND NEW.name='save row1' BEGIN
+             {action}
+             INSERT INTO roads(fid,geom,name) VALUES(4,NEW.geom,'trigger only');
+             END;"
+        ))
+        .unwrap();
+        s.run("edit.setValue", &json!({"layer":"R","row":0,"field":"name","value":"save row1"})).unwrap();
+        s.run(
+            "edit.addFeature",
+            &json!({"layer":"R","geometry":{"type":"Point","coordinates":[10,20]},
+                "attributes":{"name":"synthetic","local":"new local"}}),
+        )
+        .unwrap();
+        // A surviving selected row follows its identity when an earlier resident disappears.
+        s.run("select.rows", &json!({"layer":"R","rows":[2]})).unwrap();
+        let saved = s.run("gpkg.saveEdits", &p).unwrap();
+        assert_eq!(saved["deleted"], 0, "trigger-only deletions are not submitted deletions");
+        let key = saved["keys"][0].as_u64().unwrap();
+        assert!(key > 4);
+        let layer = s.map().layer_by_name("R").unwrap();
+        let ds = &layer.dataset;
+        let row_of = |key| ds.features.iter().position(|f| f.id == key).unwrap();
+        assert!(!ds.features.iter().any(|f| f.id == 4), "trigger-only inserts must not replace a pending synthetic feature");
+        assert_eq!(ds.value(row_of(key), ds.field_index("name").unwrap()), &Value::Text("synthetic".into()));
+        assert_eq!(ds.value(row_of(key), ds.field_index("local").unwrap()), &Value::Text("new local".into()));
+        assert_eq!(layer.selection, vec![row_of(3)]);
+        if deleted {
+            assert!(!ds.features.iter().any(|f| f.id == 2));
+            assert_eq!(ds.features.len(), 3);
+        } else {
+            assert_eq!(ds.features.len(), 4);
+            assert_eq!(ds.value(row_of(2), ds.field_index("name").unwrap()), &Value::Text("trigger result".into()));
+            assert_eq!(ds.value(row_of(2), ds.field_index("lanes").unwrap()), &Value::Int(9));
+            assert_eq!(ds.value(row_of(2), ds.field_index("local").unwrap()), &Value::Text("local 1".into()));
+            assert_eq!(ds.features[row_of(2)].geometry, Some(Geometry::Point(Coord::new(3.0, 20.0))));
+        }
+        let other = &s.map().layer_by_name("Other").unwrap().dataset;
+        assert_eq!(other.value(1, other.field_index("name").unwrap()), &Value::Text("b".into()));
+        assert_eq!(other.features.len(), 3, "saving one copy must not refresh another");
+        let next_key = if deleted { 3 } else { 2 };
+        let next_row = row_of(next_key);
+        assert_gpkg_regression_clean(&mut s);
+        s.run("edit.setValue", &json!({"layer":"R","row":next_row,"field":"name","value":"next edit"})).unwrap();
+        assert_eq!(s.run("gpkg.saveEdits", &p).unwrap()["updated"], 1);
+        let stored: (String, i64) =
+            db.query_row("SELECT name,lanes FROM roads WHERE fid=?1", [next_key as i64], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, ("next edit".into(), if deleted { 2 } else { 9 }));
+        assert_gpkg_regression_clean(&mut s);
+        let project = fixture.dir.join("residents.rgis");
+        s.run("project.saveAs", &json!({"path":project})).unwrap();
+        let mut reopened = Session::new(Project::default());
+        reopened.run("project.open", &json!({"path":project})).unwrap();
+        assert_gpkg_regression_clean(&mut reopened);
+        assert_eq!(reopened.run("gpkg.saveEdits", &p).unwrap()["saved"], false);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_trigger_snapshots_respect_partial_loaded_scope() {
+    let fixture = GpkgRegressionFixture::new("partial-residents");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER affect_unloaded AFTER UPDATE OF name ON roads WHEN NEW.fid=1 BEGIN
+         UPDATE roads SET name='outside scope' WHERE fid=2;
+         DELETE FROM roads WHERE fid=3;
+         INSERT INTO roads(fid,name) VALUES(9,'trigger insert');
+         END;",
+    )
+    .unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("gpkg.addLayer", &json!({"path":fixture.path(),"table":"roads","name":"R","limit":1})).unwrap();
+    s.map_mut().editing.settings.enabled = true;
+    s.run("edit.setValue", &json!({"layer":"R","row":0,"field":"name","value":"limited"})).unwrap();
+    let saved = s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap();
+    assert_eq!(saved["deleted"], 0);
+    let keys: Vec<_> = s.map().layer_by_name("R").unwrap().dataset.features.iter().map(|f| f.id).collect();
+    assert_eq!(keys, vec![1]);
+    let stored: Vec<(i64, String)> = db
+        .prepare("SELECT fid,name FROM roads ORDER BY fid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(stored, vec![(1, "limited".into()), (2, "outside scope".into()), (9, "trigger insert".into())]);
+    assert_gpkg_regression_clean(&mut s);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_trigger_rebuild_rejects_a_valid_envelope_with_unreadable_wkb() {
+    use rustgis_data::{Coord, Geometry};
+    let fixture = GpkgRegressionFixture::new("unreadable-enveloped-body");
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    let mut bad = GpkgRegressionFixture::point_blob(3.0, 20.0);
+    bad.truncate(40);
+    bad.push(0);
+    db.execute("UPDATE roads SET geom=?1 WHERE fid=3", [&bad]).unwrap();
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE rtree_roads_geom USING rtree(id,minx,maxx,miny,maxy);
+         INSERT INTO rtree_roads_geom VALUES(1,1,1,20,20),(2,2,2,20,20),(3,3,3,20,20);",
+    )
+    .unwrap();
+    let index = || {
+        db.prepare("SELECT id,minx,maxx,miny,maxy FROM rtree_roads_geom ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let mut s = Session::new(Project::default());
+    let loaded = s.run("gpkg.addLayer", &json!({"path":fixture.path(),"table":"roads","name":"R"})).unwrap();
+    assert_eq!((loaded["features"].as_u64(), loaded["skipped"].as_u64()), (Some(2), Some(1)));
+    let id = loaded["layer"].as_u64().unwrap() as u32;
+    // Ordinary saves leave the skipped row and its existing index entry untouched.
+    s.map_mut().layer_mut(id).unwrap().dataset.features[0].geometry = Some(Geometry::Point(Coord::new(10.0, 20.0)));
+    s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap();
+    assert_eq!(index().last(), Some(&(3, 3.0, 3.0, 20.0, 20.0)));
+    db.execute_batch(
+        "CREATE TRIGGER force_rebuild AFTER UPDATE OF name ON roads WHEN NEW.fid=1
+         BEGIN UPDATE roads SET lanes=9 WHERE fid=2; END;",
+    )
+    .unwrap();
+    let before_index = index();
+    let before_revision: String = db.query_row("SELECT last_change FROM gpkg_contents", [], |r| r.get(0)).unwrap();
+    s.map_mut().editing.settings.enabled = true;
+    s.run("edit.setValue", &json!({"layer":"R","row":0,"field":"name","value":"must roll back"})).unwrap();
+    let error = s.run("gpkg.saveEdits", &json!({"layer":"R"})).unwrap_err();
+    assert!(error.contains("stored geometry can't be read"), "{error}");
+    assert_eq!(index(), before_index);
+    assert_eq!(db.query_row("SELECT last_change FROM gpkg_contents", [], |r| r.get::<_, String>(0)).unwrap(), before_revision);
+    assert_eq!(db.query_row("SELECT name FROM roads WHERE fid=1", [], |r| r.get::<_, String>(0)).unwrap(), "a");
+    assert_eq!(db.query_row("SELECT lanes FROM roads WHERE fid=2", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(db.query_row("SELECT geom FROM roads WHERE fid=3", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), bad);
+    assert_eq!(s.run("gpkg.pendingEdits", &json!({"layer":"R"})).unwrap()["updates"], 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn geopackage_template_drops_edit_binding() {
     let fixture = GpkgRegressionFixture::new("template");
     let db = rusqlite::Connection::open(fixture.path()).unwrap();

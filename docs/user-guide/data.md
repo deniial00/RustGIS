@@ -285,7 +285,9 @@ trigger failure also rolls everything back; pending edits remain in the layer. N
 get source-assigned keys that cannot alias loaded rows, and unrelated columns and tables remain
 intact. The saved rows are read back within the transaction, so the layer keeps values assigned
 by defaults and triggers before it starts tracking its next edits. If a DELETE trigger recreates
-a target row, that stored row reappears in the layer and is not counted as deleted.
+a target row, that stored row reappears in the layer and is not counted as deleted. If triggers
+change or remove other rows already loaded in the layer, those rows are refreshed or removed
+before the next edits; rows outside the load are not added.
 
 New-feature saves also check the table's persisted `last_change` revision. If it changed since
 the layer was loaded, the save is refused rather than risking duplicate inserts from an older
@@ -297,9 +299,11 @@ Spatial indexes use the final stored geometry after table triggers run. Bounds a
 from the whole table's readable native extents after inserts, geometry edits or deletes; they
 can shrink, and become NULL when no readable nonempty geometry remains. Attribute-only saves
 keep known bounds unless a trigger writes feature rows. Such trigger writes require a whole-table
-spatial rebuild in the transaction; unreadable nonempty geometry makes that rebuild refuse the
-entire save rather than guess its index coverage. Metadata or index-repair triggers that would
-change features after the final snapshot are also refused, with the transaction rolled back.
+spatial rebuild in the transaction; unreadable nonempty geometry, including a body hidden behind
+a valid header envelope, makes that rebuild refuse the entire save rather than guess its index
+coverage. Metadata or index-repair triggers that would change features after the final snapshot
+are also refused, with the transaction rolled back. A changed geometry type, Z/M declaration or SRS
+between loading and the write transaction also refuses the save.
 
 **Discard GeoPackage Edits…** (`gpkg.discardEdits`) reloads the scoped rows as they are in the
 file now, including renamed columns and its current geometry type and coordinate system; Undo
@@ -308,8 +312,9 @@ default. Saving refuses a changed source SRS until the layer is reloaded.
 Undoing a save does not undo file writes: Redo or Discard Edits is needed before saving again.
 Saving the project keeps pending edits in the project only; exporting writes a new file rather
 than changing this table.
-Save and Discard dialogs remain bound to the project and map where they opened. After switching
-maps or projects, reopen the dialog for the intended layer; confirmation cannot retarget another file.
+Save and Discard dialogs remain bound to the project, map and specific layer instance where they
+opened. Switching maps or projects, or undoing and re-adding a layer, requires reopening or
+choosing again; a reused layer ID cannot retarget another file.
 Feature-less project templates retain the layer's schema and styling, but no source-edit binding:
 opening a template cannot turn its absent features into source-row deletions.
 
