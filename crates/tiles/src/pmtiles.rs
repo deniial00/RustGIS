@@ -69,13 +69,19 @@ pub struct Info {
 }
 
 impl Info {
-    /// The names of the metadata's vector layers.
+    /// The names of the metadata's vector layers: each once in its order, the first 256.
     pub fn vector_layers(&self) -> Vec<String> {
-        self.metadata
-            .get("vector_layers")
-            .and_then(Value::as_array)
-            .map(|v| v.iter().filter_map(|l| l.get("id").and_then(Value::as_str)).map(str::to_string).collect())
-            .unwrap_or_default()
+        let ids = self.metadata.get("vector_layers").and_then(Value::as_array).into_iter().flatten().filter_map(|l| l.get("id")?.as_str());
+        let mut names: Vec<String> = Vec::new();
+        for id in ids {
+            if names.len() == 256 {
+                break;
+            }
+            if !names.iter().any(|n| n == id) {
+                names.push(id.to_string());
+            }
+        }
+        names
     }
 
     /// The metadata's attribution, if any.
