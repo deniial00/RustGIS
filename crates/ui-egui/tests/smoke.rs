@@ -33,6 +33,120 @@ fn search_layer_command(h: &mut egui_kittest::Harness<'_, RustGisApp>, command: 
     assert!(h.state().ui.command_search.is_none());
 }
 
+/// Duplicate names must not redirect a source write or discard to the first matching layer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_edit_dialogs_target_numeric_ids_with_duplicate_names() {
+    use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value, raster::Crs, source::gpkg};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness();
+    for table in ["alpha", "beta"] {
+        let path = dir.path().join(format!("{table}.gpkg"));
+        let mut data = Dataset::new(table, GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        for x in [0.0, 1.0] {
+            data.push(Some(Geometry::Point(Coord::new(x, 0.0))), vec![Value::Text("original".into())]);
+        }
+        gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+        let loaded = h.state_mut().run("gpkg.addLayer", json!({"path": path, "table": table})).unwrap();
+        h.state_mut().run("layer.rename", json!({"layer": loaded["layer"], "name": "Duplicate"})).unwrap();
+    }
+    let ids: Vec<_> = h.state().session.map().layers.iter().filter(|l| l.gpkg.is_some()).map(|l| l.id).collect();
+    let (upper, lower) = (ids[0], ids[1]);
+    let source = |h: &egui_kittest::Harness<'_, RustGisApp>, id| {
+        let edit = h.state().session.map().layer(id).unwrap().gpkg.as_ref().unwrap();
+        (std::path::PathBuf::from(&edit.path), edit.table.clone())
+    };
+    let (upper_path, upper_table) = source(&h, upper);
+    let (lower_path, lower_table) = source(&h, lower);
+    let stored = |path: &std::path::Path, table: &str| {
+        gpkg::edit::EditTable::open(path, table).unwrap().read_editable(100).unwrap().features[0].attrs[0].clone()
+    };
+    let pending = |h: &mut egui_kittest::Harness<'_, RustGisApp>, id| {
+        h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap()["updates"].as_u64().unwrap()
+    };
+    let choose = |h: &mut egui_kittest::Harness<'_, RustGisApp>, from, to| {
+        let from_label = format!("Duplicate (#{from})");
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.value().as_deref() == Some(from_label.as_str())).unwrap().click();
+        h.run_steps(2);
+        h.get_by_label(&format!("Duplicate (#{to})")).click();
+        h.run_steps(2);
+        assert_eq!(h.state().dialogs.gpkg_layer, Some(to));
+    };
+    let shown_count = |h: &egui_kittest::Harness<'_, RustGisApp>, count: &str| {
+        let label = h.get_by_label("Changed rows").rect();
+        assert!(
+            h.query_all_by_label(count).any(|n| n.rect().left() > label.right() && (n.rect().center().y - label.center().y).abs() < 3.0),
+            "the Changed rows value must display {count}"
+        );
+    };
+    h.state_mut().run("edit.enable", json!({"on": true})).unwrap();
+    h.state_mut().run("edit.setValue", json!({"layer": upper, "row": 0, "field": "name", "value": "upper pending"})).unwrap();
+    for row in [0, 1] {
+        h.state_mut().run("edit.setValue", json!({"layer": lower, "row": row, "field": "name", "value": "lower saved"})).unwrap();
+    }
+    h.state_mut().run("layer.select", json!({"layer": lower})).unwrap();
+    h.state_mut().run("ui.dialog", json!({"name": "gpkgSave"})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().dialogs.gpkg_layer, Some(lower), "the lower duplicate is active");
+    h.get_by_label(&lower_table);
+    assert_eq!(h.state().dialogs.list[2], "2");
+    shown_count(&h, "2");
+    choose(&mut h, lower, upper);
+    h.get_by_label(&upper_table);
+    assert_eq!(h.state().dialogs.list[2], "1", "same display name must still invalidate counts");
+    shown_count(&h, "1");
+    choose(&mut h, upper, lower);
+    h.get_by_label(&lower_table);
+    assert_eq!(h.state().dialogs.list[2], "2");
+    shown_count(&h, "2");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
+    assert_eq!(pending(&mut h, lower), 0);
+    assert_eq!(pending(&mut h, upper), 1);
+    assert_eq!(stored(&lower_path, &lower_table), Value::Text("lower saved".into()));
+    assert_eq!(stored(&upper_path, &upper_table), Value::Text("original".into()));
+
+    h.state_mut().run("edit.setValue", json!({"layer": lower, "row": 0, "field": "name", "value": "lower discarded"})).unwrap();
+    h.state_mut().run("ui.dialog", json!({"name": "gpkgDiscard"})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().dialogs.gpkg_layer, Some(lower));
+    h.get_by_label(&lower_table);
+    choose(&mut h, lower, upper);
+    h.get_by_label(&upper_table);
+    choose(&mut h, upper, lower);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Discard").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
+    assert_eq!(pending(&mut h, lower), 0);
+    assert_eq!(pending(&mut h, upper), 1);
+    assert_eq!(h.state().session.map().layer(lower).unwrap().dataset.features[0].attrs[0], Value::Text("lower saved".into()));
+    assert_eq!(h.state().session.map().layer(upper).unwrap().dataset.features[0].attrs[0], Value::Text("upper pending".into()));
+    assert_eq!(stored(&lower_path, &lower_table), Value::Text("lower saved".into()));
+    assert_eq!(stored(&upper_path, &upper_table), Value::Text("original".into()));
+
+    // Losing the target must never fall back to the active layer or a same-name layer.
+    for (dialog, button) in [("gpkgSave", "Save"), ("gpkgDiscard", "Discard")] {
+        for target in [None, Some(u32::MAX)] {
+            h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+            h.state_mut().dialogs.gpkg_layer = target;
+            h.run_steps(3);
+            assert!(h.state().dialogs.list.is_empty());
+            h.get_by_role_and_label(egui::accesskit::Role::Button, button).click();
+            h.run_steps(3);
+            assert_eq!(h.state().dialogs.open, Some(dialog));
+            assert!(h.state().dialogs.error.is_some());
+            assert_eq!(pending(&mut h, upper), 1);
+            assert_eq!(pending(&mut h, lower), 0);
+            assert_eq!(stored(&upper_path, &upper_table), Value::Text("original".into()));
+        }
+    }
+    h.state_mut().run("layer.select", json!({"layer": "Countries"})).unwrap();
+    h.state_mut().run("ui.dialog", json!({"name": "gpkgSave"})).unwrap();
+    assert_eq!(h.state().dialogs.gpkg_layer, Some(upper), "a non-editable active layer falls back to the first editable ID");
+}
+
 /// Both No Fill controls preserve unique-value styling and undo, and stay hidden for points.
 #[test]
 fn polygon_no_fill_is_reachable_from_the_pane_and_the_ribbon() {

@@ -18,7 +18,9 @@ pub struct Dialogs {
     pub repair: Option<crate::repairsource::Form>,
     pub open: Option<&'static str>,
     pub layer: String,
-    /// The source-backed layer whose edits were last counted (Save or Discard Edits).
+    /// GeoPackage save/discard targets use IDs because display names can repeat.
+    pub gpkg_layer: Option<u32>,
+    /// The source-backed layer last counted: its name for PostGIS, numeric ID for GeoPackage.
     pub counted: String,
     pub text: String,
     pub a: String,
@@ -163,7 +165,7 @@ impl Dialogs {
             }
             "gpkgSave" | "gpkgDiscard" => {
                 let gpkg = |l: &&rustgis_engine::map::Layer| l.gpkg.is_some();
-                self.layer = active.filter(gpkg).or_else(|| s.map().layers.iter().find(gpkg)).map(|l| l.name.clone()).unwrap_or_default();
+                self.gpkg_layer = active.filter(gpkg).or_else(|| s.map().layers.iter().find(gpkg)).map(|l| l.id);
             }
             // A table of addresses is what's usually geocoded: picked by its id (`flag` says the
             // choice is a table), since names can repeat.
@@ -1314,41 +1316,66 @@ fn gpkg_add_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
 /// A source-backed layer to save or discard the edits of, and what changed in it: its table
 /// and how many rows are new, changed and deleted (counted again when another layer is chosen).
 fn source_layer_edits(app: &mut RustGisApp, ui: &mut egui::Ui, prefix: &'static str) {
-    let layers: Vec<String> = app
+    let layers: Vec<(u32, String)> = app
         .session
         .map()
         .layers
         .iter()
         .filter(|l| if prefix == "pg" { l.postgis.is_some() } else { l.gpkg.is_some() })
-        .map(|l| l.name.clone())
+        .map(|l| (l.id, l.name.clone()))
         .collect();
-    if app.dialogs.counted != app.dialogs.layer {
-        app.dialogs.counted = app.dialogs.layer.clone();
-        app.dialogs.list = match app.run(&format!("{prefix}.pendingEdits"), json!({"layer": app.dialogs.layer})) {
-            Ok(v) => vec![
-                v["table"].as_str().unwrap_or_default().to_string(),
-                v["inserts"].to_string(),
-                v["updates"].to_string(),
-                v["deletes"].to_string(),
-                v["file"].as_str().unwrap_or_default().to_string(),
-            ],
-            Err(e) => {
-                app.dialogs.error = Some(e);
-                Vec::new()
-            }
-        };
-    }
     egui::Grid::new(("source_edits", prefix)).num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
         ui.label(tl!("Layer"));
-        egui::ComboBox::from_id_salt(("source_edit_layer", prefix)).selected_text(app.dialogs.layer.clone()).width(260.0).show_ui(
-            ui,
-            |ui| {
-                for l in layers {
-                    ui.selectable_value(&mut app.dialogs.layer, l.clone(), l);
+        let selected = if prefix == "gpkg" {
+            layers
+                .iter()
+                .find(|(id, _)| Some(*id) == app.dialogs.gpkg_layer)
+                .map(|(id, name)| format!("{name} (#{id})"))
+                .unwrap_or_else(|| tl!("Choose a layer").to_string())
+        } else {
+            app.dialogs.layer.clone()
+        };
+        let previous = app.dialogs.gpkg_layer;
+        egui::ComboBox::from_id_salt(("source_edit_layer", prefix)).selected_text(selected).width(260.0).show_ui(ui, |ui| {
+            for (id, name) in &layers {
+                if prefix == "gpkg" {
+                    ui.selectable_value(&mut app.dialogs.gpkg_layer, Some(*id), format!("{name} (#{id})"));
+                } else {
+                    ui.selectable_value(&mut app.dialogs.layer, name.clone(), name);
                 }
-            },
-        );
+            }
+        });
+        if prefix == "gpkg" && app.dialogs.gpkg_layer != previous {
+            app.dialogs.error = None;
+        }
         ui.end_row();
+        let counted =
+            if prefix == "gpkg" { app.dialogs.gpkg_layer.map(|id| id.to_string()).unwrap_or_default() } else { app.dialogs.layer.clone() };
+        let missing = prefix == "gpkg" && !layers.iter().any(|(id, _)| Some(*id) == app.dialogs.gpkg_layer);
+        if missing || app.dialogs.counted != counted {
+            app.dialogs.counted = counted;
+            let result = if missing {
+                Err(tl!("The selected GeoPackage layer is no longer available; choose a layer").to_string())
+            } else {
+                let target = if prefix == "gpkg" { json!(app.dialogs.gpkg_layer) } else { json!(app.dialogs.layer) };
+                app.run(&format!("{prefix}.pendingEdits"), json!({"layer": target}))
+            };
+            app.dialogs.list = match result {
+                Ok(v) => {
+                    vec![
+                        v["table"].as_str().unwrap_or_default().to_string(),
+                        v["inserts"].to_string(),
+                        v["updates"].to_string(),
+                        v["deletes"].to_string(),
+                        v["file"].as_str().unwrap_or_default().to_string(),
+                    ]
+                }
+                Err(e) => {
+                    app.dialogs.error = Some(e);
+                    Vec::new()
+                }
+            };
+        }
         let shown = app.dialogs.list.clone();
         if let Some(file) = shown.get(4).filter(|file| !file.is_empty()) {
             ui.label(tl!("File"));
@@ -1393,7 +1420,8 @@ fn gpkg_save(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     ui.label(egui::RichText::new(tl!("Saves the layer's edits to its table in the GeoPackage file in one transaction. When a row you changed or deleted was changed or deleted in the file since it was loaded, nothing is saved and the rows are listed. Saving the project keeps edits in the project only; exporting writes a new file.")).weak());
     source_layer_edits(app, ui, "gpkg");
     buttons(app, ui, "Save", |app| {
-        let r = app.run("gpkg.saveEdits", json!({"layer": app.dialogs.layer})).map(|_| ());
+        let id = app.dialogs.gpkg_layer.ok_or_else(|| tl!("Choose a GeoPackage layer").to_string())?;
+        let r = app.run("gpkg.saveEdits", json!({"layer": id})).map(|_| ());
         app.dialogs.counted.clear();
         r
     })
@@ -1408,7 +1436,10 @@ fn gpkg_discard(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
         .weak(),
     );
     source_layer_edits(app, ui, "gpkg");
-    buttons(app, ui, "Discard", |app| app.run("gpkg.discardEdits", json!({"layer": app.dialogs.layer})).map(|_| ()))
+    buttons(app, ui, "Discard", |app| {
+        let id = app.dialogs.gpkg_layer.ok_or_else(|| tl!("Choose a GeoPackage layer").to_string())?;
+        app.run("gpkg.discardEdits", json!({"layer": id})).map(|_| ())
+    })
 }
 
 /// Add Tile Layer: an XYZ/TMS/WMS template, vector tiles or a MapLibre style by address.
