@@ -2131,10 +2131,14 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
         }
     }
     // Arrow keys pan; Shift+Left and Shift+Right turn the map, Shift+Up and Shift+Down tilt it
-    // (as in MapLibre).
+    // (as in MapLibre). With Alt or Mod held the arrows are shortcuts (Alt+Shift+arrows move the
+    // active layer in the Layers pane's outline, #836), not map moves.
     if !ui.ctx().egui_wants_keyboard_input() {
         let (mut dx, mut dy, mut turn, mut tilt) = (0.0, 0.0, 0.0, 0.0);
         ui.input(|i| {
+            if i.modifiers.alt || i.modifiers.command {
+                return;
+            }
             // Ninety degrees a second, whatever the frame rate.
             let step = (f64::from(i.stable_dt) * 90.0).clamp(0.0, 15.0);
             if i.modifiers.shift {
@@ -3739,7 +3743,7 @@ fn shown_layers(session: &rustgis_engine::Session) -> u64 {
         (l.id, l.visible).hash(&mut h);
     }
     for g in &map.groups {
-        (g.id, g.visible, &g.children).hash(&mut h);
+        (g.id, g.visible, &g.children, g.parent).hash(&mut h);
     }
     for t in &map.tiles {
         (&t.name, &t.url, t.draws(), t.over).hash(&mut h);

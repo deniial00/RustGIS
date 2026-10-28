@@ -3031,8 +3031,8 @@ fn move_to(s: &mut Session, p: &Value) -> CmdResult {
     let mut placed: Vec<(u32, usize)> = Vec::new();
     for id in grouped {
         let Some(g) = m.group_of(id).map(|g| g.id) else { continue };
-        let run: Vec<usize> =
-            m.layers.iter().enumerate().filter(|(_, l)| m.group_of(l.id).is_some_and(|x| x.id == g)).map(|(i, _)| i).collect();
+        let members = m.group_layers(g);
+        let run: Vec<usize> = m.layers.iter().enumerate().filter(|(_, l)| members.contains(&l.id)).map(|(i, _)| i).collect();
         let (Some(&lo), Some(&hi)) = (run.first(), run.last()) else { continue };
         let k = placed.iter().filter(|(x, _)| *x == g).count();
         placed.push((g, k));

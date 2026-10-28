@@ -2097,15 +2097,11 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
     let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
     let held = map.held_by_group(scale);
     // Layers in a see-through group (none, mostly: then nothing is collected).
-    let faded: std::collections::HashSet<u32> = if map.groups.iter().any(|g| g.transparency > 0.0) {
-        map.groups.iter().filter(|g| g.transparency > 0.0).flat_map(|g| g.children.iter().copied()).collect()
-    } else {
-        Default::default()
-    };
+    let faded = map.group_opacities();
     map.layers.iter().filter(|l| l.visible && l.in_scale_range(scale) && !held.contains(&l.id)).all(|l| {
         l.raster.is_none()
             && l.opacity() >= 0.999
-            && !faded.contains(&l.id)
+            && !faded.contains_key(&l.id)
             && l.mask.is_none()
             && l.blend == rustgis_map::effects::Blend::Normal
             && map.swipe.is_none_or(|(id, _)| id != l.id)
@@ -2445,8 +2441,7 @@ pub fn upright_markers(map: &mut Map, view: &View, margin: f64) -> Vec<UprightMa
     let cull = view.camera.extent(view.width, view.height).padded(margin.clamp(CULL_MARGIN, 4.0), 0.0);
     let clip = map.view.clip_distance.map(|d| (view.camera.center_lonlat(), d));
     let held = map.held_by_group(scale);
-    let group_opacity: std::collections::HashMap<u32, f32> =
-        map.groups.iter().filter(|g| g.transparency > 0.0).flat_map(|g| g.children.iter().map(|c| (*c, g.opacity()))).collect();
+    let group_opacity = map.group_opacities();
     let upright: std::collections::HashSet<u32> = map.layers.iter().filter(|l| stands_up(map, l)).map(|l| l.id).collect();
     let mut order: Vec<usize> = (0..map.layers.len()).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
@@ -2935,10 +2930,10 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
     let mut order: Vec<usize> = (0..n_layers).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
     let clip = map.view.clip_distance.map(|d| (view.camera.center_lonlat(), d));
-    // Each layer group's visibility, scale range and transparency apply to its children (#413).
+    // Each layer group's visibility, scale range and transparency apply to its layers, its
+    // subgroups' too (#413, #836).
     let held = map.held_by_group(scale);
-    let group_opacity: std::collections::HashMap<u32, f32> =
-        map.groups.iter().filter(|g| g.transparency > 0.0).flat_map(|g| g.children.iter().map(|c| (*c, g.opacity()))).collect();
+    let group_opacity = map.group_opacities();
     // The point layers whose markers stand up over a tilted view (`upright_markers`) rather than
     // lie in its bands.
     let upright: std::collections::HashSet<u32> = match labels_to {

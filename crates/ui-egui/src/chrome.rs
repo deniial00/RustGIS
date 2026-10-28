@@ -523,6 +523,10 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
             if b.command == "layout.duplicateElement" && (!element || typing) {
                 continue;
             }
+            // With a layout element selected, the arrows nudge it (below), whatever else they run.
+            if element && matches!(b.chord.key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown) {
+                continue;
+            }
             if i.consume_shortcut(&KeyboardShortcut::new(b.chord.modifiers(), b.chord.key)) {
                 run.push((b.command.clone(), b.params.clone()));
             }
@@ -1150,7 +1154,7 @@ pub fn about(app: &mut RustGisApp, ctx: &egui::Context) {
                         .grouped()
                         .into_iter()
                         .map(|(command, params, keys)| {
-                            let keys: Vec<String> = keys.into_iter().map(|c| c.text(mac)).collect();
+                            let keys: Vec<String> = keys.into_iter().map(|c| c.shown(ctx)).collect();
                             (keys.join(" / "), crate::keymap::label(app, command, params))
                         })
                         .collect();

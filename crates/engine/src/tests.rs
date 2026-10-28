@@ -16992,24 +16992,223 @@ fn hostile_group_params_never_panic() {
         json!({"group": null, "layer": "Rivers", "before": "Lakes", "name": "", "to": 0}),
         json!({"group": [1], "layer": {"x": 1}, "layers": "Cities", "to": 2.5}),
         json!({"group": "A", "to": 1e9, "name": "x".repeat(10_000)}),
+        // Nesting (#836): into itself, its subgroup, nothing, junk, before its own layer.
+        json!({"group": "A", "parent": "A"}),
+        json!({"group": "A", "parent": "C", "before": "Rivers"}),
+        json!({"group": "C", "parent": "B", "before": "Countries"}),
+        json!({"group": "B", "parent": 99999, "before": [], "layer": "Lakes"}),
+        json!({"group": "C", "parent": {"x": 1}, "before": "A", "layers": ["Countries"]}),
+        json!({"group": "C", "parent": null, "before": null, "layer": "Countries"}),
     ];
-    let ids = ["group.add", "group.set", "group.expand", "group.scaleRange", "group.move", "group.ungroup", "group.remove", "layer.group"];
+    let ids = [
+        "group.add",
+        "group.set",
+        "group.expand",
+        "group.scaleRange",
+        "group.move",
+        "group.setParent",
+        "group.indent",
+        "group.outdent",
+        "group.ungroup",
+        "group.remove",
+        "layer.group",
+        "layer.indent",
+        "layer.outdent",
+        "layer.moveUp",
+        "layer.moveDown",
+    ];
     for id in ids {
         for p in &junk {
             let mut s = world();
             s.run("group.add", &json!({"name": "A", "layers": ["Rivers", "Lakes"]})).unwrap();
             s.run("group.add", &json!({"name": "B"})).unwrap();
+            s.run("group.add", &json!({"name": "C", "parent": "A", "layers": ["Lakes"]})).unwrap();
             let _ = s.run(id, p);
-            // The groups stay whole: each group's layers sit together in the drawing order.
+            // The groups stay whole: each group's layers, its subgroups' too, sit together in
+            // the drawing order, and no group is in itself.
             let m = s.map();
             for g in &m.groups {
-                let at: Vec<usize> = m.layers.iter().enumerate().filter(|(_, l)| g.children.contains(&l.id)).map(|(i, _)| i).collect();
+                let members = m.group_layers(g.id);
+                let at: Vec<usize> = m.layers.iter().enumerate().filter(|(_, l)| members.contains(&l.id)).map(|(i, _)| i).collect();
                 assert!(at.windows(2).all(|w| w[1] == w[0] + 1), "{id} {p}: {at:?}");
                 assert!(g.children.iter().all(|c| m.layer(*c).is_some()), "{id} {p}");
                 assert!(g.name.chars().count() <= 200 && (0.0..=100.0).contains(&g.transparency));
+                assert!(g.parent.is_none_or(|p| p != g.id && m.group(p).is_some()), "{id} {p}");
+                assert!(m.group_chain(g.id).last().is_some_and(|top| top.parent.is_none()), "{id} {p}: a loop");
             }
         }
     }
+}
+
+/// Names of the map's layers in drawing order.
+fn layer_names(s: &Session) -> Vec<String> {
+    s.map().layers.iter().map(|l| l.name.clone()).collect()
+}
+
+fn group_named(s: &Session, name: &str) -> u32 {
+    s.map().groups.iter().find(|g| g.name == name).map(|g| g.id).unwrap()
+}
+
+#[test]
+fn nested_groups_apply_down_the_chain_and_move_whole() {
+    use rustgis_map::Outline;
+    let mut s = world();
+    s.run("group.add", &json!({"name": "Base", "layers": ["Rivers", "Lakes", "Countries"]})).unwrap();
+    s.run("group.add", &json!({"name": "Water", "parent": "Base", "layers": ["Rivers", "Lakes"]})).unwrap();
+    let (base, water) = (group_named(&s, "Base"), group_named(&s, "Water"));
+    let id = |s: &Session, n: &str| s.map().layer_by_name(n).unwrap().id;
+    let (rivers, countries, cities) = (id(&s, "Rivers"), id(&s, "Countries"), id(&s, "Cities"));
+    assert_eq!(s.map().group(water).unwrap().parent, Some(base));
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    assert_eq!(s.map().outline(None), [Outline::Layer(cities), Outline::Group(base)]);
+    assert_eq!(s.map().outline(Some(base)), [Outline::Group(water), Outline::Layer(countries)]);
+    // Hidden, the outer group hides the inner one's layers too; transparency multiplies.
+    s.run("group.set", &json!({"group": "Base", "visible": false})).unwrap();
+    let m = s.map();
+    assert!(!m.shows(m.layer(rivers).unwrap()) && m.shows(m.layer(cities).unwrap()));
+    assert_eq!(m.held_by_group(1e6).len(), 3);
+    s.run("group.set", &json!({"group": "Base", "visible": true, "transparency": 50})).unwrap();
+    s.run("group.set", &json!({"group": "Water", "transparency": 50})).unwrap();
+    s.run("group.scaleRange", &json!({"group": "Base", "min": 1e6})).unwrap();
+    let m = s.map();
+    let (r, c) = (m.layer(rivers).unwrap(), m.layer(countries).unwrap());
+    assert!((m.layer_opacity(r) - 0.25 * r.opacity()).abs() < 1e-6);
+    assert!((m.layer_opacity(c) - 0.5 * c.opacity()).abs() < 1e-6);
+    assert!(!m.draws_at(r, 2e6) && m.draws_at(r, 5e5));
+    // Exports fold every level into the layers.
+    let own = r.opacity();
+    let mut baked = s.map().clone();
+    baked.bake_groups();
+    let r = baked.layer(rivers).unwrap();
+    assert!((r.opacity() - 0.25 * own).abs() < 1e-4 && r.min_scale.is_some_and(|m| m <= 1e6));
+    // A subgroup moves within its group only, whole.
+    s.run("group.move", &json!({"group": "Water", "to": 0})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    s.run("group.move", &json!({"group": "Water", "to": 99})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities", "Countries", "Rivers", "Lakes"]);
+    // A layer steps over a subgroup as one item, and stops at its group's edge.
+    s.run("layer.moveDown", &json!({"layer": "Countries"})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    assert!(s.run("layer.moveDown", &json!({"layer": "Countries"})).is_err());
+    // A layer outside steps over the whole outer group.
+    s.run("layer.moveDown", &json!({"layer": "Cities"})).unwrap();
+    assert_eq!(layer_names(&s), ["Rivers", "Lakes", "Countries", "Cities"]);
+    // Ungrouped, the outer group's layers and subgroups go up one level.
+    s.run("group.ungroup", &json!({"group": "Base"})).unwrap();
+    assert_eq!(s.map().group(water).unwrap().parent, None);
+    assert!(s.map().group_of(countries).is_none());
+    // Removing a group takes its subgroups and all their layers.
+    s.run("edit.undo", &Value::Null).unwrap();
+    s.run("group.remove", &json!({"group": "Base"})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities"]);
+    assert!(s.map().groups.is_empty());
+}
+
+#[test]
+fn outline_commands_indent_and_outdent_one_level_in_one_step() {
+    let mut s = world();
+    s.run("group.add", &json!({"name": "G", "layers": ["Rivers"]})).unwrap();
+    let g = group_named(&s, "G");
+    let group_of = |s: &Session, n: &str| s.map().group_of(s.map().layer_by_name(n).unwrap().id).map(|g| g.id);
+    // Into the group above, as its last item; the drawing order stays.
+    let undo = s.undo_depth();
+    s.run("layer.indent", &json!({"layer": "Lakes"})).unwrap();
+    assert_eq!((group_of(&s, "Lakes"), s.undo_depth()), (Some(g), undo + 1));
+    s.run("layer.indent", &json!({"layer": "Countries"})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    assert_eq!(group_of(&s, "Countries"), Some(g));
+    // Nothing above, or a layer above: refused, with the reason.
+    assert!(s.run("layer.indent", &json!({"layer": "Cities"})).unwrap_err().contains("first"));
+    assert!(s.run("layer.indent", &json!({"layer": "Lakes"})).unwrap_err().contains("not a group"));
+    // Out, right below its group.
+    s.run("layer.outdent", &json!({"layer": "Lakes"})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Countries", "Lakes"]);
+    assert_eq!(group_of(&s, "Lakes"), None);
+    assert!(s.run("layer.outdent", &json!({"layer": "Lakes"})).is_err());
+    // A group goes in the group above, and out again just below it.
+    s.run("group.add", &json!({"name": "H", "layers": ["Lakes"]})).unwrap();
+    let h = group_named(&s, "H");
+    s.run("group.indent", &json!({"group": "H"})).unwrap();
+    assert_eq!(s.map().group(h).unwrap().parent, Some(g));
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Countries", "Lakes"]);
+    // A layer in the inner group goes out one level only: into G, just below H.
+    s.run("layer.group", &json!({"layer": "Countries", "group": "H", "before": "Lakes"})).unwrap();
+    s.run("layer.outdent", &json!({"layer": "Countries"})).unwrap();
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Lakes", "Countries"]);
+    assert_eq!(group_of(&s, "Countries"), Some(g));
+    s.run("group.outdent", &json!({"group": "H"})).unwrap();
+    assert_eq!(s.map().group(h).unwrap().parent, None);
+    assert_eq!(layer_names(&s), ["Cities", "Rivers", "Countries", "Lakes"]);
+    // Undone, a step at a time.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.map().group(h).unwrap().parent, Some(g));
+    // No loops, and no deeper than eight levels.
+    assert!(s.run("group.setParent", &json!({"group": "G", "parent": "H"})).is_err());
+    let mut parent = Value::Null;
+    for level in 1..=rustgis_map::MAX_GROUP_DEPTH {
+        let made = s.run("group.add", &json!({"name": format!("L{level}"), "parent": parent})).unwrap();
+        parent = made["group"].clone();
+    }
+    assert!(s.run("group.add", &json!({"name": "Too deep", "parent": parent})).unwrap_err().contains("levels"));
+    assert!(s.run("group.setParent", &json!({"group": "G", "parent": "L7"})).unwrap_err().contains("levels"));
+    s.run("group.setParent", &json!({"group": "G", "parent": "L5", "before": null})).unwrap();
+    assert_eq!(s.map().group_depth(g), 6);
+}
+
+#[test]
+fn hand_edited_group_parents_open_without_loops_or_too_many_levels() {
+    let mut s = world();
+    s.run("group.add", &json!({"name": "A", "layers": ["Cities"]})).unwrap();
+    let mut v: Value = serde_json::from_str(&serde_json::to_string(&s.project).unwrap()).unwrap();
+    let id = |n: &str| s.map().layer_by_name(n).unwrap().id;
+    // A loop, a parent of its own, a missing parent, a chain ten deep, and a subgroup whose layers
+    // are far from its group's.
+    let mut groups = vec![
+        json!({"id": 900, "name": "Loop1", "parent": 901, "children": []}),
+        json!({"id": 901, "name": "Loop2", "parent": 900, "children": []}),
+        json!({"id": 902, "name": "Self", "parent": 902, "children": []}),
+        json!({"id": 903, "name": "Orphan", "parent": 12345, "children": []}),
+        json!({"id": 910, "name": "Outer", "children": [id("Cities")]}),
+        json!({"id": 911, "name": "Inner", "parent": 910, "children": [id("Countries")]}),
+    ];
+    for k in 0..10u32 {
+        groups.push(json!({"id": 920 + k, "name": format!("D{k}"), "parent": if k == 0 { Value::Null } else { json!(919 + k) }}));
+    }
+    v["maps"][0]["groups"] = json!(groups);
+    let p = Project::from_json(&v.to_string()).unwrap();
+    let m = p.maps.first().unwrap();
+    for g in &m.groups {
+        assert!(m.group_depth(g.id) <= rustgis_map::MAX_GROUP_DEPTH, "{}", g.name);
+        assert!(m.group_chain(g.id).last().is_some_and(|top| top.parent.is_none()), "{}", g.name);
+    }
+    let parent = |n: &str| m.groups.iter().find(|g| g.name == n).and_then(|g| g.parent);
+    assert_eq!((parent("Self"), parent("Orphan"), parent("Inner")), (None, None, Some(910)));
+    assert!(parent("Loop1").is_none() || parent("Loop2").is_none());
+    assert_eq!(parent("D7"), Some(926));
+    assert_eq!(parent("D8"), None);
+    // The subgroup's layer gathered under its group's.
+    let order: Vec<&str> = m.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(order, ["Cities", "Countries", "Rivers", "Lakes"]);
+    // Saved, a group at the top level writes no parent, so older versions read the same file.
+    let text = serde_json::to_string(m.groups.iter().find(|g| g.name == "Outer").unwrap()).unwrap();
+    assert!(!text.contains("parent"));
+}
+
+#[test]
+fn a_copied_group_pastes_with_its_subgroups() {
+    let mut s = world();
+    s.run("group.add", &json!({"name": "Base", "layers": ["Rivers", "Lakes", "Countries"]})).unwrap();
+    s.run("group.add", &json!({"name": "Water", "parent": "Base", "layers": ["Rivers", "Lakes"]})).unwrap();
+    s.run("group.add", &json!({"name": "Target", "layers": ["Cities"]})).unwrap();
+    s.run("layer.copy", &json!({"group": "Base"})).unwrap();
+    s.run("layer.paste", &json!({"group": "Target"})).unwrap();
+    let m = s.map();
+    let target = m.groups.iter().find(|g| g.name == "Target").unwrap().id;
+    let base = m.groups.iter().find(|g| g.name != "Base" && g.name.starts_with("Base")).unwrap();
+    let water = m.groups.iter().find(|g| g.name != "Water" && g.name.starts_with("Water")).unwrap();
+    assert_eq!((base.parent, water.parent), (Some(target), Some(base.id)));
+    assert_eq!(m.group_layers(water.id).len(), 2);
+    assert_eq!(m.group_layers(target).len(), 4);
 }
 
 /// Large elevation models come as tiles in a projected coordinate system (#155): mosaic them on
