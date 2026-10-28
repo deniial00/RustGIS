@@ -59,6 +59,8 @@ pub struct Info {
     pub bounds: [f64; 4],
     /// The JSON metadata (vector layers, attribution…), `Null` when there is none.
     pub metadata: Value,
+    /// Its vector layers' names, as [`source_layers::of_metadata`](rustgis_data::source_layers::of_metadata) keeps them.
+    vector_layers: Vec<String>,
     root: Arc<Vec<Entry>>,
     leaf_offset: u64,
     leaf_length: u64,
@@ -69,19 +71,16 @@ pub struct Info {
 }
 
 impl Info {
-    /// The names of the metadata's vector layers: each once in its order, the first 256.
-    pub fn vector_layers(&self) -> Vec<String> {
-        let ids = self.metadata.get("vector_layers").and_then(Value::as_array).into_iter().flatten().filter_map(|l| l.get("id")?.as_str());
-        let mut names: Vec<String> = Vec::new();
-        for id in ids {
-            if names.len() == 256 {
-                break;
-            }
-            if !names.iter().any(|n| n == id) {
-                names.push(id.to_string());
-            }
-        }
-        names
+    /// The names of the metadata's vector layers, as
+    /// [`source_layers::of_metadata`](rustgis_data::source_layers::of_metadata) keeps them.
+    pub fn vector_layers(&self) -> &[String] {
+        &self.vector_layers
+    }
+
+    /// Takes the archive's metadata, and the vector layers' names from it.
+    fn set_metadata(&mut self, metadata: Value) {
+        self.vector_layers = rustgis_data::source_layers::of_metadata(&metadata);
+        self.metadata = metadata;
     }
 
     /// The metadata's attribution, if any.
@@ -481,7 +480,7 @@ fn load(archive: String) {
                             // Unreadable metadata only loses the layer names and credits.
                             if let Ok(m) = m {
                                 let m = info.internal.decode(m).unwrap_or_default();
-                                info.metadata = serde_json::from_slice(&m).unwrap_or(Value::Null);
+                                info.set_metadata(serde_json::from_slice(&m).unwrap_or(Value::Null));
                             }
                             finish(&a2, Ok(info));
                         }),
@@ -735,6 +734,7 @@ fn parse_head(b: &[u8]) -> Result<(Info, u64, u64), String> {
         max_zoom,
         bounds,
         metadata: Value::Null,
+        vector_layers: Vec::new(),
         root: Arc::new(root),
         leaf_offset,
         leaf_length,

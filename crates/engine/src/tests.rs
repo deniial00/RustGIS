@@ -8341,10 +8341,11 @@ fn tile_source_layers_can_be_hidden() {
         tile_type: pmtiles::TileType::Mvt,
         gzipped_tiles: false,
         bounds: [-180.0, -85.0, 180.0, 85.0],
-        // A name no tile layer keeps (empty, too long) isn't listed, and each is listed once:
-        // repeats don't use up the 256 listed.
+        // Names no tile layer keeps (empty, too long) and repeats don't use up the 256 listed, nor
+        // push `roads` out of the archive's look: it is listed, drawn, identified and hidden.
         metadata: json!({"vector_layers": std::iter::repeat_n(json!({"id": "parks"}), 300)
-            .chain([json!({"id": ""}), json!({"id": "x".repeat(300)}), json!({"id": "roads"})])
+            .chain((0..300).map(|i| json!({"id": format!("{}{i}", "x".repeat(300))})))
+            .chain([json!({"id": ""}), json!({"id": "roads"})])
             .collect::<Vec<_>>()}),
     };
     let dir = std::env::temp_dir().join(format!("rustgis-tile-source-layers-{}", std::process::id()));

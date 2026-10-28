@@ -142,7 +142,7 @@ pub fn resolve(spec: &Spec) -> Resolve {
                     min_zoom: info.min_zoom,
                     max_zoom: info.max_zoom,
                     attribution: info.attribution(),
-                    layers: info.vector_layers(),
+                    layers: info.vector_layers().to_vec(),
                 };
                 match archive_style(spec, archive) {
                     Some(d) => d,
@@ -178,7 +178,7 @@ pub fn resolve(spec: &Spec) -> Resolve {
                     min_zoom: info.min_zoom,
                     max_zoom: info.max_zoom,
                     attribution: info.attribution.clone(),
-                    layers: info.vector_layers(),
+                    layers: info.vector_layers().to_vec(),
                 };
                 match archive_style(spec, archive) {
                     Some(d) => d,
@@ -300,27 +300,15 @@ pub fn resolve(spec: &Spec) -> Resolve {
     Resolve::Ready(r)
 }
 
-/// A vector archive's source layers, as its metadata lists them (`vector_layers`): those `keep`
-/// takes, each once in the archive's order, at most `max`. `None` for other layers, an archive
-/// that can't be read, and while a PMTiles header is on its way (asking for it starts reading it
-/// in the background; an MBTiles file's metadata is read here, the first time it is asked for).
-pub fn source_layers(kind: Kind, url: &str, keep: impl Fn(&str) -> bool, max: usize) -> Option<Vec<String>> {
-    let pick = |metadata: &Value| {
-        let ids = metadata.get("vector_layers").and_then(Value::as_array).into_iter().flatten().filter_map(|l| l.get("id")?.as_str());
-        let mut names: Vec<String> = Vec::new();
-        for id in ids.filter(|id| keep(id)) {
-            if names.len() == max {
-                break;
-            }
-            if !names.iter().any(|n| n == id) {
-                names.push(id.to_string());
-            }
-        }
-        names
-    };
+/// A vector archive's source layers, as its metadata lists them (`vector_layers`) and
+/// [`source_layers::of_metadata`](rustgis_data::source_layers::of_metadata) keeps them: the same
+/// names its default look draws from. `None` for other layers, an archive that can't be read,
+/// and while a PMTiles header is on its way (asking for it starts reading it in the background;
+/// an MBTiles file's metadata is read here, the first time it is asked for).
+pub fn source_layers(kind: Kind, url: &str) -> Option<Vec<String>> {
     match kind {
-        Kind::PmTiles => pmtiles::info(url).ok().flatten().filter(|i| i.tile_type.is_vector()).map(|i| pick(&i.metadata)),
-        Kind::MbTiles => mbtiles::info(url).ok().filter(|i| i.format.is_vector()).map(|i| pick(&i.json)),
+        Kind::PmTiles => pmtiles::info(url).ok().flatten().filter(|i| i.tile_type.is_vector()).map(|i| i.vector_layers().to_vec()),
+        Kind::MbTiles => mbtiles::info(url).ok().filter(|i| i.format.is_vector()).map(|i| i.vector_layers().to_vec()),
         _ => None,
     }
 }
