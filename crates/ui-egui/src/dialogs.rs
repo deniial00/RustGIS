@@ -210,6 +210,17 @@ impl Dialogs {
     }
 }
 
+/// Whether `error` is a target refusal from [`Dialogs::gpkg_target`], which a later valid
+/// target (Redo restoring the layer) makes stale. Save failures and other errors aren't.
+fn is_gpkg_target_error(error: &str) -> bool {
+    [
+        tl!("The active project or map changed; reopen the GeoPackage dialog for the intended layer."),
+        tl!("Choose a GeoPackage layer"),
+        tl!("The selected GeoPackage layer is no longer available; choose a layer"),
+    ]
+    .contains(&error)
+}
+
 /// Draws the active dialog and leaves it open on validation failure or a newly opened dialog.
 pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some(which) = app.dialogs.open else { return };
@@ -1421,6 +1432,9 @@ fn source_layer_edits(app: &mut RustGisApp, ui: &mut egui::Ui, prefix: &'static 
             };
             app.dialogs.list = match result {
                 Ok(v) => {
+                    if prefix == "gpkg" && app.dialogs.error.as_deref().is_some_and(is_gpkg_target_error) {
+                        app.dialogs.error = None;
+                    }
                     vec![
                         v["table"].as_str().unwrap_or_default().to_string(),
                         v["inserts"].to_string(),

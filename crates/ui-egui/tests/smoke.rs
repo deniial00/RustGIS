@@ -266,6 +266,20 @@ fn geopackage_edit_dialog_counts_follow_edits_and_surviving_undo_snapshots() {
         let revision = h.state().session.revision;
         h.run_steps(3);
         assert_eq!(h.state().session.revision, revision, "pendingEdits must not invalidate its own count cache");
+        // Undoing the layer's addition makes the target unavailable; Redo restores the same
+        // instance, and the stale refusal must go with it rather than sit beside valid counts.
+        for _ in 0..3 {
+            h.state_mut().run("edit.undo", json!({})).unwrap();
+        }
+        h.run_steps(3);
+        assert!(h.state().dialogs.error.as_deref().is_some_and(|e| e.contains("no longer available")), "{:?}", h.state().dialogs.error);
+        for _ in 0..3 {
+            h.state_mut().run("edit.redo", json!({})).unwrap();
+        }
+        h.run_steps(3);
+        assert_eq!(h.state().session.map().layer(id).unwrap().instance_id(), instance);
+        assert_eq!(h.state().dialogs.error, None, "the restored target's stale refusal must clear");
+        assert_eq!(h.state().dialogs.list[2], "2");
 
         h.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel").click();
         h.run_steps(3);
