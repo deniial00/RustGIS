@@ -716,7 +716,9 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 };
                 // A layer group lists at its topmost layer (its layers, its subgroups' too, are
                 // kept together), a group in another inside that one; while filtering, when its
-                // name, a group's above it or one of its layers' or subgroups' names matches.
+                // name, a group's above it or one of its layers' or subgroups' names matches
+                // (judged once per group, not once per layer).
+                let mut listed: HashMap<u32, bool> = HashMap::new();
                 for layer in &layers {
                     let tiles_before = tile_rows.len();
                     tiles_at(app, ui, Some(layer.id), &mut tile_rows);
@@ -728,7 +730,8 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             service_group_row(app, ui, group, &layers, scale, t);
                         }
                     } else if let Some(group) = top.and_then(|g| layer_groups.iter().find(|x| x.id == g)) {
-                        if group_listed(app.session.map(), group.id, &shows) && shown.insert(group.id) {
+                        let listed = *listed.entry(group.id).or_insert_with(|| group_listed(app.session.map(), group.id, &shows));
+                        if listed && shown.insert(group.id) {
                             layer_group_row(app, ui, group, &layers, scale, reorder, &mut rows, 1, t);
                         }
                     } else if shows(&layer.name) {
