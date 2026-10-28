@@ -47,13 +47,21 @@ fn source(r: &Raster, view: &View, place: Place, k: f64, dx: f64, dy: f64) -> Op
     (c.is_finite() && row.is_finite()).then_some((c, row))
 }
 
+/// A whole geographic turn has exactly this many columns. Compare the grid's span rather
+/// than truncating `360 / pixel_width`: a regional grid can end partway through that column.
+pub(crate) fn full_turn_width(r: &Raster) -> Option<i64> {
+    let span = f64::from(r.width) * r.transform.pixel_width.abs();
+    (r.transformer().is_geographic() && (span - 360.0).abs() <= 360.0 * 16.0 * f64::EPSILON).then_some(i64::from(r.width))
+}
+
 /// The value of `band` at a pixel, unless it is no data, masked or outside the grid.
-fn value(r: &Raster, mask: &RasterMask, band: usize, col: i64, row: i64) -> Option<f32> {
+fn value(r: &Raster, mask: &RasterMask, band: usize, col: i64, row: i64, wrap_width: Option<i64>) -> Option<f32> {
+    let col = wrap_width.map_or(col, |w| if col < 0 || col >= w { col.rem_euclid(w) } else { col });
     r.value(band, col, row).filter(|v| !mask.hides(*v))
 }
 
-fn sample(r: &Raster, mask: &RasterMask, band: usize, c: f64, row: f64, resampling: Resampling) -> f32 {
-    let nearest = || value(r, mask, band, c.floor() as i64, row.floor() as i64).unwrap_or(f32::NAN);
+fn sample(r: &Raster, mask: &RasterMask, band: usize, c: f64, row: f64, resampling: Resampling, wrap_width: Option<i64>) -> f32 {
+    let nearest = || value(r, mask, band, c.floor() as i64, row.floor() as i64, wrap_width).unwrap_or(f32::NAN);
     if resampling == Resampling::Nearest {
         return nearest();
     }
@@ -62,7 +70,7 @@ fn sample(r: &Raster, mask: &RasterMask, band: usize, c: f64, row: f64, resampli
     let (i, j) = (x.floor(), y.floor());
     let (fx, fy) = ((x - i) as f32, (y - j) as f32);
     let (i, j) = (i as i64, j as i64);
-    let v = |i, j| value(r, mask, band, i, j);
+    let v = |i, j| value(r, mask, band, i, j, wrap_width);
     match (v(i, j), v(i + 1, j), v(i, j + 1), v(i + 1, j + 1)) {
         (Some(a), Some(b), Some(cc), Some(d)) => {
             let top = a + (b - a) * fx;
@@ -212,6 +220,7 @@ fn draw_with(
         gw,
         // Half a turn of a geographic grid's columns.
         seam: if r.transformer().is_geographic() { 180.0 / r.transform.pixel_width.abs() } else { f64::INFINITY },
+        wrap_width: full_turn_width(r),
         bands: &bands,
         data: bands.iter().map(|b| r.bands.get(*b).map(|b| b.data.as_slice())).collect(),
         relief,
@@ -296,6 +305,8 @@ struct Pass1<'a> {
     /// Columns between neighbouring grid points further apart than this straddle a geographic
     /// grid's jump at the antimeridian (or the map's edge): not interpolated across.
     seam: f64,
+    /// Cyclic neighbours only for a geographic grid spanning exactly one turn.
+    wrap_width: Option<i64>,
     bands: &'a [usize],
     /// The renderer's bands' values.
     data: Vec<Option<&'a [f32]>>,
@@ -390,18 +401,18 @@ impl Pass1<'_> {
                 } else {
                     for (bi, b) in self.bands.iter().enumerate() {
                         if let Some(slot) = row_vals.get_mut(dx * nb + bi) {
-                            *slot = sample(r, self.mask, *b, c, row, self.resampling);
+                            *slot = sample(r, self.mask, *b, c, row, self.resampling, self.wrap_width);
                         }
                     }
                 }
                 if let (Some((az, alt, zf)), Some(b)) = (self.relief, self.bands.first()) {
                     let (ci, ri) = cell;
-                    let centre = value(r, self.mask, *b, ci, ri).unwrap_or(0.0) as f64;
+                    let centre = value(r, self.mask, *b, ci, ri, self.wrap_width).unwrap_or(0.0) as f64;
                     let mut z = [centre; 9];
                     for (k, (dx, dy)) in
                         [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate()
                     {
-                        z[k] = value(r, self.mask, *b, ci + dx, ri + dy).map(f64::from).unwrap_or(centre);
+                        z[k] = value(r, self.mask, *b, ci + dx, ri + dy, self.wrap_width).map(f64::from).unwrap_or(centre);
                     }
                     if let Some(s) = shade.get_mut(i) {
                         *s = hillshade(&z, self.cell.0, self.cell.1, az, alt, zf);
@@ -452,6 +463,102 @@ mod tests {
     use rustgis_map::raster::RasterStyle;
 
     use super::*;
+
+    fn sampling_grid(pixel_width: f64, crs: Crs, nodata: Option<f64>) -> Raster {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width, pixel_height: -60.0 };
+        let data = [0.0, 10.0, 20.0, 30.0].repeat(3);
+        Raster::new("sampling", 4, 3, vec![data], gt, crs, nodata, ColorHint::Gray, "Float32").unwrap()
+    }
+
+    #[test]
+    fn bilinear_samples_blend_across_both_ends_of_a_full_turn() {
+        for crs in [Crs::LonLat, Crs::from_epsg(4269).unwrap()] {
+            for pixel_width in [90.0, -90.0] {
+                let r = sampling_grid(pixel_width, crs, None);
+                let mask = RasterMask::default();
+                let wrap_width = full_turn_width(&r);
+                for (col, expected) in [(0.0, 15.0), (0.25, 7.5), (3.75, 22.5)] {
+                    assert_eq!(sample(&r, &mask, 0, col, 1.5, Resampling::Bilinear, wrap_width), expected);
+                }
+                assert_eq!(sample(&r, &mask, 0, 0.25, 1.5, Resampling::Nearest, wrap_width), 0.0);
+                // Rows do not wrap: the original nearest fallback still applies.
+                assert_eq!(sample(&r, &mask, 0, 0.25, 0.25, Resampling::Bilinear, wrap_width), 0.0);
+                assert!(sample(&r, &mask, 0, 0.25, -0.25, Resampling::Bilinear, wrap_width).is_nan());
+            }
+        }
+    }
+
+    #[test]
+    fn bilinear_neighbours_keep_regional_projected_and_nodata_edges() {
+        let mask = RasterMask::default();
+        // Neither a partial column short of a turn nor an overlapping grid is cyclic.
+        for (pixel_width, crs) in [(10.0, Crs::LonLat), (89.9, Crs::LonLat), (90.1, Crs::LonLat), (90.0, Crs::WebMercator)] {
+            let r = sampling_grid(pixel_width, crs, None);
+            let wrap_width = full_turn_width(&r);
+            for (col, expected) in [(0.25, 0.0), (3.75, 30.0)] {
+                assert_eq!(sample(&r, &mask, 0, col, 1.5, Resampling::Bilinear, wrap_width), expected);
+            }
+        }
+        let r = sampling_grid(90.0, Crs::LonLat, None);
+        let masked = RasterMask { values: vec![30.0], ..RasterMask::default() };
+        assert_eq!(sample(&r, &masked, 0, 0.25, 1.5, Resampling::Bilinear, full_turn_width(&r)), 0.0);
+        assert!(sample(&r, &masked, 0, 3.75, 1.5, Resampling::Bilinear, full_turn_width(&r)).is_nan());
+        let nodata = sampling_grid(90.0, Crs::LonLat, Some(30.0));
+        assert_eq!(sample(&nodata, &mask, 0, 0.25, 1.5, Resampling::Bilinear, full_turn_width(&nodata)), 0.0);
+        assert!(sample(&nodata, &mask, 0, 3.75, 1.5, Resampling::Bilinear, full_turn_width(&nodata)).is_nan());
+    }
+
+    #[test]
+    fn regional_relief_keeps_the_centre_fallback_at_its_edge() {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+        let data = [0.0, 1_000_000.0, 2_000_000.0, 3_000_000.0].repeat(18);
+        let r = Raster::new("regional relief", 4, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let mut style = RasterStyle::default_for(&r);
+        style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0 };
+        style.resampling = Resampling::Nearest;
+        let view = View {
+            width: 1.0,
+            height: 1.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: lonlat_to_merc(Coord::new(5.0, 0.0)), res: 1000.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let mut pm = Pixmap::new(1, 1).unwrap();
+        draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+        let z = [0.0, 0.0, 1_000_000.0, 0.0, 0.0, 1_000_000.0, 0.0, 0.0, 1_000_000.0];
+        let (cell_x, cell_y) = r.cell_size_m();
+        let shade = hillshade(&z, cell_x, cell_y, 270.0, 45.0, 1.0);
+        let expected = Colorizer::new(&style, &r, None).color(&[0.0], Some(shade)).unwrap();
+        let actual = pm.pixel(0, 0).unwrap();
+        assert_eq!([actual.red(), actual.green(), actual.blue(), actual.alpha()], expected);
+    }
+
+    #[test]
+    fn shaded_relief_is_unchanged_when_the_geographic_seam_moves() {
+        let elevations: Vec<f32> = (0..36).map(|c| (((c as f64 + 0.5) * 10.0).to_radians().sin() * 1_000_000.0) as f32).collect();
+        let view = View {
+            width: 80.0,
+            height: 40.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: Coord::new(0.0, 0.0), res: 50_000.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        let render = |origin_x, shift: usize| {
+            let gt = GeoTransform { origin_x, origin_y: 90.0, pixel_width: 10.0, pixel_height: -10.0 };
+            let data: Vec<f32> = (0..36 * 18).map(|i| elevations[(i % 36 + shift) % 36]).collect();
+            let r = Raster::new("relief", 36, 18, vec![data], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+            let mut style = RasterStyle::default_for(&r);
+            style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 270.0, altitude: 45.0, z_factor: 1.0 };
+            style.resampling = Resampling::Nearest;
+            let mut pm = Pixmap::new(80, 40).unwrap();
+            draw(&mut pm, &r, &style, None, &view, 1.0, false, Place::Flat(&Flat::Mercator, "mercator"));
+            pm
+        };
+        let seam = render(0.0, 0);
+        let interior = render(-180.0, 18);
+        assert!(seam.pixels().iter().all(|p| p.alpha() == 255));
+        assert_eq!(seam.data(), interior.data(), "the first and last columns have the same slopes as interior columns");
+    }
 
     /// #348: masked values draw as no data, are never blended into their neighbours, and leave
     /// the stretch to the values shown.
