@@ -1500,6 +1500,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 .map(|l| {
                     // (Sharing the rows: `Features` is copy-on-write, replaced just below.)
                     let mut layer = l.clone();
+                    layer.renew_instance_id();
                     layer.dataset.features = l
                         .dataset
                         .features

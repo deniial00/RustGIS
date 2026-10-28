@@ -157,6 +157,134 @@ fn write_dialog_gpkg(path: &std::path::Path) {
     gpkg::write_in(&data, path, Crs::LonLat).unwrap();
 }
 
+/// Undo rewinds map-local IDs, not a dialog's ownership of a particular live layer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_edit_dialogs_refuse_reused_layer_ids() {
+    use rustgis_engine::data::{Value, source::gpkg::edit::EditTable};
+
+    for same_source in [false, true] {
+        for intervening_frame in [false, true] {
+            for (dialog, button) in [("gpkgSave", "Save"), ("gpkgDiscard", "Discard")] {
+                let dir = tempfile::tempdir().unwrap();
+                let a = dir.path().join("alias-a.gpkg");
+                let b = dir.path().join("alias-b.gpkg");
+                write_dialog_gpkg(&a);
+                write_dialog_gpkg(&b);
+                let mut h = harness();
+                h.state_mut().run("project.new", json!({})).unwrap();
+                h.state_mut().run("edit.enable", json!({"on": true})).unwrap();
+                let id = h.state_mut().run("gpkg.addLayer", json!({"path": a, "table": "roads", "name": "R"})).unwrap()["layer"]
+                    .as_u64()
+                    .unwrap() as u32;
+                assert_eq!(id, 1);
+                let instance = h.state().session.map().layer(id).unwrap().instance_id();
+                h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+                h.run_steps(3);
+                assert_eq!(h.state().dialogs.list[4], a.to_string_lossy());
+                assert_eq!(h.state().dialogs.gpkg_instance, Some(instance));
+
+                h.state_mut().run("edit.undo", json!({})).unwrap();
+                assert!(h.state().session.map().layer(id).is_none());
+                let replacement = if same_source { &a } else { &b };
+                let other_id =
+                    h.state_mut().run("gpkg.addLayer", json!({"path": replacement, "table": "roads", "name": "R"})).unwrap()["layer"]
+                        .as_u64()
+                        .unwrap() as u32;
+                assert_eq!(other_id, id);
+                let other_instance = h.state().session.map().layer(id).unwrap().instance_id();
+                assert_ne!(other_instance, instance);
+                h.state_mut().run("edit.setValue", json!({"layer": id, "row": 0, "field": "name", "value": "wrong source saved"})).unwrap();
+                if intervening_frame {
+                    h.run_steps(3);
+                    assert!(h.state().dialogs.list.is_empty(), "a replacement must not inherit the old source preview");
+                }
+                // With no intervening frame this clicks the original rendered confirmation.
+                h.get_by_role_and_label(egui::accesskit::Role::Button, button).click();
+                h.run_steps(3);
+                assert_eq!(h.state().dialogs.open, Some(dialog));
+                assert!(h.state().dialogs.error.is_some());
+                assert_eq!(h.state().dialogs.gpkg_instance, Some(instance), "rendering must never adopt the replacement");
+                assert!(h.state().dialogs.list.is_empty());
+                assert_eq!(
+                    h.state().session.map().layer(id).unwrap().dataset.features[0].attrs[0],
+                    Value::Text("wrong source saved".into()),
+                    "Discard must leave the replacement's pending edit intact"
+                );
+                assert_eq!(h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap()["updates"], 1);
+                for path in [&a, &b] {
+                    let stored = EditTable::open(path, "roads").unwrap().read_editable(10).unwrap();
+                    assert_eq!(
+                        stored.features[0].attrs[0],
+                        Value::Text("original".into()),
+                        "{button}: same_source={same_source}, intervening_frame={intervening_frame}, {path:?}"
+                    );
+                }
+                h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+                h.run_steps(3);
+                assert_eq!(h.state().dialogs.gpkg_instance, Some(other_instance));
+                assert_eq!(h.state().dialogs.list[4], replacement.to_string_lossy());
+                assert_eq!(h.state().dialogs.list[2], "1");
+                assert!(h.state().dialogs.error.is_none());
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_edit_dialog_counts_follow_edits_and_surviving_undo_snapshots() {
+    use rustgis_engine::data::{Value, source::gpkg::edit::EditTable};
+
+    for (dialog, button) in [("gpkgSave", "Save"), ("gpkgDiscard", "Discard")] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live-counts.gpkg");
+        write_dialog_gpkg(&path);
+        let mut h = harness();
+        h.state_mut().run("project.new", json!({})).unwrap();
+        h.state_mut().run("edit.enable", json!({"on": true})).unwrap();
+        let id = h.state_mut().run("gpkg.addLayer", json!({"path": path, "table": "roads"})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let instance = h.state().session.map().layer(id).unwrap().instance_id();
+        h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.list[2], "0");
+        for row in [0, 1] {
+            h.state_mut().run("edit.setValue", json!({"layer": id, "row": row, "field": "name", "value": "pending"})).unwrap();
+            h.run_steps(3);
+            assert_eq!(h.state().dialogs.list[2], (row + 1).to_string(), "open counts follow subsequent edits");
+        }
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.list[2], "1");
+        assert_eq!(h.state().session.map().layer(id).unwrap().instance_id(), instance);
+        assert!(h.state().dialogs.error.is_none());
+        h.state_mut().run("edit.redo", json!({})).unwrap();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.list[2], "2");
+        assert_eq!(h.state().session.map().layer(id).unwrap().instance_id(), instance);
+        assert!(h.state().dialogs.error.is_none());
+        let revision = h.state().session.revision;
+        h.run_steps(3);
+        assert_eq!(h.state().session.revision, revision, "pendingEdits must not invalidate its own count cache");
+
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel").click();
+        h.run_steps(3);
+        h.state_mut().run("ui.dialog", json!({"name": dialog})).unwrap();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.list[2], "2", "reopening counts the current state");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, button).click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.open, None, "{:?}", h.state().dialogs.error);
+        let expected = Value::Text(if button == "Save" { "pending" } else { "original" }.into());
+        let stored = EditTable::open(&path, "roads").unwrap().read_editable(10).unwrap();
+        for row in [0, 1] {
+            assert_eq!(stored.features[row].attrs[0], expected);
+            assert_eq!(h.state().session.map().layer(id).unwrap().dataset.features[row].attrs[0], expected);
+        }
+        assert_eq!(h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap()["updates"], 0);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn geopackage_edit_dialogs_refuse_map_and_project_identity_changes() {

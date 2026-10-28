@@ -190,6 +190,9 @@ pub struct Layer {
     /// The GeoPackage table this layer's edits save to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpkg: Option<source::GpkgEdit>,
+    /// Process-local identity, preserved by snapshots but never stored in a project.
+    #[serde(skip, default = "next_layer_instance")]
+    instance_id: u64,
     /// Shared, like the features: an undo snapshot or other copy of the layer doesn't copy it.
     #[serde(skip)]
     projected: std::sync::Arc<Vec<Option<Geometry>>>,
@@ -220,7 +223,24 @@ fn yes() -> bool {
     true
 }
 
+fn next_layer_instance() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Layer {
+    /// Identifies this live layer, independently of its reusable map-local ID.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Starts a distinct live instance after copying a layer or its owning map.
+    /// Undo and render snapshots must retain the original identity instead.
+    pub fn renew_instance_id(&mut self) {
+        self.instance_id = next_layer_instance();
+    }
+
     /// Baseline rows for a layer loaded for source editing.
     pub fn edit_versions(&self) -> Option<&source::Versions> {
         self.postgis.as_ref().map(|e| &e.versions).or_else(|| self.gpkg.as_ref().map(|e| &e.versions))
@@ -315,6 +335,7 @@ impl Layer {
         let renderer = Renderer::Single(Symbol::default_for(dataset.geometry_type, id));
         Layer {
             id,
+            instance_id: next_layer_instance(),
             name: dataset.name.clone(),
             visible: true,
             labels: Labeling::default_for(&dataset),
@@ -1708,6 +1729,7 @@ impl Map {
     pub fn add_layer(&mut self, mut layer: Layer) -> u32 {
         let id = self.next_id();
         layer.id = id;
+        layer.renew_instance_id();
         layer.selection.clear();
         layer.touch_geometry();
         self.insert_on_top(layer);
