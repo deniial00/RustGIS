@@ -6340,6 +6340,20 @@ mod tests {
         let m = h.state().session.map();
         assert_eq!(m.group_of(rivers).map(|g| g.id), Some(base));
         assert_eq!(m.layers.last().map(|l| l.id), Some(rivers));
+        // A subgroup's row dragged above its group's: out to the top level, with its layers;
+        // undone, back inside.
+        let members = m.group_layers(water);
+        let undo = h.state().session.undo_depth();
+        h.run_steps(2);
+        let from = h.get_by_label("Water").rect().center();
+        let row = h.get_by_label("Base").rect();
+        drag_layer(&mut h, from, pos2(row.center().x, row.min.y + row.height() * 0.125));
+        let m = h.state().session.map();
+        assert_eq!(m.group(water).and_then(|g| g.parent), None);
+        assert_eq!(m.layers.iter().take(members.len()).map(|l| l.id).collect::<Vec<_>>(), members);
+        assert_eq!(h.state().session.undo_depth(), undo + 1);
+        h.state_mut().run("edit.undo", Value::Null).unwrap();
+        assert_eq!(h.state().session.map().group(water).and_then(|g| g.parent), Some(base));
     }
 
     /// The Data Source view (#301) names a group by a file's name (its path on hover) or a web
