@@ -154,9 +154,11 @@ pub enum Restored {
     Expired,
 }
 
-/// Reads the token remembered on this computer, once, unless a token was given or forgotten this
-/// session first. An expired or damaged one is deleted. Reading may ask the system to unlock its
-/// store: the app calls this off the frame (requests to data hosts call it themselves).
+/// Reads the token remembered on this computer, once per store given. A token given or forgotten
+/// this session first wins: the store then only tells whether it holds that token (another session
+/// of the process may have remembered it). An expired or damaged one is deleted. Reading may ask
+/// the system to unlock its store: the app calls this off the frame (requests to data hosts call
+/// it themselves).
 pub fn restore() -> Restored {
     let mut read = lock(&REMEMBERED.read);
     if *read {
@@ -164,10 +166,11 @@ pub fn restore() -> Restored {
     }
     *read = true;
     let Some(store) = secret_store() else { return Restored::Nothing };
-    if has_token() {
+    let Ok(Some(secret)) = store.load(ACCOUNT) else { return Restored::Nothing };
+    if let Some(session) = lock(token_store()).as_deref() {
+        REMEMBERED.kept.store(checked(secret.expose()).ok().flatten().as_deref() == Some(session), Ordering::SeqCst);
         return Restored::Nothing;
     }
-    let Ok(Some(secret)) = store.load(ACCOUNT) else { return Restored::Nothing };
     match checked(secret.expose()) {
         Ok(Some(token)) if !expired(&token, now_secs()) => {
             *lock(token_store()) = Some(token);
@@ -218,27 +221,22 @@ pub fn forget_if_expired() -> bool {
 pub fn login(token: &str, remember: bool) -> Result<Option<&'static str>, String> {
     let token = checked(token)?.ok_or("token is required (Earthdata Login › Generate Token)")?;
     let mut read = lock(&REMEMBERED.read);
-    let unread = !*read;
     *read = true;
     REMEMBERED.expired.store(false, Ordering::SeqCst);
     *lock(token_store()) = Some(token.clone());
-    let store = secret_store();
-    if remember {
-        let Some(store) = store else { return Ok(Some(NO_STORE)) };
-        if store.save(ACCOUNT, &Secret::new(token)).is_err() {
-            return Ok(Some(NOT_REMEMBERED));
-        }
+    let Some(store) = secret_store() else { return Ok(remember.then_some(NO_STORE)) };
+    let kept = REMEMBERED.kept.load(Ordering::SeqCst);
+    if remember && store.save(ACCOUNT, &Secret::new(token)).is_ok() {
         REMEMBERED.kept.store(true, Ordering::SeqCst);
         return Ok(None);
     }
-    // A store not read this session may hold one from an earlier run.
-    let kept = REMEMBERED.kept.load(Ordering::SeqCst);
-    let Some(store) = store.filter(|_| kept || unread) else { return Ok(None) };
-    match store.delete(ACCOUNT) {
-        Ok(()) => {
-            REMEMBERED.kept.store(false, Ordering::SeqCst);
-            Ok(None)
-        }
+    // Not to be remembered, or the store didn't take it: the one remembered before goes, here or
+    // in another run, so the next run doesn't bring it back.
+    let deleted = store.delete(ACCOUNT);
+    REMEMBERED.kept.store(kept && deleted.is_err(), Ordering::SeqCst);
+    match deleted {
+        _ if remember => Ok(Some(NOT_REMEMBERED)),
+        Ok(()) => Ok(None),
         // A system without a credential store had nowhere to keep one.
         Err(rustgis_data::secrets::SecretError::Unavailable(_)) if !kept => Ok(None),
         Err(_) => Ok(Some(NOT_FORGOTTEN)),
@@ -845,6 +843,19 @@ mod tests {
         assert!(is_remembered());
         assert_eq!(restore(), Restored::Nothing, "read once");
 
+        // The store given again (another Python session opting in) still knows the token is
+        // remembered; a token the store doesn't hold isn't.
+        set_secret_store(Some(store.clone()));
+        assert!(!is_remembered());
+        assert_eq!(restore(), Restored::Nothing);
+        assert!(is_remembered() && has_token());
+        set_token(Some("typed")).unwrap();
+        set_secret_store(Some(store.clone()));
+        restore();
+        assert!(!is_remembered());
+        assert_eq!(stored(&store).as_deref(), Some(LASTING), "nothing is deleted");
+        set_token(Some(LASTING)).unwrap();
+
         // A token given without Remember replaces the remembered one, which is deleted.
         assert_eq!(login("other", false), Ok(None));
         assert_eq!(stored(&store), None);
@@ -895,6 +906,27 @@ mod tests {
         assert_eq!(restore(), Restored::Nothing);
         assert_eq!(stored(&store), None);
         assert!(!has_token());
+
+        // A store that won't take a new token doesn't keep the old one either: the next run
+        // doesn't bring back the token this one replaced.
+        struct RefusesSaves(Arc<MemorySecrets>);
+        impl SecretStore for RefusesSaves {
+            fn load(&self, account: &str) -> Result<Option<Secret>, SecretError> {
+                self.0.load(account)
+            }
+            fn save(&self, _: &str, _: &Secret) -> Result<(), SecretError> {
+                Err(SecretError::Denied)
+            }
+            fn delete(&self, account: &str) -> Result<(), SecretError> {
+                self.0.delete(account)
+            }
+        }
+        relaunch(&store);
+        assert_eq!(login(LASTING, true), Ok(None));
+        set_secret_store(Some(Arc::new(RefusesSaves(store.clone()))));
+        assert_eq!(login("other", true), Ok(Some(NOT_REMEMBERED)));
+        assert_eq!(stored(&store), None);
+        assert!(!is_remembered());
 
         // Without a store, or with one that refuses, the token is kept for the session and says so.
         set_secret_store(None);

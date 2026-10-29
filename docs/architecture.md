@@ -92,9 +92,9 @@ model listing.
   Keychain calls and network I/O never run under the registry lock.
 - **Earthdata Login token.** `rustgis_tiles::earthdata::set_secret_store` gets the desktop's
   store at start, and `prefs::opt_in`'s for the command line and Python. `earthdata.login` with
-  `remember` keeps the token at `earthdata/token`, and without it deletes the remembered one
-  (when this session knows of one or hasn't read the store yet); `earthdata.logout` always
-  deletes it. The token is read back once, on the first
+  `remember` keeps the token at `earthdata/token`, and without it (or when the store refuses
+  it) deletes the remembered one; `earthdata.logout` always deletes it. The token is read back
+  once per store given, on the first
   request to an Earthdata data host or when the NASA Earthaccess pane opens (on a worker), never
   over a token typed this session. An expired token is deleted, not sent, and the pane and the
   refusal message ask for a new one. The token and its store are process-global, like the
