@@ -47,8 +47,14 @@ fn status() -> Value {
 }
 
 fn login(_s: &mut Session, p: &Value) -> CmdResult {
+    // Judged before anything happens: a mistyped `remember` must not delete a remembered token.
+    let remember = match p.get("remember") {
+        None => false,
+        Some(Value::Bool(on)) => *on,
+        Some(_) => return Err("remember is true or false".into()),
+    };
     let token = ps(p, "token").map(str::trim).filter(|t| !t.is_empty()).ok_or("token is required (Earthdata Login › Generate Token)")?;
-    let warning = earthdata::login(token, b(p, "remember").unwrap_or(false))?;
+    let warning = earthdata::login(token, remember)?;
     let mut out = status();
     if let Some(w) = warning {
         out["warning"] = json!(w);
