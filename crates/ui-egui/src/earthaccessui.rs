@@ -440,14 +440,14 @@ fn auth(app: &mut RustGisApp, ui: &mut egui::Ui, w: f32) {
             app.ui.earthaccess.remember = remembered;
         }
         if earthdata::has_token() {
-            let mut text = match expiry {
+            let text = match expiry {
                 Some(e) => crate::i18n::fmt("The token expires on {date}.", &[("date", &earthdata::date_of(e))]),
                 None => tl!("A token is set.").to_string(),
             };
-            if remembered {
-                text = format!("{text} {}", tl!("It is remembered on this computer."));
-            }
             ui.label(egui::RichText::new(text).small());
+            if remembered {
+                ui.label(egui::RichText::new(tl!("It is remembered on this computer.")).small());
+            }
             if ui.button(tl!("Remove token")).clicked() {
                 let r = app.run("earthdata.logout", Value::Null);
                 logged_in(app, r);
