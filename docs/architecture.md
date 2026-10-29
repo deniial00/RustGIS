@@ -90,8 +90,8 @@ model listing.
   the requested bucket's explicit-grant status. Copy only that login and grant boolean, not
   the grant list; parse and validate addresses and prepare signatures outside the lock.
   Keychain calls and network I/O never run under the registry lock.
-- **Earthdata Login token.** `rustgis_tiles::earthdata::set_secret_store` gets the desktop's
-  store at start, and `prefs::opt_in`'s for the command line and Python. `earthdata.login` with
+- **Earthdata Login token.** `rustgis_tiles::earthdata::set_secret_store` gets `Services::secrets`
+  from `RustGisApp::with_services`, and `prefs::opt_in`'s store for the command line and Python. `earthdata.login` with
   `remember` keeps the token at `earthdata/token`, and without it (or when the store refuses
   it) deletes the remembered one; `earthdata.logout` always deletes it. The token is read back
   once per store given, on the first
