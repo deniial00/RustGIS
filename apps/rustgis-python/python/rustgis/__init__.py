@@ -716,7 +716,8 @@ class Session(_Api):
             FlatGeobuf, KML, GPX, GeoTIFF and more).
         plugins: Load the plugins installed for the desktop app first.
         use_saved_secrets: Use the connections the desktop app saved, with the passwords and
-            keys it keeps in the system keychain (read only when a command needs one).
+            keys it keeps in the system keychain, and its remembered Earthdata Login token
+            (read only when a command needs one).
             Parameters given to a command win. Off by default: nothing reads the keychain.
             When the keychain can't be used the session goes on without the saved secret and
             logs one ``WARNING`` to the ``rustgis`` logger; that diagnostic never raises or emits

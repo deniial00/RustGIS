@@ -58,8 +58,10 @@ mod prefs {
     pub fn services() -> Services {
         let secrets: std::sync::Arc<dyn rustgis_engine::data::secrets::SecretStore> =
             std::sync::Arc::new(rustgis_keychain::Keychain::default());
-        // The ChatGPT sign-in's tokens go to the same keychain (its accounts stay in the file).
+        // The ChatGPT sign-in's tokens go to the same keychain (its accounts stay in the file), and
+        // so does the Earthdata Login token remembered on this computer.
         rustgis_assistant::chatgpt::set_secret_store(Some(secrets.clone()));
+        rustgis_engine::render::rustgis_tiles::earthdata::set_secret_store(Some(secrets.clone()));
         Services {
             load_pref: Some(Box::new(|key: &str| read().get(key).and_then(Value::as_str).map(str::to_string))),
             save_pref: Some(Box::new(|key: &str, value: &str| {
