@@ -403,7 +403,7 @@ pub fn sourcecoop(app: &mut RustGisApp, ui: &mut egui::Ui) {
     let mut more = false;
     match app.ui.catalogs.product.clone() {
         None => {
-            egui::ScrollArea::vertical().max_height(300.0).id_salt("sc_products").show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("sc_products").show(ui, |ui| {
                 for p in &app.ui.catalogs.products {
                     let r = ui.add(egui::Button::new(&p.title).wrap().min_size(vec2(ui.available_width(), 0.0)));
                     let r = r.on_hover_text(format!("{}/{}\n{}", p.account, p.id, p.description));
@@ -424,7 +424,7 @@ pub fn sourcecoop(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 ui.label(egui::RichText::new(format!("{account}/{product}/{}", app.ui.catalogs.path)).monospace());
             });
             let base = format!("{product}/");
-            egui::ScrollArea::vertical().max_height(300.0).id_salt("sc_files").show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("sc_files").show(ui, |ui| {
                 for p in &app.ui.catalogs.listing.prefixes {
                     let label = p.strip_prefix(&base).unwrap_or(p).strip_prefix(app.ui.catalogs.path.as_str()).unwrap_or(p);
                     // A folder: the folder icon (drawn) and its name.
