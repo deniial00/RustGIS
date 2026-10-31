@@ -640,8 +640,10 @@ impl<'a> RequestDiagnostics<'a> {
             return;
         }
         // A status the caller expects is an answer, not a failure for the history; a caller
-        // that treats the refusal as an error says so itself.
+        // that treats the refusal as an error says so itself. One bounded record says the
+        // omission, so a misconfigured tile source isn't silent.
         if self.status.is_some_and(|status| self.omit.contains(&status)) {
+            self.capture.absence_said(self.url, self.status.unwrap());
             return;
         }
         let (url, _) = split_download_limit(self.url);
@@ -1659,7 +1661,7 @@ mod native {
 mod native {
     use super::{Done, DoneDetailed};
 
-    pub(super) fn fetch(url: String, done: Done) {
+    pub(super) fn fetch(url: String, done: Done, _omit: &'static [u16]) {
         done(Err(format!("{url}: this build has no way to fetch tiles")));
     }
 
@@ -1849,21 +1851,29 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn network_diagnostics_skip_routine_tile_404s_and_keep_other_statuses() {
-        use rustgis_data::diagnostics::History;
+        use rustgis_data::diagnostics::{History, Severity};
         let history = History::default();
         let _scope = history.enter();
         let not_found = "HTTP/1.1 404 Missing\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let missing = serve(vec![not_found.into(), not_found.into()]);
-        // Tiles a server doesn't have are routine: not a network record.
+        let missing = serve(vec![not_found.into(), not_found.into(), not_found.into(), not_found.into()]);
+        // Tiles a server doesn't have are routine: not a network record each, but the omission
+        // is said once, so a misconfigured source isn't silent.
         let url = format!("{missing}/tiles/0/0/0.png");
         assert_eq!(native::get(&native::agent(), &url, &[404]).unwrap_err(), "http status: 404");
-        assert!(network_records(&history, &url).is_empty());
-        // A style's or TileJSON's 404 is a real failure: kept, while a tile's would be omitted.
+        let records = network_records(&history, &url);
+        assert_eq!(records.len(), 1);
+        assert_eq!((records[0].severity, records[0].source.as_str()), (Severity::Warning, "Network"));
+        // A style's or TileJSON's 404 is a real failure: its own record, and the omission is
+        // not said twice.
         let url = format!("{missing}/style.json");
         assert_eq!(native::get(&native::agent(), &url, &[]).unwrap_err(), "http status: 404");
         let records = network_records(&history, &url);
         assert_eq!(records.len(), 1, "a JSON want's 404 is a real failure");
         assert_eq!(records[0].network.as_ref().unwrap().status, Some(404));
+        // A later omitted 404 adds nothing.
+        let url = format!("{missing}/tiles/9/9/9.png");
+        assert_eq!(native::get(&native::agent(), &url, &[404]).unwrap_err(), "http status: 404");
+        assert!(network_records(&history, &url).is_empty());
         // A refusal that is not a missing tile is kept.
         let base = serve(vec!["HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]);
         let url = format!("{base}/tiles/0/0/0.png");

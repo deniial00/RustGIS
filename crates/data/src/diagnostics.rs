@@ -78,6 +78,8 @@ struct State {
     next_id: u64,
     generation: u64,
     records: VecDeque<Record>,
+    /// Said once: expected absences are omitted, so a misconfigured tile source is not silent.
+    absence_said: bool,
 }
 
 static CLOCK: Mutex<Option<fn() -> u64>> = Mutex::new(None);
@@ -225,6 +227,38 @@ impl History {
 }
 
 impl Capture {
+    /// Says once, per history, that expected absences (a tile past a map's edge, a store's
+    /// absent chunk) are omitted: the pane is not silent about a misconfigured tile source
+    /// while the history stays free of their flood. Later absences add nothing.
+    pub fn absence_said(&self, url: &str, status: u16) {
+        let Some(state) = self.0.upgrade() else { return };
+        let first = {
+            let mut guard = lock(&state);
+            !std::mem::replace(&mut guard.absence_said, true)
+        };
+        if !first {
+            return;
+        }
+        History(state).retain(Record {
+            id: 0,
+            timestamp_ms: timestamp_ms(),
+            severity: Severity::Warning,
+            source: "Network".to_string(),
+            message: bounded(
+                &format!("expected absences are omitted from this history: the first was HTTP {status} for {url}"),
+                MAX_MESSAGE_BYTES,
+            ),
+            details: String::new(),
+            network: Some(Network {
+                url: bounded(url, MAX_URL_BYTES),
+                method: "GET".to_string(),
+                status: Some(status),
+                duration_ms: None,
+                kind: NetworkKind::Http,
+            }),
+        });
+    }
+
     /// Retains one sanitized failure only in the originating live session. Callers supply local
     /// classifications/metadata only, never bodies, arbitrary server text, or header dumps.
     pub fn network_failure(&self, source: &str, message: &str, details: &str, mut network: Network) {
@@ -332,7 +366,11 @@ fn credential_header(key: &str) -> bool {
 /// ordinary bracket in a path, a name or a size ("Layer {2020} failed").
 fn opens_structured(rest: &str) -> bool {
     match rest.chars().next() {
-        Some('{') | Some('[') => rest.trim_start_matches(['{', '[', ' ', '\t', '\n', '\r']).starts_with(['"', '{', '[']),
+        // The trim scans a bounded window: a long run of brackets is one O(window) look per
+        // bracket, not a quadratic sweep of the whole text.
+        Some('{') | Some('[') => {
+            rest.get(..64).unwrap_or(rest).trim_start_matches(['{', '[', ' ', '\t', '\n', '\r']).starts_with(['"', '{', '['])
+        }
         Some('<') => {
             // A tag: `<name>` or `</name>`, its name letters without spaces or another bracket.
             let inner = rest.get(1..).unwrap_or("");

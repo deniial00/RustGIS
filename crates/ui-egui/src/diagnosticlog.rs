@@ -78,7 +78,7 @@ fn entry(ui: &mut Ui, record: &Record, t: &Tokens) {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(time(record.timestamp_ms)).small().monospace().color(t.text_dim));
         ui.label(RichText::new(tl!(severity)).small().strong().color(color));
-        ui.label(RichText::new(tl!(record.source.as_str())).small().color(t.text_dim));
+        ui.label(RichText::new(record.source.as_str()).small().color(t.text_dim));
     });
     ui.add(egui::Label::new(&record.message).wrap().selectable(true));
     if !record.details.is_empty() || record.network.is_some() {
