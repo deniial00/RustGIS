@@ -10728,7 +10728,7 @@ fn notices_since_survives_the_cap() {
 
 #[test]
 fn diagnostics_capture_notices_without_an_open_pane_or_project_persistence() {
-    use rustgis_data::diagnostics::{Filter, MAX_MESSAGE_BYTES, Severity};
+    use rustgis_data::diagnostics::{Filter, MAX_DETAILS_BYTES, MAX_MESSAGE_BYTES, Severity};
     let mut s = Session::new(Project::default());
     let mark = s.notice_mark();
     s.notify("diagnostics-session-only information", false);
@@ -10745,7 +10745,13 @@ fn diagnostics_capture_notices_without_an_open_pane_or_project_persistence() {
     let saved = serde_json::to_string(&s.project).unwrap();
     assert!(!saved.contains("diagnostics-session-only"));
     s.notify("界".repeat(3000), false);
-    assert!(s.notices.last().unwrap().text.len() <= MAX_MESSAGE_BYTES);
+    // The notice keeps its words to redaction's own bound (8 KiB, an ellipsis at the cut), not
+    // the record's 2 KiB; only the history's record copy takes the message bound.
+    let notice = &s.notices.last().unwrap().text;
+    assert!(notice.len() <= MAX_DETAILS_BYTES && notice.ends_with('…'), "{}", notice.len());
+    let last = s.diagnostics.records();
+    let record = last.last().unwrap();
+    assert!(record.message.len() <= MAX_MESSAGE_BYTES && record.message.ends_with('…'), "{}", record.message.len());
     s.run("project.new", &json!({})).unwrap();
     let records = s.diagnostics.records();
     assert!(records.iter().any(|r| r.message == "diagnostics-session-only information"));
