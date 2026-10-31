@@ -103,13 +103,15 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
                     if failure.lock().is_ok_and(|f| f.is_some()) {
                         break;
                     }
-                    // A missing file is an expected answer here (see `is_absent`), not a failure:
-                    // fetched outside the session's capture, so the history keeps only what
-                    // `fetch` reports as an error (the store's command says so).
-                    let got = {
-                        let _quiet = rustgis_data::diagnostics::Capture::default().enter();
-                        crate::render::rustgis_tiles::cache::download_blocking(&format!("{root}/{k}"))
-                    };
+                    // A missing file is an expected answer here (see `is_absent`), not a failure: its 404
+                    // or 403 makes no network record, while a real one (a 500, a timeout) still
+                    // does, with its address, status and duration.
+                    let got = crate::render::rustgis_tiles::cache::download_blocking_omitting(
+                        &format!("{root}/{k}"),
+                        crate::render::rustgis_tiles::cache::MAX_DOWNLOAD,
+                        crate::render::rustgis_tiles::cache::BLOCKING_TIMEOUT,
+                        &[404, 403],
+                    );
                     match got {
                         Ok(b) => {
                             let len = b.len() as u64;

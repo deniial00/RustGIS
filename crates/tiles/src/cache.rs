@@ -496,7 +496,10 @@ fn fetch_tile(url: String, host: String, want: Want) {
         crate::mbtiles::fetch(&url, done);
         return;
     }
-    fetch_bytes(url, done);
+    // Tiles a server doesn't have are routine (the map asks past an area's edges): each would
+    // flood the history and evict real failures. A style's or a TileJSON's 404 is a real
+    // failure, so it is kept.
+    fetch_bytes(url, done, if matches!(want, Want::Json) { &[] } else { &[404] });
 }
 
 /// Decodes what a fetch gave as `want` and hands it to `settle`: a picture through `decoder`, if
@@ -595,6 +598,9 @@ pub struct RequestDiagnostics<'a> {
     started: Instant,
     status: Option<u16>,
     timed_out: bool,
+    /// Statuses the caller expects (a tile past a map's edge, a store's absent chunk): their
+    /// failures make no network record, as each would flood the history.
+    omit: &'static [u16],
 }
 
 impl<'a> RequestDiagnostics<'a> {
@@ -604,7 +610,12 @@ impl<'a> RequestDiagnostics<'a> {
 
     /// Keeps the request's initiating owner across a queue hop or an async browser task.
     pub fn with_capture(url: &'a str, method: &'static str, capture: rustgis_data::diagnostics::Capture) -> Self {
-        Self { url, method, capture, started: Instant::now(), status: None, timed_out: false }
+        Self { url, method, capture, started: Instant::now(), status: None, timed_out: false, omit: &[] }
+    }
+
+    /// Statuses whose failures are expected answers, not records (see [`Self::omit`]).
+    pub fn omit_statuses(&mut self, omit: &'static [u16]) {
+        self.omit = omit;
     }
 
     /// A new hop has no status until it actually receives headers.
@@ -626,6 +637,11 @@ impl<'a> RequestDiagnostics<'a> {
         use crate::failure::Reason;
         use rustgis_data::diagnostics::{Network, NetworkKind};
         if failure.message == DROPPED {
+            return;
+        }
+        // A status the caller expects is an answer, not a failure for the history; a caller
+        // that treats the refusal as an error says so itself.
+        if self.status.is_some_and(|status| self.omit.contains(&status)) {
             return;
         }
         let (url, _) = split_download_limit(self.url);
@@ -743,8 +759,15 @@ pub fn download_blocking_limited(url: &str, max: usize) -> Result<Vec<u8>, Strin
 /// Like [`download_blocking_limited`], giving up after `timeout` (with the bare error).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_blocking_within(url: &str, max: usize, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+    download_blocking_omitting(url, max, timeout, &[])
+}
+
+/// Like [`download_blocking_within`], but a status in `omit` is an expected answer: its failure
+/// makes no network record (a store's absent chunk, which the caller counts itself).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn download_blocking_omitting(url: &str, max: usize, timeout: std::time::Duration, omit: &'static [u16]) -> Result<Vec<u8>, String> {
     crate::address::check(url, None)?;
-    native::get(&native::download_agent(timeout), &download_address(url, max))
+    native::get(&native::download_agent(timeout), &download_address(url, max), omit)
 }
 
 /// Like [`download_blocking_within`], connecting only to internet addresses: a name, or a
@@ -753,7 +776,7 @@ pub fn download_blocking_within(url: &str, max: usize, timeout: std::time::Durat
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_public_within(url: &str, max: usize, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
     crate::address::check(url, None)?;
-    native::get(&native::public_agent(timeout), &download_address(url, max))
+    native::get(&native::public_agent(timeout), &download_address(url, max), &[])
 }
 
 /// Reads an address's first byte, connecting only to internet addresses (as
@@ -866,11 +889,13 @@ pub fn head(url: &str, done: HeadDone) {
 }
 
 /// Fetches an address's bytes, uncached (through the browser's fetcher, or the worker threads).
-pub(crate) fn fetch_bytes(url: String, done: Done) {
+/// A status in `omit` is an expected answer: its failure makes no network record (a tile past a
+/// map's edge).
+pub(crate) fn fetch_bytes(url: String, done: Done, omit: &'static [u16]) {
     let f = fetcher().lock().unwrap_or_else(|e| e.into_inner()).clone();
     match f {
         Some(f) => f(url, done),
-        None => native::fetch(url, done),
+        None => native::fetch(url, done, omit),
     }
 }
 
@@ -884,12 +909,13 @@ pub(crate) fn fetch_counted(url: String, done: Done) {
             done(r);
             finished();
         }),
+        &[],
     );
 }
 
 /// Reads a tile of a local MBTiles file on the fetch workers (counted already, as a tile).
 pub(crate) fn fetch_worker(url: String, done: Done) {
-    native::fetch(url, done);
+    native::fetch(url, done, &[]);
 }
 
 /// Reads a range of a local file (`<path>#rustgis-range=a-b`) on the fetch workers, counted like
@@ -1062,8 +1088,9 @@ mod native {
     const QUEUE: usize = 512;
 
     struct Jobs {
-        /// Waiting, oldest first: the address, its server, callback and initiating owner.
-        waiting: Vec<(String, String, Done, Capture)>,
+        /// Waiting, oldest first: the address, its server, callback, initiating owner, and the statuses
+        /// whose failures the caller expects.
+        waiting: Vec<(String, String, Done, Capture, &'static [u16])>,
         /// Fetches under way, by server.
         active: HashMap<String, usize>,
     }
@@ -1118,25 +1145,25 @@ mod native {
 
     /// A local file's range, read on a worker.
     pub(super) fn fetch_local(url: String, done: Done) {
-        fetch(format!("{LOCAL}{url}"), done);
+        fetch(format!("{LOCAL}{url}"), done, &[]);
     }
 
     /// Marks a queued job as a local file read.
     const LOCAL: &str = "local-file:";
 
-    pub(super) fn fetch(url: String, done: Done) {
+    pub(super) fn fetch(url: String, done: Done, omit: &'static [u16]) {
         let capture = Capture::current();
         let q = queue();
         let dropped = {
             let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
             let host = host(&url);
-            jobs.waiting.push((url, host, done, capture));
+            jobs.waiting.push((url, host, done, capture, omit));
             (jobs.waiting.len() > QUEUE).then(|| jobs.waiting.remove(0))
         };
         // Every worker may be waiting for a server at its cap, and only some can take this one.
         q.ready.notify_all();
         // Answered once the queue is unlocked: `done` takes the cache's lock and wakes the app.
-        if let Some((_, _, done, _)) = dropped {
+        if let Some((_, _, done, _, _)) = dropped {
             done(Err(DROPPED.into()));
         }
     }
@@ -1263,11 +1290,15 @@ mod native {
                 continue;
             }
             if resp.status().as_u16() >= 400 {
-                return Err(Failure::without_answer(
-                    "",
-                    format!("http status: {}", resp.status().as_u16()),
-                    Reason::Status(resp.status().as_u16()),
-                ));
+                // The selected headers say who refused and what it wants: kept, as a GET's
+                // refusal keeps them, so the history's details aren't only a status.
+                let headers: Vec<(String, String)> = resp
+                    .headers()
+                    .iter()
+                    .filter(|(k, _)| crate::failure::KEPT_HEADERS.contains(&k.as_str()))
+                    .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+                    .collect();
+                return Err(Failure::answered("", resp.status().as_u16(), &headers, &[]));
             }
             return Ok(super::Head {
                 tiff_header_length: header("x-tiff-header-length").and_then(super::tiff_header_length),
@@ -1346,20 +1377,20 @@ mod native {
         let agent = shared_agent();
         let q = queue();
         loop {
-            let (url, done, host, capture) = {
+            let (url, done, host, capture, omit) = {
                 let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
-                    let hosts: Vec<&str> = jobs.waiting.iter().map(|(_, h, _, _)| h.as_str()).collect();
+                    let hosts: Vec<&str> = jobs.waiting.iter().map(|(_, h, _, _, _)| h.as_str()).collect();
                     if let Some(i) = pick(&hosts, &jobs.active) {
-                        let (url, host, done, capture) = jobs.waiting.remove(i);
+                        let (url, host, done, capture, omit) = jobs.waiting.remove(i);
                         *jobs.active.entry(host.clone()).or_insert(0) += 1;
-                        break (url, done, host, capture);
+                        break (url, done, host, capture, omit);
                     }
                     jobs = q.ready.wait(jobs).unwrap_or_else(|e| e.into_inner());
                 }
             };
             let _scope = capture.enter();
-            let result = get(agent, &url);
+            let result = get(agent, &url, omit);
             {
                 let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(n) = jobs.active.get_mut(&host) {
@@ -1378,8 +1409,8 @@ mod native {
     /// Fetches `url`, following up to 5 redirects. `url` itself passed `address::check` when
     /// it was made (the layer's address, or one its style or TileJSON chose, checked in
     /// `source::resolve`); each redirect is checked here.
-    pub(super) fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
-        fetch_answer(agent, url, false).map_err(|f| f.message)
+    pub(super) fn get(agent: &ureq::Agent, url: &str, omit: &'static [u16]) -> Result<Vec<u8>, String> {
+        fetch_answer(agent, url, false, omit).map_err(|f| f.message)
     }
 
     /// The User-Agent every request goes with.
@@ -1417,7 +1448,7 @@ mod native {
 
     /// [`get`], telling what is known of a failure.
     pub(super) fn get_detailed(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, Failure> {
-        fetch_answer(agent, url, true).map_err(|f| Failure { url: url.to_string(), ..f })
+        fetch_answer(agent, url, true, &[]).map_err(|f| Failure { url: url.to_string(), ..f })
     }
 
     /// A file's length from a `Content-Range` header (`bytes 0-0/1234`); none when the server
@@ -1428,21 +1459,16 @@ mod native {
     }
 
     /// The answer to `url`; a refusal keeps the server's answer only when `detail` asks for it,
-    /// as tiles a server doesn't have are routine and only their status is read.
-    fn fetch_answer(agent: &ureq::Agent, url: &str, detail: bool) -> Result<Vec<u8>, Failure> {
+    /// as tiles a server doesn't have are routine and only their status is read. A status in
+    /// `omit` is an expected answer: its failure makes no network record.
+    fn fetch_answer(agent: &ureq::Agent, url: &str, detail: bool, omit: &'static [u16]) -> Result<Vec<u8>, Failure> {
         // Local file failures are not network traffic.
         if crate::mbtiles::is_tile(url) || url.starts_with(LOCAL) {
             return fetch_answer_inner(agent, url, detail, &mut super::RequestDiagnostics::new(url, "GET"));
         }
         let mut diagnostics = super::RequestDiagnostics::new(url, "GET");
-        fetch_answer_inner(agent, url, detail, &mut diagnostics).inspect_err(|failure| {
-            // Tiles a server doesn't have are routine (the map asks past an area's edges): each
-            // one would flood the history and evict real failures. A caller that treats the
-            // refusal as an error says so itself.
-            if detail || diagnostics.status != Some(404) {
-                diagnostics.failed(failure);
-            }
-        })
+        diagnostics.omit_statuses(omit);
+        fetch_answer_inner(agent, url, detail, &mut diagnostics).inspect_err(|failure| diagnostics.failed(failure))
     }
 
     fn fetch_answer_inner(
@@ -1675,7 +1701,7 @@ mod tests {
         let base = serve(vec!["HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]);
         let expected = format!("{base}/data.parquet");
         let (tx, rx) = std::sync::mpsc::channel();
-        native::fetch(format!("{expected}#rustgis-range=20-39"), Box::new(move |result| tx.send(result).unwrap()));
+        native::fetch(format!("{expected}#rustgis-range=20-39"), Box::new(move |result| tx.send(result).unwrap()), &[]);
         assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap_err(), "http status: 503");
         let records = network_records(&history, &expected);
         assert_eq!(records.len(), 1);
@@ -1716,7 +1742,7 @@ mod tests {
         let (first_tx, first_rx) = std::sync::mpsc::channel();
         {
             let _scope = first.enter();
-            native::fetch(first_url.clone(), Box::new(move |result| first_tx.send(result).unwrap()));
+            native::fetch(first_url.clone(), Box::new(move |result| first_tx.send(result).unwrap()), &[]);
         }
         arrived_rx.recv_timeout(timeout).unwrap();
 
@@ -1735,7 +1761,7 @@ mod tests {
 
         let base = serve(vec!["HTTP/1.1 404 Missing\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]);
         let (unowned_tx, unowned_rx) = std::sync::mpsc::channel();
-        native::fetch(format!("{base}/without-owner"), Box::new(move |result| unowned_tx.send(result).unwrap()));
+        native::fetch(format!("{base}/without-owner"), Box::new(move |result| unowned_tx.send(result).unwrap()), &[]);
         assert_eq!(unowned_rx.recv_timeout(timeout).unwrap().unwrap_err(), "http status: 404");
 
         let first_records = first.records();
@@ -1816,7 +1842,7 @@ mod tests {
 
         let base = serve(vec!["HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()]);
         let url = format!("{base}/successful.json");
-        assert_eq!(native::get(&native::agent(), &url).unwrap(), b"{}");
+        assert_eq!(native::get(&native::agent(), &url, &[]).unwrap(), b"{}");
         assert!(network_records(&history, &url).is_empty());
     }
 
@@ -1826,15 +1852,22 @@ mod tests {
         use rustgis_data::diagnostics::History;
         let history = History::default();
         let _scope = history.enter();
+        let not_found = "HTTP/1.1 404 Missing\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let missing = serve(vec![not_found.into(), not_found.into()]);
         // Tiles a server doesn't have are routine: not a network record.
-        let base = serve(vec!["HTTP/1.1 404 Missing\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]);
-        let url = format!("{base}/tiles/0/0/0.png");
-        assert_eq!(native::get(&native::agent(), &url).unwrap_err(), "http status: 404");
+        let url = format!("{missing}/tiles/0/0/0.png");
+        assert_eq!(native::get(&native::agent(), &url, &[404]).unwrap_err(), "http status: 404");
         assert!(network_records(&history, &url).is_empty());
+        // A style's or TileJSON's 404 is a real failure: kept, while a tile's would be omitted.
+        let url = format!("{missing}/style.json");
+        assert_eq!(native::get(&native::agent(), &url, &[]).unwrap_err(), "http status: 404");
+        let records = network_records(&history, &url);
+        assert_eq!(records.len(), 1, "a JSON want's 404 is a real failure");
+        assert_eq!(records[0].network.as_ref().unwrap().status, Some(404));
         // A refusal that is not a missing tile is kept.
         let base = serve(vec!["HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]);
         let url = format!("{base}/tiles/0/0/0.png");
-        assert_eq!(native::get(&native::agent(), &url).unwrap_err(), "http status: 503");
+        assert_eq!(native::get(&native::agent(), &url, &[404]).unwrap_err(), "http status: 503");
         let records = network_records(&history, &url);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].network.as_ref().unwrap().status, Some(503));
@@ -1865,7 +1898,7 @@ mod tests {
         let _scope = history.enter();
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let url = format!("http://{closed}/connection-refused-1155");
-        native::get(&native::agent(), &url).unwrap_err();
+        native::get(&native::agent(), &url, &[]).unwrap_err();
         let records = network_records(&history, &url);
         assert_eq!(records.len(), 1);
         let network = records[0].network.as_ref().unwrap();
@@ -1880,7 +1913,7 @@ mod tests {
             let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
             drop(stream);
         });
-        native::get(&native::download_agent(std::time::Duration::from_millis(40)), &url).unwrap_err();
+        native::get(&native::download_agent(std::time::Duration::from_millis(40)), &url, &[]).unwrap_err();
         tx.send(()).unwrap();
         server.join().unwrap();
         let records = network_records(&history, &url);
@@ -2163,7 +2196,7 @@ mod tests {
         assert_eq!((f.status(), f.firewall(), f.excerpt()), (Some(403), Some("Cloudflare"), Some("Attention Required! | Cloudflare")));
         assert_eq!((f.url.as_str(), f.request_id()), (format!("{base}/MapServer?f=json").as_str(), Some("cf-ray a4c9-BOG".to_string())));
         assert!(f.user_agent().is_some_and(|u| u.starts_with("RustGIS/")));
-        assert_eq!(native::get(&agent, &format!("{base}/x")).unwrap_err(), "http status: 403");
+        assert_eq!(native::get(&agent, &format!("{base}/x"), &[]).unwrap_err(), "http status: 403");
         // No server there: unreachable, not an answer.
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let f = native::get_detailed(&agent, &format!("http://{closed}/x")).unwrap_err();
@@ -2178,13 +2211,13 @@ mod tests {
         let agent = native::agent();
         // Within the same server: followed.
         let base = serve(vec![redirect("/tile.png"), ok]);
-        assert_eq!(native::get(&agent, &format!("{base}/old.png")).unwrap(), b"tile");
+        assert_eq!(native::get(&agent, &format!("{base}/old.png"), &[]).unwrap(), b"tile");
         // To a metadata address, or from HTTPS down to HTTP: refused.
         let base = serve(vec![redirect("http://169.254.169.254/latest/meta-data/")]);
-        assert!(native::get(&agent, &format!("{base}/x")).unwrap_err().contains("never fetched"));
+        assert!(native::get(&agent, &format!("{base}/x"), &[]).unwrap_err().contains("never fetched"));
         // Too many.
         let base = serve((0..7).map(|_| redirect("/again")).collect());
-        assert!(native::get(&agent, &format!("{base}/x")).unwrap_err().contains("too many"));
+        assert!(native::get(&agent, &format!("{base}/x"), &[]).unwrap_err().contains("too many"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2240,7 +2273,7 @@ mod tests {
         let n = 40;
         for i in 0..n {
             let tx = tx.clone();
-            native::fetch(format!("http://{addr}/{i}.png"), Box::new(move |r| drop(tx.send(r))));
+            native::fetch(format!("http://{addr}/{i}.png"), Box::new(move |r| drop(tx.send(r))), &[]);
         }
         for _ in 0..n {
             assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap().unwrap(), b"tile");

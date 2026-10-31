@@ -1058,7 +1058,7 @@ impl Session {
             }
             // A refused command is said once, without secrets, as the front ends show it.
             if let Err(error) = &res {
-                let text = rustgis_data::diagnostics::redact_message(error);
+                let text = rustgis_data::diagnostics::redact(error);
                 if !self.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text) {
                     self.notify(text, true);
                 }
@@ -1464,7 +1464,9 @@ impl Session {
     }
 
     fn notice(&mut self, text: String, severity: rustgis_data::diagnostics::Severity) {
-        let text = rustgis_data::diagnostics::redact_message(&text);
+        // Redacted for the status bar and the history alike; only the history's copy is
+        // bounded to a record's message (in `push`), so a long notice reaches the user whole.
+        let text = rustgis_data::diagnostics::redact(&text);
         self.diagnostics.push(severity, self.diagnostic_source.unwrap_or("Application"), &text, "");
         self.notices.push(Notice { text, error: severity == rustgis_data::diagnostics::Severity::Error });
         self.notices_given += 1;

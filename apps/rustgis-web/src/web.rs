@@ -567,6 +567,13 @@ async fn unless_stalled(
 async fn fetch_bytes(url: &str, capture: Capture) -> Result<Vec<u8>, String> {
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "GET", capture);
+    // Tiles a server doesn't have are routine (the map asks past an area's edges): each would
+    // flood the history. A data download's 404 is a real failure and is kept. The wasm fetcher
+    // can't see the tile want, so a style's or TileJSON's 404 is omitted with the tiles' — the
+    // native transport, which sees it, keeps those (the layer's own error says so).
+    if rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::split_download_limit(url).1.is_none() {
+        diagnostics.omit_statuses(&[404]);
+    }
     fetch_bytes_inner(url, &mut diagnostics).await.inspect_err(|error| diagnostics.failed(&Failure::new(url, error)))
 }
 

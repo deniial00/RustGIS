@@ -251,11 +251,7 @@ impl Capture {
     }
 }
 
-/// The same bounded message used by both notice consumers and diagnostic records.
-pub fn redact_message(text: &str) -> String {
-    bounded(text, MAX_MESSAGE_BYTES)
-}
-
+/// Redacts, then bounds: a record's copy of a message or of details.
 fn bounded(text: &str, limit: usize) -> String {
     let mut clean = redact(text);
     if clean.len() > limit {
@@ -377,6 +373,9 @@ pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(MAX_DETAILS_BYTES));
     let mut i = 0;
     let mut quote_scan_budget = MAX_INPUT_BYTES;
+    // Whether the atom before this one ended in `:` or `=`: a scheme word is a credential only
+    // there ("server: Basic xyz"), so "Basic plan" in prose keeps its words.
+    let mut field_before = false;
     'scan: while let Some(rest) = text.get(i..) {
         let Some(c) = rest.chars().next() else { break };
         if c == '['
@@ -445,6 +444,7 @@ pub fn redact(text: &str) -> String {
                     _ => out.push_str("[address omitted]"),
                 }
                 i += url_end;
+                field_before = false;
                 if address.contains(['?', '#']) {
                     // A malformed/unescaped value may continue after whitespace or a quote.
                     // Do not guess where that credential ends.
@@ -455,13 +455,18 @@ pub fn redact(text: &str) -> String {
             let after_space = after.trim_start();
             // A file path (POSIX or Windows) is context, not a credential field name.
             if !atom.contains(['/', '\\']) && secret_name(atom) {
-                // `name: value` or `name=value` is a field when its value is one token, quoted,
-                // or the header's own credential. Anything longer is prose: "its password:
+                // `name=value` is a field however its value is shaped: an equals sign is not how
+                // prose speaks, so a value with spaces is still a value ("Password=my secret").
+                // `name: value` needs its value to look like one (one token, quoted, or the
+                // header's own credential); anything longer is prose: "its password:
                 // right-click the connection".
-                let value = after_space.strip_prefix(':').or_else(|| after_space.strip_prefix('=')).map(str::trim_start);
-                let field = value.is_some_and(|value| {
+                let field = if let Some(value) = after_space.strip_prefix('=').map(str::trim_start) {
+                    credential_header(atom) || !value.is_empty()
+                } else if let Some(value) = after_space.strip_prefix(':').map(str::trim_start) {
                     credential_header(atom) || value.starts_with(['"', '\'']) || (!value.is_empty() && !value.contains(char::is_whitespace))
-                });
+                } else {
+                    false
+                };
                 // A bare credential line is redacted only where the text or line begins, and only
                 // for an unambiguous secret name, so ordinary prose keeps its words ("the saved
                 // password is missing", "Key column 'id' is missing").
@@ -483,10 +488,12 @@ pub fn redact(text: &str) -> String {
                 out.push_str(REDACTED);
                 break;
             }
-            // A `Bearer <token>` is a credential wherever it sits ("server: Bearer xyz"): the
-            // token goes with it, and the rest of the line keeps.
-            if name == "bearer" && after.chars().next().is_some_and(char::is_whitespace) {
+            // A `Bearer <token>` is a credential wherever it sits ("server: Bearer xyz"); a
+            // `Basic <token>` too, but only after a field name, so "Basic plan" keeps. The token
+            // goes with it, and the rest of the line keeps.
+            if (name == "bearer" || (name == "basic" && field_before)) && after.chars().next().is_some_and(char::is_whitespace) {
                 out.push_str(REDACTED);
+                field_before = false;
                 let value = after.trim_start();
                 i += end + (after.len() - value.len()) + value.find(separator).unwrap_or(value.len());
                 continue;
@@ -497,6 +504,7 @@ pub fn redact(text: &str) -> String {
                 out.push_str("[address omitted]");
                 break;
             }
+            field_before = after_space.starts_with([':', '=']);
             out.push_str(atom);
             i += end;
         } else {
@@ -600,6 +608,9 @@ mod tests {
             "error: <html>hidden</html>",
             "connection_string=hidden",
             "server: Bearer hidden",
+            "server: Basic hidden",
+            "Server=db;Password=very hidden",
+            "password=very hidden indeed",
         ] {
             let clean = redact(input);
             assert!(!clean.contains("hidden"), "{input} -> {clean}");
@@ -634,6 +645,7 @@ mod tests {
             "Exported /data/a[1].png",
             "Layer {2020} failed",
             "Key column 'id' is missing",
+            "Choose the Basic plan to map with.",
         ] {
             assert_eq!(redact(text), text, "{text}");
         }
