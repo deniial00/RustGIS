@@ -31,7 +31,7 @@ pub fn commands() -> Vec<C> {
 fn request_api(s: &mut Session, p: &Value) -> Result<String, String> {
     let bound = crate::service_logins::request_params(s, p)?;
     let api = stac::api(ps(bound.as_ref(), "url"))?;
-    crate::service_logins::request(s, ps(p, "connection"), &api)
+    crate::service_logins::request(s, ps(bound.as_ref(), "connection"), &api)
 }
 
 /// The search a command describes (`view` is the map's current extent).
