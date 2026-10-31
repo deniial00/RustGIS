@@ -267,15 +267,9 @@ fn junk_login_parameters_never_panic() {
         json!({"id":id,"apiKey":"\u{7f}","allowInsecure":true}),
         json!({"id":[id],"connection":{"id":id}}),
     ];
-    for cmd in [
-        "connection.new",
-        "connection.edit",
-        "connection.login",
-        "connection.logout",
-        "connection.test",
-        "map.addTiles",
-        "service.add",
-    ] {
+    for cmd in
+        ["connection.new", "connection.edit", "connection.login", "connection.logout", "connection.test", "map.addTiles", "service.add"]
+    {
         for p in &junk {
             let _ = s.run(cmd, p);
         }

@@ -14,9 +14,9 @@
 //! Nothing here prints, returns or logs a secret: every failure is
 //! a fixed sentence.
 
-use std::collections::{BTreeMap, BTreeSet};
 use rustgis_data::secrets::Secret;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Session;
 use crate::connections::{Connection, LoginReason, LoginRequest, SERVICE_KINDS, WEB, login_origin};
@@ -107,10 +107,7 @@ pub struct SessionLogins {
 impl SessionLogins {
     pub fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self {
-            session: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            active: BTreeMap::new(),
-        }
+        Self { session: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), active: BTreeMap::new() }
     }
 
     fn owner(&self, id: &str) -> String {
@@ -176,7 +173,6 @@ pub(crate) fn logout(s: &mut Session, c: &Connection) {
     forget(s, c);
 }
 
-
 pub(crate) fn forget(s: &mut Session, c: &Connection) {
     deactivate(s, c, None);
     s.database_logins.forget_connection(&c.id);
@@ -186,7 +182,7 @@ pub fn logged_in(s: &Session, c: &Connection) -> bool {
     s.web_logins.active.get(&c.id).is_some_and(|a| a.matches(c) && logins::is_active(&a.binding))
 }
 
-pub(crate) fn known_secret(s: &mut Session, c: &Connection) -> Result<Secret, String> {
+pub fn known_secret(s: &Session, c: &Connection) -> Result<Secret, String> {
     let Some(secret) = s.database_logins.session_password(&c.id) else {
         return Err(REQUIRED.into());
     };
@@ -673,4 +669,3 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
     }
     Ok(())
 }
-
