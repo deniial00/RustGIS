@@ -642,8 +642,10 @@ impl<'a> RequestDiagnostics<'a> {
         // A status the caller expects is an answer, not a failure for the history; a caller
         // that treats the refusal as an error says so itself. One bounded record says the
         // omission, so a misconfigured tile source isn't silent.
-        if self.status.is_some_and(|status| self.omit.contains(&status)) {
-            self.capture.absence_said(self.url, self.status.unwrap());
+        if let Some(status) = self.status
+            && self.omit.contains(&status)
+        {
+            self.capture.absence_said(self.url, status);
             return;
         }
         let (url, _) = split_download_limit(self.url);
