@@ -528,3 +528,43 @@ fn only_web_services_compare_a_test_with_their_saved_definition() {
         .unwrap();
     assert_eq!(out["connection"], db);
 }
+
+#[test]
+fn a_streamed_layer_that_failed_before_the_login_reopens_on_its_new_address() {
+    let origin = "https://stream757.example.org";
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"ogcapi","address":format!("{origin}/ogc"),"auth":"header","keyName":"X-Key"}));
+    let failed = |n: u32, path: String| {
+        let mut layer = rustgis_map::Layer::new(n, rustgis_data::Dataset::new("Roads", rustgis_data::GeometryType::None, Vec::new()));
+        layer.connection = id.clone();
+        let mut source: rustgis_map::source::SourceLayer = serde_json::from_value(json!({ "path": path })).unwrap();
+        source.error = Some("the server refused the request".into());
+        layer.source = Some(source);
+        layer
+    };
+    // One layer reads at the connection's origin; another, linked from it, reads elsewhere.
+    s.project.map_mut().layers.push(failed(1, format!("{origin}/ogc/collections/roads/items")));
+    s.project.map_mut().layers.push(failed(2, "https://linked757.example.org/items".into()));
+    s.run("connection.login", &json!({"id":id,"apiKey":"stream-sentinel-757"})).unwrap();
+    let [own, linked] = &s.map().layers[..] else { panic!("two layers") };
+    let own = own.source.as_ref().unwrap();
+    assert_eq!(header(own.path.as_deref().unwrap()).unwrap().1, "stream-sentinel-757");
+    assert!(own.error.is_none() && !own.is_open());
+    // Its address did not change, so its failure stands.
+    assert!(linked.source.as_ref().unwrap().error.is_some());
+}
+
+#[test]
+fn a_plain_replacement_legend_reads_through_the_tiles_logged_in_connection() {
+    let origin = "https://legend757.example.org";
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"legend-sentinel-757"})).unwrap();
+    s.run("map.addTiles", &json!({"url":format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),"name":"T","connection":id})).unwrap();
+    s.run("map.setTiles", &json!({"name":"T","legend":[format!("{origin}/legend.png"),"https://other757.example.org/legend.png"]}))
+        .unwrap();
+    let legends = &s.map().tiles[0].legends;
+    assert_eq!(header(&legends[0].url).unwrap().1, "legend-sentinel-757");
+    assert_eq!(crate::sources::redact(&legends[0].url), format!("{origin}/legend.png"));
+    assert_eq!(legends[1].url, "https://other757.example.org/legend.png");
+}

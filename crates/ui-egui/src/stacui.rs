@@ -963,6 +963,7 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
     if keys.is_empty() {
         return;
     }
+    let connection = selected_connection(app);
     let st = &mut app.ui.stac;
     if !keys.contains(&st.cube_asset) {
         st.cube_asset = keys.first().cloned().unwrap_or_default();
@@ -990,11 +991,40 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
     if !add {
         return;
     }
+    let p = match cube_params(st, first, last, connection) {
+        Ok(p) => p,
+        Err(e) => {
+            st.error = Some(e);
+            return;
+        }
+    };
+    match app.run("stac.addCube", p) {
+        Ok(r) => {
+            app.ui.stac.error = None;
+            app.ui.stac.info = Some(i18n::fmt(
+                "{layers} tiles, {dates} dates: the time slider steps through them",
+                &[("layers", &r["layers"].to_string()), ("dates", &r["dates"].to_string())],
+            ));
+            app.map.invalidate();
+        }
+        Err(e) => app.ui.stac.error = Some(e),
+    }
+}
+
+/// The `stac.addCube` parameters for the dialog as it stands: its API, collection, band, dates,
+/// area, cloud limit and display range, and the connection picked for the API (so the cube's
+/// requests use that login, not the origin's last-selected one). `first` and `last` are the
+/// dates the items span, used where no date is typed.
+#[cfg(not(target_arch = "wasm32"))]
+fn cube_params(st: &State, first: String, last: String, connection: Option<String>) -> Result<serde_json::Value, String> {
     let mut p = json!({
         "url": st.api, "collection": st.collection.trim(), "asset": st.cube_asset,
         "start": if st.from.trim().is_empty() { first } else { st.from.trim().to_string() },
         "end": if st.to.trim().is_empty() { last } else { st.to.trim().to_string() },
     });
+    if let Some(connection) = connection {
+        p["connection"] = json!(connection);
+    }
     // The area the search asked for, so the cube covers what it found (every page of it), not the
     // view now; a search anywhere, the area of the items listed.
     let area = st.searched_area.or_else(|| {
@@ -1013,22 +1043,9 @@ fn cube_row(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
     match (typed.len(), range.len()) {
         (0, _) => {}
         (2, 2) => p["range"] = json!(range),
-        _ => {
-            st.error = Some(tl!("The range is two numbers, low and high (0, 0.9)").to_string());
-            return;
-        }
+        _ => return Err(tl!("The range is two numbers, low and high (0, 0.9)").to_string()),
     }
-    match app.run("stac.addCube", p) {
-        Ok(r) => {
-            app.ui.stac.error = None;
-            app.ui.stac.info = Some(i18n::fmt(
-                "{layers} tiles, {dates} dates: the time slider steps through them",
-                &[("layers", &r["layers"].to_string()), ("dates", &r["dates"].to_string())],
-            ));
-            app.map.invalidate();
-        }
-        Err(e) => app.ui.stac.error = Some(e),
-    }
+    Ok(p)
 }
 
 /// Finds items: an API's search, or a walk of a static catalog from the node picked.
@@ -1223,6 +1240,16 @@ mod tests {
         let (_, _, params, _) = app.ui.downloads.last().unwrap();
         assert_eq!(params["connection"], one["id"], "token completion must not re-read the picker");
         assert_ne!(params["connection"], two["id"]);
+    }
+
+    /// The cube's request names the connection picked for the API, so it never falls back to the
+    /// origin's last-selected login (possibly another connection's).
+    #[test]
+    fn the_time_series_request_names_the_picked_connection() {
+        let st = State { api: "https://stac.example.org".into(), collection: "c".into(), ..State::default() };
+        let p = cube_params(&st, "2024-01-01".into(), "2024-02-01".into(), Some("picked".into())).unwrap();
+        assert_eq!(p["connection"], "picked");
+        assert!(cube_params(&st, "a".into(), "b".into(), None).unwrap().get("connection").is_none());
     }
 
     #[test]

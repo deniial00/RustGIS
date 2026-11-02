@@ -340,7 +340,7 @@ fn test_blocked(app: &RustGisApp) -> Option<&'static str> {
     }
     let matches = saved.is_some_and(|c| {
         c.kind == st.kind
-            && c.address == rustgis_engine::sources::redact(st.address.trim())
+            && c.address == st.address.trim()
             && c.auth == auth
             && c.user == st.user.trim()
             && c.key_name == st.key_name.trim()

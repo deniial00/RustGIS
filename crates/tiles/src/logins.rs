@@ -37,6 +37,8 @@ pub fn valid_header_name(name: &str) -> bool {
         "origin",
         "referer",
         "user-agent",
+        "content-type",
+        "accept",
     ];
     !blocked.iter().any(|s| name.eq_ignore_ascii_case(s))
         && !name.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("proxy-"))
@@ -402,6 +404,8 @@ mod tests {
             "Origin",
             "Referer",
             "User-Agent",
+            "Content-Type",
+            "ACCEPT",
             "Proxy-Authorization",
             "SEC-Fetch-Site",
             "x y",

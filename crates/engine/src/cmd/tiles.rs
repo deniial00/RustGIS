@@ -633,11 +633,18 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     let i = find(s, p)?.ok_or("name or index is required")?;
     let mode = blend(p)?;
     let look = cog_look(p)?;
-    let new_legends = match p.get("legend") {
+    let mut new_legends = match p.get("legend") {
         None => None,
         Some(Value::Null) => Some(Vec::new()),
         Some(v) => Some(legends(s, None, v)?),
     };
+    // A plain legend address of a layer that recorded a logged-in connection reads through it,
+    // as the layer's own address does.
+    if let Some(connection) = s.map().tiles.get(i).map(|t| t.connection.clone()).filter(|c| !c.is_empty()) {
+        for legend in new_legends.iter_mut().flatten() {
+            legend.url = crate::service_logins::bind_logged_in(s, &connection, &legend.url);
+        }
+    }
     let hidden = hidden_layers(p)?;
     let old_name = s.map().tiles.get(i).map(|t| t.name.clone());
     let m = s.map_mut();

@@ -389,13 +389,20 @@ pub fn poll_pages(app: &mut RustGisApp, ctx: &egui::Context) {
     }
 }
 
+/// The address a paged read fetches next. Its login comes only from the page that led to it
+/// (the referrer), so a page reached through another origin stays anonymous even when it points
+/// back at the first page's origin.
+fn next_request(app: &mut RustGisApp, connection: Option<&str>, pages: &Pages) -> Result<String, String> {
+    rustgis_engine::render::rustgis_tiles::address::check(pages.next_url(), Some(pages.referrer()))
+        .and_then(|()| request_from(app, connection, pages.referrer(), pages.next_url()))
+}
+
 /// The next answer fetched, or the collection added (with a note when some features were left
 /// unread).
 fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Step) {
     match step {
         Step::Fetch(pages) => {
-            let next = rustgis_engine::render::rustgis_tiles::address::check(pages.next_url(), Some(pages.referrer()))
-                .and_then(|()| request_from(app, landed.params.get("connection").and_then(Value::as_str), &landed.url, pages.next_url()));
+            let next = next_request(app, landed.params.get("connection").and_then(Value::as_str), &pages);
             let slot = match next {
                 Ok(url) => fetch_into_limited(&url, left),
                 Err(e) => Slot::new(std::sync::Mutex::new(Some(Err(e)))),
@@ -409,5 +416,39 @@ fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Step) {
             }
             app.add_landed(landed, bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A linked page reached through another origin is fetched anonymously even when it points
+    /// back at the first page's origin: the login follows the referring page, not the first one.
+    #[test]
+    fn a_page_reached_through_another_origin_does_not_regain_the_login() {
+        let mut app = RustGisApp::with_sample();
+        let c = app
+            .run("connection.new", json!({"kind":"ogcapi", "address":"https://maps.example.org", "auth":"header", "keyName":"X-Api-Key"}))
+            .unwrap();
+        let connection = c["id"].as_str().unwrap().to_string();
+        let first =
+            rustgis_engine::data::login_address::bind("0123456789abcdef", "https://maps.example.org", "https://maps.example.org/items")
+                .unwrap();
+        let page = |id: u32, href: &str| {
+            serde_json::to_vec(&json!({
+                "type":"FeatureCollection", "features":[{"id":id}],
+                "links":[{"rel":"next","type":"application/geo+json","href":href}]
+            }))
+            .unwrap()
+        };
+        let Step::Fetch(pages) = ogc::read_pages(&first, page(1, "https://other.example.org/items?page=2"), 100) else {
+            panic!("the foreign page must be fetched");
+        };
+        let Step::Fetch(pages) = pages.land(Ok(page(2, "https://maps.example.org/items?page=3"))) else {
+            panic!("the returning page must be fetched");
+        };
+        assert_eq!(pages.next_url(), "https://maps.example.org/items?page=3");
+        assert_eq!(next_request(&mut app, Some(&connection), &pages).as_deref(), Ok("https://maps.example.org/items?page=3"));
     }
 }

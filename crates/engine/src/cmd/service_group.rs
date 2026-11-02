@@ -365,6 +365,9 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
             if let Some(lock) = &mut s.map_mut().label_lock {
                 lock.retain(|((id, _, _, _), _)| *id != child.layer);
             }
+            if let Some(request) = listing.get("request") {
+                record_connection(s, child.layer, request);
+            }
         } else {
             child.layer = crate::cmd::layer::add_dataset(s, dataset);
             if let Some(request) = listing.get("request") {
@@ -501,6 +504,23 @@ mod tests {
             assert_eq!(layer.connection, connection);
             assert_eq!(layer.dataset.features.len(), 1);
         }
+    }
+
+    #[test]
+    fn refresh_with_an_explicit_connection_records_it_on_existing_children() {
+        let mut s = Session::new(crate::Project::default());
+        let url = "https://group-none757.example.org/collections";
+        let mut p = json!({"url": url, "type": "ogcapi", "text": document(&["old"]).to_string()});
+        p["responses"] = answers(&mut s, &p, &features());
+        let imported = s.run("service.import", &p).unwrap();
+        let old = imported["layers"][0].as_u64().unwrap() as u32;
+        assert_eq!(s.map().layer(old).unwrap().connection, "");
+        let definition = json!({"kind": "ogcapi", "name": "Public", "auth": "none", "address": url});
+        let connection = s.run("connection.new", &definition).unwrap()["id"].as_str().unwrap().to_string();
+        let mut q = json!({"url": url, "group": imported["group"], "connection": connection, "text": document(&["old"]).to_string()});
+        q["responses"] = answers(&mut s, &q, &features());
+        s.run("service.refresh", &q).unwrap();
+        assert_eq!(s.map().layer(old).unwrap().connection, connection);
     }
 
     #[test]

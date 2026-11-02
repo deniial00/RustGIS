@@ -165,6 +165,18 @@ fn edited_service_test_button_is_disabled_and_retains_the_unsent_key() {
     assert!(!h.state().session.database_logins.has_session_password(c["id"].as_str().unwrap()));
 }
 
+#[test]
+fn a_typed_address_secret_blocks_testing_before_the_engine_refuses() {
+    let mut h = session_ui();
+    let c = h.state_mut().run("connection.new", json!({"kind":"wms", "address":"https://typed-widget.example/wms"})).unwrap();
+    h.state_mut().run("ui.connection", json!({"id":c["id"]})).unwrap();
+    settle(&mut h);
+    assert!(!h.get_by_role_and_label(Role::Button, "Test").accesskit_node().is_disabled());
+    h.state_mut().ui.connection.address.push_str("?token=abc");
+    settle(&mut h);
+    assert!(h.get_by_role_and_label(Role::Button, "Test").accesskit_node().is_disabled());
+}
+
 fn request(h: &mut Harness, reason: LoginReason, key: &str, connections: Vec<String>) {
     let opened = h.state().session.opened;
     h.state_mut().session.database_logins.request(LoginRequest {

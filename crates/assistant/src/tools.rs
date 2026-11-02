@@ -278,13 +278,15 @@ pub fn run_with_budget(s: &mut Session, call: &ToolCall, tokens: usize) -> Resul
                 return Err(format!("unknown command '{id}'; find ids with search_commands"));
             }
             let (before, mark) = (layer_snap(s), s.notice_mark());
-            let r = s.run(&id, &params_arg(a)?).map_err(|e| error_with_notices(e, s, mark))?;
+            let r = s.run(&id, &params_arg(a)?).map_err(|e| public_text(error_with_notices(e, s, mark)))?;
             with_notices(with_new_layers(r, s, &before), s, mark)
         }
         "run_tool" => {
             let tool = str_arg(a, "tool").ok_or("tool is required")?;
             let (before, mark) = (layer_snap(s), s.notice_mark());
-            let r = s.run("gp.run", &json!({"tool": tool, "params": params_arg(a)?})).map_err(|e| error_with_notices(e, s, mark))?;
+            let r = s
+                .run("gp.run", &json!({"tool": tool, "params": params_arg(a)?}))
+                .map_err(|e| public_text(error_with_notices(e, s, mark)))?;
             with_notices(with_new_layers(r, s, &before), s, mark)
         }
         "read_features" => read_features(s, a)?,
@@ -310,7 +312,32 @@ pub fn run_with_budget(s: &mut Session, call: &ToolCall, tokens: usize) -> Resul
         "test_panic" => panic!("a test tool panicked"),
         other => return Err(format!("unknown tool '{other}'")),
     };
-    Ok(bounded_json(&v, tokens))
+    Ok(bounded_json(&public_addresses(v, 0), tokens))
+}
+
+/// How deep a result is searched for runtime login addresses; what is deeper is withheld.
+const MAX_DEPTH: usize = 16;
+
+/// `text` with every runtime login wrapper (`rustgis-login:…`, alone or after a prefix such as
+/// `pmtiles:…@`) replaced by its plain address. Commands return the bound addresses the app needs
+/// to use a connection's login; the model and MCP clients get only the public ones.
+fn public_text(text: String) -> String {
+    if text.contains(rustgis_engine::data::login_address::PREFIX) {
+        rustgis_engine::render::rustgis_tiles::logins::scrub(&text)
+    } else {
+        text
+    }
+}
+
+/// `v` with its strings made public ([`public_text`]), to a depth of [`MAX_DEPTH`].
+fn public_addresses(v: Value, depth: usize) -> Value {
+    match v {
+        Value::String(s) => Value::String(public_text(s)),
+        Value::Array(a) if depth < MAX_DEPTH => Value::Array(a.into_iter().map(|x| public_addresses(x, depth + 1)).collect()),
+        Value::Object(o) if depth < MAX_DEPTH => Value::Object(o.into_iter().map(|(k, x)| (k, public_addresses(x, depth + 1))).collect()),
+        Value::Array(_) | Value::Object(_) => json!("[too deep]"),
+        other => other,
+    }
 }
 
 /// Serialize complete JSON. Oversized results become an explicit text preview envelope;
@@ -463,14 +490,14 @@ fn run_script(s: &mut Session, a: &Value, tokens: usize) -> Result<String, Strin
             let added = with_new_layers(json!({}), s, &before).get("layersAdded").cloned().unwrap_or_else(|| json!([]));
             let out = json!({"success": true, "result": last, "lines": ran.map_or(0, Vec::len), "layersAdded": added,
                 "notices": notices, "error": null, "duration_s": secs});
-            Ok(bounded_json(&out, tokens))
+            Ok(bounded_json(&public_addresses(out, 0), tokens))
         }
         Err(e) => {
             // Nothing was kept, so no line ran and no layer was added.
             let said: Vec<&&str> = notices.iter().filter(|t| **t != e).collect();
             let out = json!({"success": false, "result": null, "lines": 0, "layersAdded": [], "notices": said,
                 "error": clip(&e, 8000), "duration_s": secs});
-            Err(bounded_json(&out, tokens))
+            Err(bounded_json(&public_addresses(out, 0), tokens))
         }
     }
 }
@@ -809,4 +836,42 @@ pub fn context(s: &Session) -> String {
         out.push_str(&line);
     }
     out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use rustgis_engine::render::rustgis_tiles::logins;
+
+    #[test]
+    fn results_carry_plain_addresses_not_login_wrappers() {
+        let origin = "https://assistant-login.example";
+        let binding = logins::activate(origin, "assistant", logins::Method::Header("X-Key".into()), "assistant-secret", false).unwrap();
+        let tile = logins::bind(&binding, &format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png")).unwrap();
+        let archive = logins::bind(&binding, &format!("{origin}/a.pmtiles")).unwrap();
+        assert!(tile.starts_with("rustgis-login:"));
+        let result = json!({
+            "fetch": tile,
+            "layers": [{"source_url": archive, "next": {"request": {"url": format!("pmtiles:x@{archive}")}}}],
+            "count": 2,
+        });
+        let text = bounded_json(&public_addresses(result, 0), DEFAULT_OUTPUT_TOKENS);
+        assert!(!text.contains("rustgis-login:") && !text.contains(&binding), "{text}");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["fetch"], format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"));
+        assert_eq!(v["layers"][0]["source_url"], format!("{origin}/a.pmtiles"));
+        assert_eq!(v["layers"][0]["next"]["request"]["url"], format!("pmtiles:x@{origin}/a.pmtiles"));
+        assert_eq!(v["count"], 2);
+        assert!(logins::deactivate(&binding));
+    }
+
+    #[test]
+    fn too_deep_results_are_withheld_not_searched_forever() {
+        let mut v = json!("rustgis-login:leak");
+        for _ in 0..40 {
+            v = json!([v]);
+        }
+        assert!(!public_addresses(v, 0).to_string().contains("rustgis-login:"));
+    }
 }

@@ -245,6 +245,17 @@ pub fn logged_in(s: &Session, c: &Connection) -> bool {
     s.web_logins.active.get(&c.id).is_some_and(|a| a.matches(c) && logins::is_active(&a.binding))
 }
 
+/// A plain address at the origin of a logged-in service connection, bound to that login. Anything
+/// else (another origin, a wrapper, a connection not logged in) comes back unchanged.
+pub(crate) fn bind_logged_in(s: &Session, connection: &str, url: &str) -> String {
+    let Some(c) = s.connections.connections.iter().find(|c| c.id == connection && is_service(c)) else { return url.to_string() };
+    let origin = logins::origin(url);
+    if !logged_in(s, c) || origin.is_none() || login_origin(c) != origin || rustgis_data::login_address::is_wrapper(url) {
+        return url.to_string();
+    }
+    s.web_logins.active.get(&c.id).and_then(|a| logins::bind(&a.binding, url).ok()).unwrap_or_else(|| url.to_string())
+}
+
 pub fn known_secret(s: &Session, c: &Connection) -> Result<Secret, String> {
     let Some(secret) = s.database_logins.session_password(&c.id) else {
         return Err(REQUIRED.into());
@@ -408,8 +419,15 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
             }
         }
         for l in m.layers.iter_mut().filter(|l| l.connection == c.id) {
-            if let Some(path) = l.source.as_mut().and_then(|source| source.path.as_mut()) {
+            if let Some(source) = l.source.as_mut()
+                && let Some(path) = source.path.as_mut()
+            {
+                let before = path.clone();
                 rewrite(path);
+                // A failed open is kept, not retried; the changed address deserves a new try.
+                if *path != before {
+                    source.error = None;
+                }
             }
             if let Some(path) = l.raster.as_mut().and_then(|raster| raster.path.as_mut()) {
                 rewrite(path);
