@@ -1899,10 +1899,12 @@ mod tests {
             logins::activate(&base, "derived-style", Method::Header("X-Service-Key".into()), "derived-style-secret", true).unwrap();
         let url = logins::bind(&binding, &format!("{base}/style.json")).unwrap();
         let tilejson_url = template::join(&url, "./tiles.json");
+        // The cache is shared with tests running at once, and any of them may clear it: store the
+        // fetched documents again on each try until the style resolves from them.
+        let mut documents = Vec::new();
         for address in [&url, &tilejson_url] {
             let bytes = native::get(&native::agent(), address).unwrap();
-            let json = serde_json::from_slice(&bytes).unwrap();
-            store(address, Entry::Ready(Arc::new(Payload::Json(json)), bytes.len()));
+            documents.push((address.clone(), serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(), bytes.len()));
         }
         let spec = source::Spec {
             kind: source::Kind::Style,
@@ -1917,7 +1919,18 @@ mod tests {
             style_layers: String::new(),
             hidden_layers: vec![],
         };
-        let source::Resolve::Ready(resolved) = source::resolve(&spec) else { panic!("style must resolve from fetched documents") };
+        let mut resolved = None;
+        for _ in 0..200 {
+            for (address, json, len) in &documents {
+                store(address, Entry::Ready(Arc::new(Payload::Json(json.clone())), *len));
+            }
+            if let source::Resolve::Ready(r) = source::resolve(&spec) {
+                resolved = Some(r);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let resolved = resolved.expect("style must resolve from fetched documents");
         let Source::Vector { tiles, .. } = &resolved.style.sources[0].1 else { panic!("vector source") };
         let tile = template::expand(&tiles[0], template::TileId { z: 0, x: 0, y: 0 }, 256, false, &[]);
         native::get(&native::agent(), &tile).unwrap();
