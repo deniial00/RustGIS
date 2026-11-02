@@ -594,16 +594,8 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let target = logins::inherit(bound, url);
     let login = if prepared.signed { None } else { logins::apply(&target).map_err(str::to_string)? };
     let login_url = login.as_ref().map_or(url, |applied| applied.url.as_str());
-    // An explicit login overrides ArcGIS's equivalent built-in credential on this hop.
-    let overrides_arcgis = login
-        .as_ref()
-        .and_then(|applied| applied.header.as_ref())
-        .is_some_and(|(name, _)| name.eq_ignore_ascii_case("Authorization") || name.eq_ignore_ascii_case("X-Esri-Authorization"));
-    let arcgis = if prepared.signed || overrides_arcgis {
-        None
-    } else {
-        rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::arcgis_auth::with_token(login_url)
-    };
+    let arcgis =
+        if prepared.signed { None } else { rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::arcgis_auth::with_token(login_url) };
     // Only the request carries credentials: messages and cache keys keep the original address.
     let request = arcgis.as_deref().unwrap_or(login_url);
     let result = async {

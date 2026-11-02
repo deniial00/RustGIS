@@ -237,6 +237,19 @@ fn recorded_connections_at_one_origin_remain_independent_and_unassigned_layers_a
 }
 
 #[test]
+fn public_connections_at_one_origin_never_ask_which_to_use() {
+    // Two public connections of one server: any choice reads the same anonymously.
+    let origin = "https://public757.example.org";
+    let mut s = session(None);
+    new(&mut s, json!({"kind":"wms","name":"Public WMS","address":format!("{origin}/wms")}));
+    new(&mut s, json!({"kind":"wfs","name":"Public WFS","address":format!("{origin}/wfs")}));
+    s.run("map.addTiles", &json!({"url":format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),"name":"Bare"})).unwrap();
+    assert_eq!(requests(&mut s), json!([]));
+    s.run("project.openText", &json!({"text":project(origin, "")})).unwrap();
+    assert_eq!(requests(&mut s), json!([]));
+}
+
+#[test]
 fn test_refuses_changed_endpoint_and_missing_login_instead_of_testing_anonymously() {
     let mut s = session(None);
     let id = new(&mut s, json!({"kind":"wms","address":"https://test757.example.org/wms","auth":"header","keyName":"X-Key"}));
@@ -338,6 +351,11 @@ fn logins_drop_the_tile_cache_only_when_one_ends_or_is_replaced() {
     s.run("connection.login", &json!({"id":public})).unwrap();
     s.run("connection.login", &json!({"id":public})).unwrap();
     s.run("connection.login", &json!({"id":private,"apiKey":"cache-sentinel-757"})).unwrap();
+    assert_eq!(web::cache_clears(), start);
+    // Logging in again without typing (choosing it again) keeps the binding and the cache.
+    let first = bound(&mut s, &private, "https://cache-private757.example.org/wms");
+    s.run("connection.login", &json!({"id":private})).unwrap();
+    assert_eq!(bound(&mut s, &private, "https://cache-private757.example.org/wms"), first);
     assert_eq!(web::cache_clears(), start);
     // Replacing or ending a login leaves authenticated responses behind: those go.
     s.run("connection.login", &json!({"id":private,"apiKey":"replacement-sentinel-757"})).unwrap();

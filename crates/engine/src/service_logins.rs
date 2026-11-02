@@ -181,15 +181,21 @@ pub(crate) fn activate(s: &mut Session, c: &Connection, secret: Option<&Secret>,
     if let Some(next) = next {
         s.web_logins.active.insert(c.id.clone(), next);
     }
-    s.database_logins.select(WEB, &origin, &c.id);
-    s.database_logins.clear_requests_for(WEB, &origin);
-    rebind_connection(s, c);
+    reselect(s, c, &origin);
     // Only a login that was replaced or removed leaves cached authenticated responses to drop;
     // a first login, or none, changes no cached tile.
     if replaced {
         clear_cache();
     }
     Ok(())
+}
+
+/// Chooses `c` for its origin again and rebinds its layers, keeping its live binding (and so
+/// its cached tiles): logging in again to a connection that is already logged in.
+pub(crate) fn reselect(s: &mut Session, c: &Connection, origin: &str) {
+    s.database_logins.select(WEB, origin, &c.id);
+    s.database_logins.clear_requests_for(WEB, origin);
+    rebind_connection(s, c);
 }
 
 pub(crate) fn deactivate(s: &mut Session, c: &Connection, _origin: Option<String>) {
@@ -260,7 +266,9 @@ pub fn request(s: &mut Session, connection: Option<&str>, url: &str) -> Result<S
         None
     };
     let Some(c) = chosen else {
-        if candidates.len() > 1 {
+        // Several connections, at least one with a login: the user picks. Public connections
+        // alone all send the same anonymous request, so there is nothing to ask.
+        if candidates.len() > 1 && candidates.iter().any(|c| !c.auth.is_empty()) {
             s.database_logins.request(LoginRequest {
                 reason: LoginReason::Choose,
                 kind: WEB,
@@ -522,8 +530,9 @@ pub(crate) fn resolve(s: &mut Session, only: Option<&BTreeSet<String>>) {
             prompted: false,
         };
         let Some(c) = chosen else {
-            if candidates.len() > 1 || recorded.len() > 1 {
-                // Several connections for the address, and none of them clear: the user picks.
+            if (candidates.len() > 1 || recorded.len() > 1) && candidates.iter().any(|c| !c.auth.is_empty()) {
+                // Several connections for the address, at least one with a login, and none of them
+                // clear: the user picks. Public ones alone read the same anonymously.
                 let ids: Vec<String> = if recorded.len() > 1 {
                     recorded.iter().map(|c| c.id.clone()).collect()
                 } else {

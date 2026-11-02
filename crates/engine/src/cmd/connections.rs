@@ -858,6 +858,11 @@ fn service_login(s: &mut Session, c: &Connection, p: &Value, remember: bool) -> 
     };
     let origin = crate::connections::login_origin(c).ok_or(web::NO_ORIGIN)?;
     let Some(typed) = typed else {
+        // Already logged in: choose it again, keeping its binding and its cached tiles.
+        if web::logged_in(s, c) {
+            web::reselect(s, c, &origin);
+            return Ok(Reopened::default());
+        }
         // Only the active login given this session can be reused.
         let secret = web::known_secret(s, c)?;
         web::activate(s, c, Some(&secret), true)?;
