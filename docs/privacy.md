@@ -18,8 +18,8 @@ omitted conservatively. A credential field in the middle of a line is removed wh
 one word or quoted (`… password: hunter2`), but a value of several words reads as prose and is
 kept (`… password: correct horse battery` keeps all three), so check such text before sharing.
 After `Basic` (without a colon) at the start of a line, the rest of the text is removed only
-when the next word looks like base64: it has a digit or punctuation (other than the
-sentence-ending marks `.,!?;:)`), has 16 characters or more, or has 8 or more with a capital
+when the next word looks like base64: it has a digit or punctuation (a sentence-ending mark
+`.,!?;:)` at its end doesn't count), has 16 characters or more, or has 8 or more with a capital
 after the first letter. So a very short Basic credential such as `YTpi` is kept.
 Request and response bodies are not captured by network diagnostics.
 Background requests carry their originating session's weak capture token; failures are not
