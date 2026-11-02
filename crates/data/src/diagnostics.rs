@@ -27,7 +27,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// The word the pane and the report show.
+    /// The word the copied report shows (the pane shows its own, translated).
     pub fn label(self) -> &'static str {
         match self {
             Self::Error => "Error",
@@ -69,7 +69,7 @@ pub enum NetworkKind {
 }
 
 impl NetworkKind {
-    /// The words the pane (in English) and the report show.
+    /// The words the copied report shows (the pane shows its own, translated).
     pub fn label(self) -> &'static str {
         match self {
             Self::Http => "HTTP failure",
@@ -714,16 +714,24 @@ pub fn redact(text: &str) -> String {
                         out.push_str(&path_secrets_redacted(address));
                     }
                     Ok(mut url) if url.has_host() => {
+                        // Sentence punctuation after the address (`…@example.org, retrying`)
+                        // isn't the address's: parsed with it, it would join the host (or be an
+                        // empty port, dropped). It is set aside and put back after; with a query,
+                        // the note below puts it back instead.
+                        let mut kept = None;
+                        if let Some(c) = address.chars().last().filter(|c| matches!(c, ':' | ',' | ';' | ')' | '.'))
+                            && !address.contains(['?', '#'])
+                            && let Ok(trimmed) = url::Url::parse(address.get(..address.len() - c.len_utf8()).unwrap_or(""))
+                            && trimmed.has_host()
+                        {
+                            (url, kept) = (trimmed, Some(c));
+                        }
                         let _ = url.set_username("");
                         let _ = url.set_password(None);
                         url.set_query(None);
                         url.set_fragment(None);
                         out.push_str(&path_secrets_redacted(url.as_str()));
-                        // An empty port's colon ends the address as a sentence's does, and
-                        // parsing drops it; with a query, the note below puts it back.
-                        if address.ends_with(':') && !url.as_str().ends_with(':') && !address.contains(['?', '#']) {
-                            out.push(':');
-                        }
+                        out.extend(kept);
                     }
                     _ => out.push_str("[address omitted]"),
                 }
@@ -1208,6 +1216,8 @@ mod tests {
     #[test]
     fn removing_user_information_keeps_the_sentence_punctuation() {
         assert_eq!(redact("Could not reach https://alice:hidden@example.org: timeout"), "Could not reach https://example.org/: timeout");
+        assert_eq!(redact("Could not reach https://alice:hidden@example.org, retrying"), "Could not reach https://example.org/, retrying");
+        assert_eq!(redact("Could not reach https://alice:hidden@example.org. Retrying"), "Could not reach https://example.org/. Retrying");
         assert_eq!(
             redact("Could not reach https://alice:hidden@example.org/x. Retrying"),
             "Could not reach https://example.org/x. Retrying"
