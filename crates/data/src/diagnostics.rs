@@ -284,11 +284,13 @@ impl Capture {
         let Some(state) = self.0.upgrade() else { return };
         // The server is the address's origin (scheme, host and port): two tile sources on one
         // host but different ports are two sources. An address without a web origin (`s3://`)
-        // is its scheme and host, so two buckets are two sources. An oversized address isn't
-        // parsed: it counts with the addresses that don't parse, as one source.
-        let server = (url.len() <= MAX_INPUT_BYTES)
-            .then(|| url::Url::parse(url).ok())
-            .flatten()
+        // is its scheme and host, so two buckets are two sources. They come first, so only the
+        // address's first part is parsed: an oversized address keeps its own server.
+        let mut head = url.len().min(MAX_URL_BYTES);
+        while !url.is_char_boundary(head) {
+            head -= 1;
+        }
+        let server = url::Url::parse(url.get(..head).unwrap_or(""))
             .map(|u| {
                 let origin = u.origin();
                 if origin.is_tuple() { origin.ascii_serialization() } else { format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")) }
@@ -1256,12 +1258,14 @@ mod tests {
         capture.note_absence("HEAD", "https://tiles.example.org/0/0/0.png", 404);
         capture.note_absence("BREW", "https://other.example.org/0/0/0.png", 404);
         let long = format!("https://big.example.org/{}", "a".repeat(MAX_INPUT_BYTES));
+        let other_long = format!("https://huge.example.org/{}", "a".repeat(MAX_INPUT_BYTES));
         capture.note_absence("GET", &long, 404);
         capture.note_absence("GET", &long, 404);
+        capture.note_absence("GET", &other_long, 404);
         let records = history.records();
         let method = |i: usize| records[i].network.as_ref().map(|n| n.method.as_str());
         assert_eq!((method(0), method(1)), (Some("HEAD"), Some("OTHER")));
-        assert_eq!(records.len(), 3, "an oversized address is one source, said once");
+        assert_eq!(records.len(), 4, "each oversized address's server is said once");
         assert_eq!(records[2].network.as_ref().map(|n| n.url.as_str()), Some("[oversized address omitted]"));
     }
 
