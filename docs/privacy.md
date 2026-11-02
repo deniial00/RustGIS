@@ -7,7 +7,8 @@ send searches, coordinates, data or assistant context to those services, as desc
 ## Local troubleshooting history
 
 **Diagnostics** keeps a bounded, in-memory history of messages and failed tile, service and
-data requests for the current session, even while its pane is closed. It is not telemetry:
+data requests for the current session, even while its pane is closed (a map tile the server
+doesn't have is routine: noted once per server, not listed). It is not telemetry:
 nothing is uploaded automatically, written to preferences, or saved in a project. **Copy
 diagnostics** explicitly copies the filtered entries; **Clear** removes the history.
 

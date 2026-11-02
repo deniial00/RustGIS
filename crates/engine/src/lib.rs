@@ -1094,7 +1094,7 @@ impl Session {
             if let Err(error) = &res {
                 let text = rustgis_data::diagnostics::redact(error);
                 if !self.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text) {
-                    self.notify(text, true);
+                    self.notify_redacted(text, true);
                 }
             }
             res
@@ -1501,9 +1501,20 @@ impl Session {
     fn notice(&mut self, text: String, severity: rustgis_data::diagnostics::Severity) {
         // Redacted for the status bar and the history alike. `redact` bounds the notice to 8 KiB
         // (an ellipsis marks the cut) and omits one over 16 KiB whole, so a clipped credential
-        // can't survive; the history's copy is bounded further, to a record's 2 KiB, in `push`.
+        // can't survive; the history's copy is bounded further, to a record's 2 KiB.
         let text = rustgis_data::diagnostics::redact(&text);
-        self.diagnostics.push(severity, self.diagnostic_source.unwrap_or("Application"), &text, "");
+        self.notice_redacted(text, severity);
+    }
+
+    /// [`Session::notify`] for text that is already through [`rustgis_data::diagnostics::redact`]
+    /// (a failure the caller redacted to compare it with the notices): not redacted again.
+    pub fn notify_redacted(&mut self, text: String, error: bool) {
+        use rustgis_data::diagnostics::Severity;
+        self.notice_redacted(text, if error { Severity::Error } else { Severity::Info });
+    }
+
+    fn notice_redacted(&mut self, text: String, severity: rustgis_data::diagnostics::Severity) {
+        self.diagnostics.push_redacted(severity, self.diagnostic_source.unwrap_or("Application"), &text, "");
         self.notices.push(Notice { text, error: severity == rustgis_data::diagnostics::Severity::Error });
         self.notices_given += 1;
         if self.notices.len() > 200 {

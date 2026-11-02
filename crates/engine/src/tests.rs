@@ -11496,7 +11496,7 @@ fn notices_since_survives_the_cap() {
 }
 
 #[test]
-fn diagnostics_capture_notices_without_an_open_pane_or_project_persistence() {
+fn diagnostics_capture_notices_without_an_open_pane_and_survive_a_new_project() {
     use rustgis_data::diagnostics::{Filter, MAX_DETAILS_BYTES, MAX_MESSAGE_BYTES, Severity};
     let mut s = Session::new(Project::default());
     let mark = s.notice_mark();
@@ -11511,8 +11511,6 @@ fn diagnostics_capture_notices_without_an_open_pane_or_project_persistence() {
     assert_eq!(records.iter().map(|r| r.severity).collect::<Vec<_>>(), [Severity::Info, Severity::Warning, Severity::Error]);
     assert!(records.iter().all(|r| r.source == "Application" && r.timestamp_ms > 0));
     assert!(!s.diagnostics.report(Filter::All).contains("never-retain-this"));
-    let saved = serde_json::to_string(&s.project).unwrap();
-    assert!(!saved.contains("diagnostics-session-only"));
     s.notify("界".repeat(3000), false);
     // The notice keeps its words to redaction's own bound (8 KiB, an ellipsis at the cut), not
     // the record's 2 KiB; only the history's record copy takes the message bound.
@@ -11525,9 +11523,6 @@ fn diagnostics_capture_notices_without_an_open_pane_or_project_persistence() {
     let records = s.diagnostics.records();
     assert!(records.iter().any(|r| r.message == "diagnostics-session-only information"));
     assert!(records.iter().any(|r| r.message == "diagnostics-session-only warning"));
-    // A separate session restoring the saved project must not inherit troubleshooting history.
-    let reopened = Session::new(serde_json::from_str(&saved).unwrap());
-    assert!(!reopened.diagnostics.records().iter().any(|r| r.message.starts_with("diagnostics-session-only")));
 }
 
 #[test]

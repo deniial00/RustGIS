@@ -622,7 +622,8 @@ pub struct RequestDiagnostics<'a> {
     status: Option<u16>,
     timed_out: bool,
     /// Statuses the caller expects (a tile past a map's edge, a store's absent chunk): their
-    /// failures make no network record, as each would flood the history.
+    /// failures aren't recorded one by one, as each would flood the history. One note per server
+    /// says that they're omitted ([`rustgis_data::diagnostics::Capture::note_absence`]).
     omit: &'static [u16],
 }
 
@@ -636,7 +637,8 @@ impl<'a> RequestDiagnostics<'a> {
         Self { url, method, capture, started: Instant::now(), status: None, timed_out: false, omit: &[] }
     }
 
-    /// Statuses whose failures are expected answers, not records (see [`Self::omit`]).
+    /// Statuses whose failures are expected answers, noted once per server, not recorded each
+    /// (a tile past a map's edge, a store's absent chunk).
     pub fn omit_statuses(&mut self, omit: &'static [u16]) {
         self.omit = omit;
     }
@@ -677,7 +679,7 @@ impl<'a> RequestDiagnostics<'a> {
         if let Some(status) = self.status
             && self.omit.contains(&status)
         {
-            self.capture.absence_said(url, status);
+            self.capture.note_absence(self.method, url, status);
             return;
         }
         let mut details = match (range, tail) {
@@ -783,11 +785,11 @@ pub fn download_blocking_limited(url: &str, max: usize) -> Result<Vec<u8>, Strin
     download_blocking_within(url, max, BLOCKING_TIMEOUT).map_err(large_file_hint)
 }
 
-/// Like [`download_blocking`], but a status in `omit` is an expected answer: its failure makes no
-/// network record of its own (a store's absent chunk, which the caller counts itself).
+/// Like [`download_blocking`], but a status in `omit` is an expected answer: its failure isn't
+/// recorded, only noted once per server (a store's absent chunk, which the caller counts itself).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn download_blocking_expecting(url: &str, omit: &'static [u16]) -> Result<Vec<u8>, String> {
-    download_blocking_omitting(url, MAX_DOWNLOAD, BLOCKING_TIMEOUT, omit).map_err(large_file_hint)
+pub fn download_blocking_omitting(url: &str, omit: &'static [u16]) -> Result<Vec<u8>, String> {
+    download_blocking_omitting_within(url, MAX_DOWNLOAD, BLOCKING_TIMEOUT, omit).map_err(large_file_hint)
 }
 
 /// A blocking download that ran out of time says how to add a large file instead.
@@ -803,13 +805,14 @@ fn large_file_hint(e: String) -> String {
 /// Like [`download_blocking_limited`], giving up after `timeout` (with the bare error).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_blocking_within(url: &str, max: usize, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
-    download_blocking_omitting(url, max, timeout, &[])
+    download_blocking_omitting_within(url, max, timeout, &[])
 }
 
 /// Like [`download_blocking_within`], but a status in `omit` is an expected answer: its failure
-/// makes no network record (a store's absent chunk, which the caller counts itself).
+/// isn't recorded, only noted once per server (a store's absent chunk, which the caller counts
+/// itself).
 #[cfg(not(target_arch = "wasm32"))]
-fn download_blocking_omitting(url: &str, max: usize, timeout: std::time::Duration, omit: &'static [u16]) -> Result<Vec<u8>, String> {
+fn download_blocking_omitting_within(url: &str, max: usize, timeout: std::time::Duration, omit: &'static [u16]) -> Result<Vec<u8>, String> {
     crate::address::check(url, None)?;
     native::get(&native::download_agent(timeout), &download_address(url, max), omit)
 }
@@ -933,8 +936,8 @@ pub fn head(url: &str, done: HeadDone) {
 }
 
 /// Fetches an address's bytes, uncached (through the browser's fetcher, or the worker threads).
-/// A status in `omit` is an expected answer: its failure makes no network record (a tile past a
-/// map's edge).
+/// A status in `omit` is an expected answer: its failure isn't recorded, only noted once per
+/// server (a tile past a map's edge).
 pub(crate) fn fetch_bytes(url: String, done: Done, omit: &'static [u16]) {
     let f = fetcher().lock().unwrap_or_else(|e| e.into_inner()).clone();
     match f {
@@ -1491,7 +1494,7 @@ mod native {
 
     /// The answer to `url`; a refusal keeps the server's answer only when `detail` asks for it,
     /// as tiles a server doesn't have are routine and only their status is read. A status in
-    /// `omit` is an expected answer: its failure makes no network record.
+    /// `omit` is an expected answer: its failure isn't recorded, only noted once per server.
     fn fetch_answer(agent: &ureq::Agent, url: &str, detail: bool, omit: &'static [u16]) -> Result<Vec<u8>, Failure> {
         use std::io::Read;
         // Local file failures are not network traffic.

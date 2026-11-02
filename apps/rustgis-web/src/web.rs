@@ -572,8 +572,8 @@ async fn unless_stalled(
 
 /// Downloads `url`, or the byte range it asks for (a PMTiles archive's part: see
 /// `rustgis_tiles::cache::split_range`).
-/// A status in `omit` is an expected answer (a tile past a map's edge): its failure makes no
-/// record of its own, as on the desktop.
+/// A status in `omit` is an expected answer (a tile past a map's edge): its failure isn't
+/// recorded, only noted once per server, as on the desktop.
 async fn fetch_bytes(url: &str, capture: Capture, omit: &'static [u16]) -> Result<Vec<u8>, String> {
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "GET", capture);

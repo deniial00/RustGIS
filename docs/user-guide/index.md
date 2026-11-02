@@ -127,10 +127,18 @@ details** for failed requests: their address, method, observed HTTP status and d
 available. Native connection failures and timeouts are identified when the transport knows
 them; an opaque browser failure does not claim a status or a specific DNS, CORS, or connection cause.
 
-Use **All**, **Errors**, **Warnings**, **Info**, or **Network failures** to filter the history.
-**Copy diagnostics** copies the filtered entries and their technical details, including folded
-details. **Clear** clears all entries, not just the selected filter. Closing or reopening the
-pane does not clear it.
+Use **All**, **Errors**, **Warnings**, **Info**, or **Network failures** to filter the history
+(**Network failures** also lists the notes below about omitted absences). **Copy diagnostics**
+copies the filtered entries and their technical details, including folded details, as plain
+text: oldest entry first, with UTC Unix-millisecond timestamps, where the pane shows the newest
+first and a UTC clock time. **Clear** clears all entries, not just the selected filter. Closing
+or reopening the pane does not clear it.
+
+A map tile a server doesn't have (HTTP 404, or 410 where it is gone) is routine, as is a Zarr
+store's absent chunk, so each isn't listed. One **Network** note per server says that such
+absences are omitted, naming the first address. Past 64 servers one more note says that further
+servers aren't listed. A note that has left the 500 entries, or a **Clear**, lets its server be
+noted again.
 
 The last 500 entries are kept in memory for this session, including across project changes;
 older entries are discarded. Each message is limited to 2 KiB and technical details to 8 KiB.
