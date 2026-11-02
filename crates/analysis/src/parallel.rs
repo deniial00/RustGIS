@@ -4,6 +4,8 @@
 //! The browser has no threads, so there everything runs on the calling thread, as it does below
 //! a tool's threshold, where starting threads costs more than they save.
 
+use crate::control::{self, Cancelled};
+
 /// The most threads a tool uses.
 const MAX_THREADS: usize = 16;
 /// The items a thread takes at a time: few enough that expensive items lying together are shared
@@ -12,8 +14,9 @@ pub(crate) const BATCH: usize = 16;
 /// Each worker's stack, as large as the main thread's usually is.
 const STACK_BYTES: usize = 8 << 20;
 
-/// The work below which a raster tool's rows are made on one thread: cell-point pairs, say,
-/// about 30 ns each for IDW, so some 5 ms of it, against tens of microseconds to start a thread.
+/// The work below which a raster tool's rows are made on one thread, in the tool's own units:
+/// cell-point pairs for IDW (about 30 ns each, so some 5 ms of it), the same plus each cell's
+/// system for kriging, ray steps for a viewshed. Starting a thread costs tens of microseconds.
 pub(crate) const MIN_ROW_WORK: usize = 200_000;
 /// The scratch memory a raster tool's threads may take together, beyond one thread's.
 const SCRATCH_BUDGET: usize = 256 << 20;
@@ -46,31 +49,51 @@ fn cores() -> usize {
 
 /// `f` on each of a raster's `rows` (its output rows, `chunks_mut` of the bands it writes) with
 /// the row's number, on `threads` threads ([`threads_for_rows`]), this one among them. Each row
-/// is written where it lies, so the output is held once, as on one thread. A row is costly
-/// enough to be taken one at a time, so rows that cost more than others are shared out too.
+/// is written where it lies, so the output is held once, as on one thread. Rows are taken a few
+/// at a time, by the rows still left: one each when there are few per thread (and so at the
+/// end), so rows that cost more than others are shared out, up to [`BATCH`] when there are many,
+/// so cheap rows don't wait on the lock.
 /// Each thread makes its own `scratch()` once; one that panics stops the others after the rows
-/// they are making, and its panic is raised again here.
+/// they are making, and its panic is raised again here. Each row made counts toward the run's
+/// progress; a cancelled run stops after the rows being made, and the rest are left unwritten.
 pub(crate) fn for_each_row<T: Send, S>(
-    rows: impl Iterator<Item = T> + Send,
+    rows: impl ExactSizeIterator<Item = T> + Send,
     threads: usize,
     scratch: impl Fn() -> S + Sync,
     f: impl Fn(&mut S, usize, T) + Sync,
-) {
+) -> Result<(), Cancelled> {
     use std::sync::atomic::{AtomicBool, Ordering};
     if threads <= 1 {
         let mut s = scratch();
-        rows.enumerate().for_each(|(i, row)| f(&mut s, i, row));
-        return;
+        for (i, row) in rows.enumerate() {
+            control::check()?;
+            f(&mut s, i, row);
+            control::advance(1);
+        }
+        return Ok(());
     }
+    let run = control::current();
     let rows = std::sync::Mutex::new(rows.enumerate());
     let failed = AtomicBool::new(false);
     let work = || {
         let _stop = StopOnPanic(&failed);
+        let _run = control::install(run.clone());
         let mut s = scratch();
-        while !failed.load(Ordering::Relaxed) {
-            // The lock is held only to take a row; a poisoned one means a thread panicked.
-            let Some((i, row)) = rows.lock().ok().and_then(|mut r| r.next()) else { break };
-            f(&mut s, i, row);
+        let mut taken = Vec::with_capacity(BATCH);
+        while !failed.load(Ordering::Relaxed) && !control::cancelled() {
+            // The lock is held only to take rows; a poisoned one means a thread panicked.
+            if let Ok(mut r) = rows.lock() {
+                let take = (r.len() / threads.saturating_mul(BATCH)).clamp(1, BATCH);
+                taken.extend(r.by_ref().take(take));
+            }
+            if taken.is_empty() {
+                break;
+            }
+            let n = taken.len();
+            for (i, row) in taken.drain(..) {
+                f(&mut s, i, row);
+            }
+            control::advance(n);
         }
     };
     std::thread::scope(|scope| {
@@ -83,6 +106,7 @@ pub(crate) fn for_each_row<T: Send, S>(
             }
         }
     });
+    control::check()
 }
 
 /// `f` on each of `items` with its index, the results in their order: on several threads when
@@ -90,8 +114,9 @@ pub(crate) fn for_each_row<T: Send, S>(
 /// `scratch()` once and passes it to every `f` it runs, for buffers to reuse; the index lets a
 /// raster tool map over its rows' numbers. The first error stops the threads after the items
 /// they are making, and comes back instead of the results: on one thread the first in input
-/// order, on several the earliest of those found before they stopped.
-pub(crate) fn try_map<T: Sync, S, R: Send, E: Send>(
+/// order, on several the earliest of those found before they stopped. Each item made counts toward
+/// the run's progress; a cancelled run stops likewise, with [`Cancelled`] as its error.
+pub(crate) fn try_map<T: Sync, S, R: Send, E: Send + From<Cancelled>>(
     items: &[T],
     min_items: usize,
     scratch: impl Fn() -> S + Sync,
@@ -104,62 +129,56 @@ pub(crate) fn try_map<T: Sync, S, R: Send, E: Send>(
 /// until none are left or one has failed, so the work is shared however it is spread, and the
 /// results go back in their places. A thread that can't start (a limit on threads, say) leaves
 /// its share to the others; one that panics passes its panic on, as an item made here would.
-pub(crate) fn try_map_on<T: Sync, S, R: Send, E: Send>(
+pub(crate) fn try_map_on<T: Sync, S, R: Send, E: Send + From<Cancelled>>(
     items: &[T],
     threads: usize,
     scratch: impl Fn() -> S + Sync,
     f: impl Fn(&mut S, usize, &T) -> Result<R, E> + Sync,
 ) -> Result<Vec<R>, E> {
-    try_each_on(items.len(), threads, scratch, |s, i| f(s, i, &items[i]))
-}
-
-/// Sets the stop flag when the thread it lives on panics, so the others stop after the items
-/// they are making rather than make the rest for nothing.
-struct StopOnPanic<'a>(&'a std::sync::atomic::AtomicBool);
-
-impl Drop for StopOnPanic<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
-
-/// [`try_map_on`] over the indices `0..len`.
-fn try_each_on<S, R: Send, E: Send>(
-    len: usize,
-    threads: usize,
-    scratch: impl Fn() -> S + Sync,
-    f: impl Fn(&mut S, usize) -> Result<R, E> + Sync,
-) -> Result<Vec<R>, E> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    if threads <= 1 || len <= 1 {
+    if threads <= 1 || items.len() <= 1 {
         let mut s = scratch();
-        return (0..len).map(|i| f(&mut s, i)).collect();
+        return items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                control::check()?;
+                let r = f(&mut s, i, item);
+                control::advance(1);
+                r
+            })
+            .collect();
     }
+    let run = control::current();
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let work = || {
         let _stop = StopOnPanic(&failed);
+        let _run = control::install(run.clone());
         let mut s = scratch();
         let mut made = Vec::new();
         while !failed.load(Ordering::Relaxed) {
             let from = next.fetch_add(BATCH, Ordering::Relaxed);
-            if from >= len {
-                break;
+            let Some(batch) = items.get(from..items.len().min(from.saturating_add(BATCH))).filter(|b| !b.is_empty()) else { break };
+            if control::cancelled() {
+                failed.store(true, Ordering::Relaxed);
+                return Err((from, Cancelled.into()));
             }
-            for i in from..len.min(from.saturating_add(BATCH)) {
-                match f(&mut s, i) {
-                    Ok(r) => made.push((i, r)),
+            for (k, item) in batch.iter().enumerate() {
+                match f(&mut s, from + k, item) {
+                    Ok(r) => made.push((from + k, r)),
                     Err(e) => {
                         failed.store(true, Ordering::Relaxed);
-                        return Err((i, e));
+                        return Err((from + k, e));
                     }
                 }
             }
+            // Counted a batch at a time: the threads share one count.
+            control::advance(batch.len());
         }
         Ok(made)
     };
+
     let mut parts = Vec::with_capacity(threads);
     std::thread::scope(|scope| {
         let others: Vec<_> =
@@ -171,7 +190,7 @@ fn try_each_on<S, R: Send, E: Send>(
             parts.push(h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
         }
     });
-    let mut made: Vec<(usize, R)> = Vec::with_capacity(len);
+    let mut made: Vec<(usize, R)> = Vec::with_capacity(items.len());
     let mut first: Option<(usize, E)> = None;
     for part in parts {
         match part {
@@ -190,6 +209,18 @@ fn try_each_on<S, R: Send, E: Send>(
     Ok(made.into_iter().map(|(_, r)| r).collect())
 }
 
+/// Sets the stop flag when the thread it lives on panics, so the others stop after the items
+/// they are making rather than make the rest for nothing.
+struct StopOnPanic<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +232,7 @@ mod tests {
         scratch: impl Fn() -> S + Sync,
         f: impl Fn(&mut S, usize, &T) -> R + Sync,
     ) -> Vec<R> {
-        try_map_on(items, threads, scratch, |s, i, item| Ok::<R, ()>(f(s, i, item))).unwrap_or_default()
+        try_map_on(items, threads, scratch, |s, i, item| Ok::<R, Cancelled>(f(s, i, item))).unwrap_or_default()
     }
 
     fn map<T: Sync, S, R: Send>(
@@ -210,7 +241,7 @@ mod tests {
         scratch: impl Fn() -> S + Sync,
         f: impl Fn(&mut S, usize, &T) -> R + Sync,
     ) -> Vec<R> {
-        try_map(items, min_items, scratch, |s, i, item| Ok::<R, ()>(f(s, i, item))).unwrap_or_default()
+        try_map(items, min_items, scratch, |s, i, item| Ok::<R, Cancelled>(f(s, i, item))).unwrap_or_default()
     }
 
     #[test]
@@ -284,12 +315,13 @@ mod tests {
     #[test]
     fn a_failing_item_stops_the_threads_and_its_error_comes_back() {
         let items: Vec<u32> = (0..1_000).collect();
-        let f = |_: &mut (), _: usize, x: &u32| if *x == 500 || *x == 700 { Err(*x) } else { Ok(*x) };
+        let f = |_: &mut (), _: usize, x: &u32| if *x == 500 || *x == 700 { Err(x.to_string()) } else { Ok(*x) };
         // On one thread, the first in input order.
-        assert_eq!(try_map_on(&items, 1, || (), f), Err(500));
+        assert_eq!(try_map_on(&items, 1, || (), f), Err("500".to_string()));
         for threads in [2, 3, 16] {
-            assert!(matches!(try_map_on(&items, threads, || (), f), Err(500 | 700)), "{threads} threads");
-            assert_eq!(try_map_on(&items, threads, || (), |_, _, x| Ok::<_, ()>(*x)), Ok(items.clone()), "{threads} threads");
+            let e = try_map_on(&items, threads, || (), f).err();
+            assert!(matches!(e.as_deref(), Some("500" | "700")), "{threads} threads");
+            assert_eq!(try_map_on(&items, threads, || (), |_, _, x| Ok::<_, Cancelled>(*x)), Ok(items.clone()), "{threads} threads");
         }
         // Items still waiting when one fails are left: far fewer than all of them run.
         let ran = std::sync::atomic::AtomicUsize::new(0);
@@ -299,7 +331,7 @@ mod tests {
             || (),
             |_, _, x| {
                 ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if *x == 0 { Err(()) } else { Ok(()) }
+                if *x == 0 { Err(Cancelled) } else { Ok(()) }
             },
         );
         assert!(r.is_err());
@@ -311,7 +343,7 @@ mod tests {
         let alone: Vec<usize> = (0..37 * 5).map(|i| i / 5 * 3 + i % 5).collect();
         for threads in [1, 2, 5, 16, 64] {
             let mut out = vec![0usize; 37 * 5];
-            for_each_row(
+            let made = for_each_row(
                 out.chunks_mut(5),
                 threads,
                 || (),
@@ -319,10 +351,18 @@ mod tests {
                     row.iter_mut().enumerate().for_each(|(c, o)| *o = r * 3 + c);
                 },
             );
+            assert_eq!(made, Ok(()));
             assert_eq!(out, alone, "{threads} threads");
         }
+        // Many cheap rows per thread, taken several at a time.
+        let tall: Vec<usize> = (0..5_000).collect();
+        for threads in [2, 16] {
+            let mut out = vec![0usize; 5_000];
+            assert_eq!(for_each_row(out.chunks_mut(1), threads, || (), |_, r, row: &mut [usize]| row[0] = r), Ok(()));
+            assert_eq!(out, tall, "{threads} threads");
+        }
         let mut none: Vec<u8> = Vec::new();
-        for_each_row(none.chunks_mut(5), 4, || (), |_, _, _: &mut [u8]| panic!("no rows"));
+        assert_eq!(for_each_row(none.chunks_mut(5), 4, || (), |_, _, _: &mut [u8]| panic!("no rows")), Ok(()));
         // Small work, and the browser: one thread; never more threads than rows.
         assert_eq!(threads_for_rows(100, MIN_ROW_WORK - 1, 0), 1);
         assert!(threads_for_rows(3, usize::MAX, 0) <= 3);
@@ -355,6 +395,50 @@ mod tests {
         });
         assert!(r.is_err(), "no worker ran an item");
         assert!(ran.load(std::sync::atomic::Ordering::Relaxed) < items.len() / 2, "{}", ran.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_cancelled_run_stops_its_threads_and_counts_what_they_made() {
+        for threads in [1, 4] {
+            let control = crate::control::Control::new();
+            let _run = crate::control::install(Some(control.clone()));
+            // Rows: the run is cancelled on the 100th; the threads stop after the rows they hold.
+            let made = std::sync::atomic::AtomicUsize::new(0);
+            let mut out = vec![0u8; 5_000];
+            crate::control::begin(out.len());
+            let r = for_each_row(
+                out.chunks_mut(1),
+                threads,
+                || (),
+                |_, _, row: &mut [u8]| {
+                    if made.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 99 {
+                        control.cancel();
+                    }
+                    row[0] = 1;
+                },
+            );
+            assert_eq!(r, Err(Cancelled), "{threads} threads");
+            let made = made.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(made < 1_000, "{threads} threads made {made}");
+            let (done, total) = control.progress().unwrap_or_default();
+            assert!(total == 5_000 && done >= 100 && done <= made as u64, "{threads} threads: {done} of {total}");
+            // Items, likewise.
+            let control2 = crate::control::Control::new();
+            let _inner = crate::control::install(Some(control2.clone()));
+            let items: Vec<u32> = (0..5_000).collect();
+            let r = try_map_on(
+                &items,
+                threads,
+                || (),
+                |_, i, x| {
+                    if i == 99 {
+                        control2.cancel();
+                    }
+                    Ok::<_, String>(*x)
+                },
+            );
+            assert_eq!(r.err().as_deref(), Some(crate::control::CANCELLED), "{threads} threads");
+        }
     }
 
     #[test]

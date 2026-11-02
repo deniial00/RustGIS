@@ -72,8 +72,10 @@ ground's heights, labels and point markers stand on it, and nearer slopes hide w
 them. The heights come from a DEM raster layer of the project (heights in metres; the layer can
 stay hidden) or from elevation tiles: Terrarium (`terrarium`, as the free
 `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`) or Mapbox
-Terrain-RGB (`mapbox`, also MapTiler's). `map.terrain` sets it: `{"layer": "DEM"}` or
-`{"tiles": "https://…/{z}/{x}/{y}.png", "encoding": "terrarium"}`, with `"exaggeration"`
+Terrain-RGB (`mapbox`, also MapTiler's). **View › Scene › Terrain** turns it on from the active
+layer (make the DEM the active layer first) and off again; a notice names the layer and says to
+tilt the map. `map.terrain` sets it: `{"layer": "DEM"}`, or `{}` for the active raster layer when
+no terrain is on, or `{"tiles": "https://…/{z}/{x}/{y}.png", "encoding": "terrarium"}`, with `"exaggeration"`
 (0 to 20, default 1) to stretch the heights; `{"exaggeration": 2}` alone changes only that, and
 `{"off": true}` flattens the map again. Terrain is saved with the project and shows in exported
 maps; a flat (untilted) view, the globe and other projections stay flat, extruded layers are
@@ -337,9 +339,9 @@ projection, and clicking the coordinate system in the status bar opens the **Coo
 System** dialog, which also takes a projected EPSG code (such as `3035`, `32633` for UTM zone
 33N or `2056` for Switzerland) or an ESRI code, the one `.prj` files and ArcGIS name (such as
 `ESRI:102033` for South America Albers Equal Area Conic, or `ESRI:54030` for World Robinson). A
-code whose projection method or datum grid RustGIS can't use (Polyconic such as `5880`, Cassini,
-oblique Mercator, or a NAD27 code that needs a grid) is refused with the reason, rather than drawn
-in another projection. RustGIS supports a subset of Esri's projected systems, checked against
+code whose projection method or datum grid RustGIS can't use (Laborde such as `8441`, or a NAD27
+code that needs a grid) is refused with the reason, rather than drawn in another projection.
+RustGIS supports a subset of Esri's projected systems, checked against
 PROJ at representative points; unsupported codes such as World Miller (`ESRI:54003`) are refused
 as unknown codes. The presets:
 
