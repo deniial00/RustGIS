@@ -601,13 +601,15 @@ impl Project {
     }
 
     /// How many layers and tile layers read through a login binding but record no connection:
-    /// nothing would tell the opened project which login they need.
+    /// nothing would tell the opened project which login they need. One whose address also holds
+    /// a token isn't counted here: [`lost_secret`] counts it already.
     fn unrecorded_bound(&mut self) -> usize {
+        let only_bound = |a: &str| without_login_binding(a).is_some_and(|public| saved_address(&public).is_none());
         let mut n = 0;
         for map in self.maps.iter_mut().chain(self.offline_areas.iter_mut().map(|area| &mut area.data)) {
-            n += map.tiles.iter().filter(|t| t.connection.is_empty() && without_login_binding(&t.url).is_some()).count();
+            n += map.tiles.iter().filter(|t| t.connection.is_empty() && only_bound(&t.url)).count();
             for layer in map.layers.iter_mut().filter(|l| l.connection.is_empty()) {
-                n += usize::from(layer.addresses_mut().any(|a| without_login_binding(a).is_some()));
+                n += usize::from(layer.addresses_mut().any(|a| only_bound(a)));
             }
         }
         n
@@ -1166,5 +1168,9 @@ mod login_binding_tests {
         project.map_mut().tiles.clear();
         project.map_mut().tiles.push(tiles("Both", &bound(&format!("{plain}?token=abc123")), "saved-id"));
         assert_eq!(project.saved_text(None).unwrap().1, 1, "the token under a binding is lost too");
+
+        project.map_mut().tiles.clear();
+        project.map_mut().tiles.push(tiles("Unrecorded token", &bound(&format!("{plain}?token=abc123")), ""));
+        assert_eq!(project.saved_text(None).unwrap().1, 1, "a bound layer with no connection and a token is one layer");
     }
 }

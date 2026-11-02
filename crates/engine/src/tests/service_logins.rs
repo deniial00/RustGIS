@@ -326,6 +326,77 @@ fn a_group_child_read_in_place_is_counted_once_and_refresh_respects_logout() {
 }
 
 #[test]
+fn anonymous_reads_never_borrow_a_groups_recorded_login() {
+    let origin = "https://anon-group757.example.org";
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"ogcapi","address":format!("{origin}/ogc"),"auth":"header","keyName":"X-Key"}));
+    let mut layer = rustgis_map::Layer::new(42, rustgis_data::Dataset::new("Roads", rustgis_data::GeometryType::None, Vec::new()));
+    layer.connection = id.clone();
+    s.project.map_mut().layers.push(layer);
+    s.project.map_mut().service_groups.push(rustgis_map::ServiceGroup {
+        id: 6,
+        name: "Imported".into(),
+        url: format!("{origin}/ogc/collections"),
+        kind: "ogcapi".into(),
+        expanded: true,
+        children: vec![rustgis_map::ServiceChild {
+            layer: 42,
+            collection: "roads".into(),
+            source_url: format!("{origin}/ogc/collections/roads"),
+        }],
+    });
+    s.run("connection.login", &json!({"id":id,"apiKey":"anon-group-sentinel-757"})).unwrap();
+    let plan = |s: &mut Session| s.run("service.groupPlan", &json!({"group":6,"sourceOnly":true})).unwrap();
+    // The session's own plan reads the group with the connection its layers record...
+    assert_eq!(header(plan(&mut s)["url"].as_str().unwrap()).unwrap().1, "anon-group-sentinel-757");
+    // ...but an anonymous read (a plugin's command) never infers it.
+    let was = s.web_logins.set_anonymous(true);
+    let anonymous = plan(&mut s);
+    s.web_logins.set_anonymous(was);
+    assert!(header(anonymous["url"].as_str().unwrap()).is_none(), "{anonymous}");
+    assert!(!anonymous.to_string().contains("anon-group-sentinel-757"));
+}
+
+#[test]
+fn a_panic_during_an_anonymous_read_puts_the_logins_back() {
+    let mut s = session(None);
+    let out: std::thread::Result<()> = web::anonymously(&mut s, true, |s| {
+        assert!(s.web_logins.is_anonymous());
+        panic!("a command failed unexpectedly")
+    });
+    assert!(out.is_err());
+    assert!(!s.web_logins.is_anonymous(), "later requests must carry their logins again");
+}
+
+#[test]
+fn a_blank_connection_is_no_connection() {
+    let mut s = session(None);
+    for (name, connection) in [("Without", None), ("Blank", Some("")), ("Spaces", Some("  "))] {
+        let mut p = json!({"url":"https://blank757.example.org/tiles/{z}/{x}/{y}.png","name":name});
+        if let Some(c) = connection {
+            p["connection"] = json!(c);
+        }
+        s.run("map.addTiles", &p).unwrap();
+    }
+    assert!(s.map().tiles.iter().all(|t| t.connection.is_empty()));
+}
+
+#[test]
+fn header_keys_are_plain_ascii_basic_passwords_need_not_be() {
+    let mut s = session(None);
+    let key = new(&mut s, json!({"kind":"wms","address":"https://ascii757.example.org/wms","auth":"header","keyName":"X-Key"}));
+    for typed in ["café-757", "€757"] {
+        let e = s.run("connection.login", &json!({"id":key,"apiKey":typed})).unwrap_err();
+        assert_eq!(e, web::HEADER_ASCII);
+        assert!(!e.contains(typed));
+    }
+    s.run("connection.login", &json!({"id":key,"apiKey":"plain-ascii-757"})).unwrap();
+    // Basic logins are base64 of UTF-8, built the same way on every platform.
+    let basic = new(&mut s, json!({"kind":"wms","address":"https://ascii-basic757.example.org/wms","auth":"basic","user":"ana"}));
+    s.run("connection.login", &json!({"id":basic,"password":"café-757"})).unwrap();
+}
+
+#[test]
 fn a_definition_reloaded_with_another_identity_cannot_reuse_a_session_secret() {
     let mut s = session(None);
     let id = new(&mut s, json!({"kind":"wms","address":"https://identity757.example.org/wms","auth":"header","keyName":"X-Key"}));

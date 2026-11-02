@@ -81,6 +81,7 @@ pub(crate) fn translated(e: &str) -> String {
         web::SESSION_ONLY => tl!("Web-service logins last for this session only."),
         web::INSECURE => tl!("This connection uses unencrypted http://. Tick the confirmation before sending its password or key."),
         web::BAD_SECRET => tl!("The password or key must fit a 4096-byte HTTP header, without control characters."),
+        web::HEADER_ASCII => tl!("An API key sent in a header must use plain ASCII characters."),
         web::REQUIRED => tl!("Enter this connection's password or API key to log in."),
         web::UNSAVED => tl!("Save the connection first: a login belongs to a saved connection."),
         web::NO_ORIGIN => tl!("The connection's address has no http:// or https:// origin a login can go to."),

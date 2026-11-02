@@ -963,10 +963,8 @@ fn answered(s: &mut Session, c: &Connection, text: &str) -> CmdResult {
 fn test(s: &mut Session, p: &Value) -> CmdResult {
     let c = tested(s, p)?;
     // An unsaved web service reads anonymously, whatever saved connection shares its origin.
-    let was = s.web_logins.set_anonymous(web::is_service(&c) && c.id.is_empty());
-    let out = test_connection(s, p, c);
-    s.web_logins.set_anonymous(was);
-    out
+    let anonymous = web::is_service(&c) && c.id.is_empty();
+    web::anonymously(s, anonymous, |s| test_connection(s, p, c)).unwrap_or_else(|_| Err("connection.test failed unexpectedly".into()))
 }
 
 fn test_connection(s: &mut Session, p: &Value, c: Connection) -> CmdResult {

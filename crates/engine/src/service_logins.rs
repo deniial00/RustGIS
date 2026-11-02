@@ -30,6 +30,8 @@ pub const SESSION_ONLY: &str = "Web-service logins last for this session only.";
 pub const INSECURE: &str = "This connection's address uses plain http://, so its login would be sent unencrypted. Confirm with allowInsecure: true to send it anyway.";
 /// A password or key that can't be sent.
 pub const BAD_SECRET: &str = "The password or key must be at most 4096 bytes, without control characters.";
+/// An API key a header can't carry the same way everywhere (the browser sends Latin-1 only).
+pub const HEADER_ASCII: &str = "An API key sent in a header must use plain ASCII characters.";
 /// A login asked of a connection with nothing to log in with this session.
 pub const REQUIRED: &str = "This connection's login is required: give its password (basic) or apiKey (header).";
 /// A login for a definition that isn't saved.
@@ -83,6 +85,11 @@ pub fn check_login_secret(c: &Connection, secret: &str) -> Result<(), String> {
     if c.auth == "basic" && !logins::valid_basic(&c.user, secret) {
         return Err("The encoded Basic login exceeds the supported header size or contains invalid characters.".into());
     }
+    // The browser's fetch sends a header byte per character (Latin-1) and refuses characters past
+    // U+00FF, while the desktop sends UTF-8: only ASCII reaches a server the same way from both.
+    if c.auth == "header" && !secret.is_ascii() {
+        return Err(HEADER_ASCII.into());
+    }
     Ok(())
 }
 
@@ -124,6 +131,11 @@ impl SessionLogins {
         std::mem::replace(&mut self.anonymous, on)
     }
 
+    /// Whether [`SessionLogins::anonymous`] reads are running: nothing may pick a login for them.
+    pub(crate) fn is_anonymous(&self) -> bool {
+        self.anonymous
+    }
+
     fn owner(&self, id: &str) -> String {
         format!("{}/{id}", self.session)
     }
@@ -133,6 +145,16 @@ impl Default for SessionLogins {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Runs `f` with anonymous reads `on` (or off), and puts the earlier setting back even when `f`
+/// panics: `Session::run` catches the panic and the session goes on, so a setting left behind
+/// would silently send later requests without their login.
+pub(crate) fn anonymously<T>(s: &mut Session, on: bool, f: impl FnOnce(&mut Session) -> T) -> std::thread::Result<T> {
+    let was = s.web_logins.set_anonymous(on);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
+    s.web_logins.set_anonymous(was);
+    out
 }
 
 impl Drop for SessionLogins {
@@ -655,7 +677,9 @@ pub(crate) struct Before {
 /// web-service connection, by id.
 fn named(s: &Session, params: &Value) -> Result<Option<Connection>, String> {
     match params.get("connection") {
+        // Blank is no connection, as `request_params` reads it.
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if id.trim().is_empty() => Ok(None),
         Some(Value::String(id)) => {
             let c = s
                 .connections

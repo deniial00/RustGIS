@@ -42,7 +42,8 @@ fn target(s: &Session, p: &Value) -> Result<Option<(ServiceGroup, Option<u32>)>,
 fn request(s: &mut Session, p: &Value) -> CmdResult {
     let mut q = p.clone();
     if let Some((group, child)) = target(s, p)? {
-        if q.get("connection").is_none_or(Value::is_null) {
+        // Anonymous reads (a plugin's command, an unsaved Test) never borrow the group's login.
+        if !s.web_logins.is_anonymous() && q.get("connection").is_none_or(Value::is_null) {
             let mut ids = group
                 .children
                 .iter()
