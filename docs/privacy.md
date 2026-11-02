@@ -17,6 +17,8 @@ strings (including signed URLs), fragments, credential fields, and structured pa
 omitted conservatively. A credential field in the middle of a line is removed when its value is
 one word or quoted (`… password: hunter2`), but a value of several words reads as prose and is
 kept (`… password: correct horse battery` keeps all three), so check such text before sharing.
+After `Basic` at the start of a line, a short word (under 8 characters, with no digit or
+padding) is kept as a word, so a very short Basic credential such as `YTpi` is not removed.
 Request and response bodies are not captured by network diagnostics.
 Background requests carry their originating session's weak capture token; failures are not
 broadcast to other embedded or Python sessions. Layer names, file paths and URL paths can

@@ -131,7 +131,7 @@ Use **All**, **Errors**, **Warnings**, **Info**, or **Network failures** to filt
 (**Network failures** also lists the notes below about omitted absences). **Copy diagnostics**
 copies the filtered entries and their technical details, including folded details, as plain
 text: oldest entry first, with UTC Unix-millisecond timestamps, where the pane shows the newest
-first and a UTC clock time. **Clear** clears all entries, not just the selected filter. Closing
+first and a UTC date and time. **Clear** clears all entries, not just the selected filter. Closing
 or reopening the pane does not clear it.
 
 A map tile a server doesn't have (HTTP 404, or 410 where it is gone) is routine, as is a Zarr
