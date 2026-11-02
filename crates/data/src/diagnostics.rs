@@ -285,7 +285,7 @@ impl Capture {
         // The server is the address's origin (scheme, host and port): two tile sources on one
         // host but different ports are two sources. An address without a web origin (`s3://`)
         // is its scheme and host, so two buckets are two sources. An oversized address isn't
-        // parsed: it is one source of its own.
+        // parsed: it counts with the addresses that don't parse, as one source.
         let server = (url.len() <= MAX_INPUT_BYTES)
             .then(|| url::Url::parse(url).ok())
             .flatten()

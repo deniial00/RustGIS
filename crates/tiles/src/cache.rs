@@ -1603,9 +1603,11 @@ mod native {
                 // A signed request goes only where its credentials are for.
                 if prepared.signed {
                     return Err(format!(
-                    "{url}: the S3 endpoint answered with a redirect (HTTP {}), which a signed request doesn't follow: check the connection's region and endpoint",
-                    resp.status().as_u16()
-                ).into());
+                        "{url}: the S3 endpoint answered with a redirect (HTTP {}), which a signed request doesn't follow: \
+                         check the connection's region and endpoint",
+                        resp.status().as_u16()
+                    )
+                    .into());
                 }
                 let location = resp.headers().get("location").and_then(|v| v.to_str().ok()).ok_or("a redirect with no Location")?;
                 let next = crate::template::join(&at, location);
