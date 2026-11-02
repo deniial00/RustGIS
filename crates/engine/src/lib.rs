@@ -397,6 +397,17 @@ pub struct GpRecord {
     pub outputs: Vec<String>,
 }
 
+impl GpRecord {
+    /// The record with its messages scrubbed of login bindings and secrets: a tool's error can
+    /// quote a bound address, and history rows are saved with the project and exported.
+    pub(crate) fn scrubbed(mut self) -> Self {
+        for message in &mut self.messages {
+            *message = render::rustgis_tiles::logins::scrub(message);
+        }
+        self
+    }
+}
+
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -1336,7 +1347,7 @@ impl Session {
                     .skip(history_from)
                     .filter(|record| !record.ok && rustgis_analysis::tool(&record.id).is_some_and(cmd::gp::writes_files))
                 {
-                    self.project.gp_history.push(record);
+                    self.project.gp_history.push(record.scrubbed());
                     recorded_failure = true;
                 }
                 if recorded_failure {

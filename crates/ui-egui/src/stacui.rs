@@ -713,7 +713,9 @@ pub fn title(app: &RustGisApp) -> &'static str {
     shown_preset(&app.ui.stac).map(Preset::title).unwrap_or("STAC Search")
 }
 
-fn switch_api(st: &mut State, url: &str) {
+/// Points the panel at another API, dropping what the last one listed and what is still on its
+/// way from it (a catalog walk among them), wherever the switch comes from.
+pub(crate) fn switch_api(st: &mut State, url: &str) {
     st.api = url.to_string();
     drop_listing(st);
 }
@@ -1217,6 +1219,23 @@ fn properties(ui: &mut egui::Ui, i: usize, item: &Item) {
 mod tests {
     use super::*;
     use crate::RustGisApp;
+
+    #[test]
+    fn opening_a_stac_api_from_the_tree_drops_the_last_apis_catalog_walk() {
+        let mut app = RustGisApp::with_sample();
+        let old = "https://old-walk757.example.org/catalog.json";
+        app.ui.stac.api = old.into();
+        app.ui.stac.walk = Some((Walk::new(old, catalog::Filter::default(), 10), Vec::new()));
+        let source = rustgis_engine::sources::Source {
+            kind: "stac".into(),
+            name: "New API".into(),
+            address: "https://new-walk757.example.org/stac".into(),
+            extra: json!({"api": "https://new-walk757.example.org/stac"}),
+        };
+        crate::sourcespane::open(&mut app, &source).unwrap();
+        assert!(app.ui.stac.walk.is_none(), "the old catalog's documents must not land in the new listing");
+        assert_eq!(app.ui.stac.api, "https://new-walk757.example.org/stac");
+    }
 
     #[test]
     fn a_deferred_token_add_keeps_its_original_connection_when_selection_changes() {

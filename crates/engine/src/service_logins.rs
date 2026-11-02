@@ -424,9 +424,15 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
             {
                 let before = path.clone();
                 rewrite(path);
-                // A failed open is kept, not retried; the changed address deserves a new try.
+                // The changed address deserves a new try: an open source still reads through the
+                // old binding, so it opens afresh (a failure is kept in its `error`, as any open's
+                // is); one not open yet, or whose open failed, opens on the next sync.
                 if *path != before {
-                    source.error = None;
+                    if source.is_open() {
+                        let _ = source.reopen();
+                    } else {
+                        source.error = None;
+                    }
                 }
             }
             if let Some(path) = l.raster.as_mut().and_then(|raster| raster.path.as_mut()) {

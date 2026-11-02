@@ -849,21 +849,36 @@ mod tests {
 
     #[test]
     fn results_carry_plain_addresses_not_login_wrappers() {
+        let mut s = Session::new(rustgis_engine::Project::default());
+        let origin = "https://assistant-login757.example.org";
+        let definition = json!({"kind":"wmts", "address": format!("{origin}/tiles"), "auth":"header", "keyName":"X-Key"});
+        let id = s.run("connection.new", &definition).unwrap()["id"].as_str().unwrap().to_string();
+        s.run("connection.login", &json!({"id": id, "apiKey": "assistant-secret-757"})).unwrap();
+        let plain = format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png");
+        let tile = rustgis_engine::service_logins::request(&mut s, Some(&id), &plain).unwrap();
+        assert!(tile.starts_with(rustgis_engine::data::login_address::PREFIX));
+        // The app's command result keeps the bound address it reads through; the model's doesn't.
+        let call = |command: &str, params: Value| ToolCall {
+            id: String::new(),
+            name: "run_command".into(),
+            args: json!({"command": command, "params": params}),
+        };
+        let added = run_with_budget(&mut s, &call("map.addTiles", json!({"url": tile, "name": "T"})), DEFAULT_OUTPUT_TOKENS).unwrap();
+        let listed = run_with_budget(&mut s, &call("map.tiles", json!({})), DEFAULT_OUTPUT_TOKENS).unwrap();
+        assert!(s.map().tiles[0].url.starts_with("rustgis-login:"));
+        for text in [&added, &listed] {
+            assert!(!text.contains("rustgis-login:") && !text.contains("assistant-secret-757"), "{text}");
+        }
+        assert!(listed.contains(&plain), "the model still learns the layer's address: {listed}");
+    }
+
+    #[test]
+    fn wrappers_after_a_prefix_are_made_plain_too() {
         let origin = "https://assistant-login.example";
         let binding = logins::activate(origin, "assistant", logins::Method::Header("X-Key".into()), "assistant-secret", false).unwrap();
-        let tile = logins::bind(&binding, &format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png")).unwrap();
         let archive = logins::bind(&binding, &format!("{origin}/a.pmtiles")).unwrap();
-        assert!(tile.starts_with("rustgis-login:"));
-        let result = json!({
-            "fetch": tile,
-            "layers": [{"source_url": archive, "next": {"request": {"url": format!("pmtiles:x@{archive}")}}}],
-            "count": 2,
-        });
-        let text = bounded_json(&public_addresses(result, 0), DEFAULT_OUTPUT_TOKENS);
-        assert!(!text.contains("rustgis-login:") && !text.contains(&binding), "{text}");
-        let v: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v["fetch"], format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"));
-        assert_eq!(v["layers"][0]["source_url"], format!("{origin}/a.pmtiles"));
+        let result = json!({"layers": [{"next": {"request": {"url": format!("pmtiles:x@{archive}")}}}], "count": 2});
+        let v = public_addresses(result, 0);
         assert_eq!(v["layers"][0]["next"]["request"]["url"], format!("pmtiles:x@{origin}/a.pmtiles"));
         assert_eq!(v["count"], 2);
         assert!(logins::deactivate(&binding));

@@ -568,3 +568,20 @@ fn a_plain_replacement_legend_reads_through_the_tiles_logged_in_connection() {
     assert_eq!(crate::sources::redact(&legends[0].url), format!("{origin}/legend.png"));
     assert_eq!(legends[1].url, "https://other757.example.org/legend.png");
 }
+
+#[test]
+fn geoprocessing_history_never_keeps_a_login_binding() {
+    let mut s = Session::new(crate::sample::world_project());
+    let id = new(&mut s, json!({"kind":"wfs","address":"https://gp757.example.org/wfs","auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"gp-sentinel-757"})).unwrap();
+    let bound = bound(&mut s, &id, "https://gp757.example.org/wfs/roads.pmtiles");
+    assert!(bound.starts_with(rustgis_data::login_address::PREFIX));
+    // A failed write quotes where it went, and the history keeps the failed run's message.
+    let input = s.map().layers.iter().find(|l| l.name.eq_ignore_ascii_case("cities")).map(|l| l.name.clone()).unwrap();
+    let params = json!({"input":input,"minZoom":0,"maxZoom":0,"output":bound});
+    let error = s.run("gp.run", &json!({"tool":"vectorToPmtiles","params":params})).unwrap_err();
+    let record = s.project.gp_history.last().unwrap_or_else(|| panic!("the failed run is recorded: {error}"));
+    let text = record.messages.join("\n");
+    assert!(text.contains("https://gp757.example.org/wfs/roads.pmtiles"), "the message quotes the address: {text}");
+    assert!(!text.contains(rustgis_data::login_address::PREFIX) && !text.contains("gp-sentinel-757"), "{text}");
+}
