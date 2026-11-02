@@ -578,13 +578,7 @@ async fn fetch_bytes(url: &str, capture: Capture, omit: &'static [u16]) -> Resul
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "GET", capture);
     diagnostics.omit_statuses(omit);
-    fetch_bytes_inner(url, &mut diagnostics).await.inspect_err(|error| diagnostics.failed(&Failure::new(url, error)))
-}
-
-async fn fetch_bytes_inner(
-    url: &str,
-    diagnostics: &mut rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::RequestDiagnostics<'_>,
-) -> Result<Vec<u8>, String> {
+    let answer = async {
     let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let window = web_sys::window().ok_or("no window")?;
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
@@ -722,7 +716,10 @@ async fn fetch_bytes_inner(
     if whole_tail.is_some_and(|n| bytes.len() as u64 > n) {
         return Err(format!("{url}: {}", cache::NO_RANGES));
     }
-    Ok(bytes)
+    Ok::<_, String>(bytes)
+    }
+    .await;
+    diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
 }
 
 /// POSTs a JSON document and reads the answer (at most the tile cache's `MAX_BYTES`), without
@@ -730,40 +727,36 @@ async fn fetch_bytes_inner(
 async fn post_json(url: &str, body: &str, capture: Capture) -> Result<Vec<u8>, String> {
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "POST", capture);
-    post_json_inner(url, body, &mut diagnostics).await.inspect_err(|error| diagnostics.failed(&Failure::new(url, error)))
-}
-
-async fn post_json_inner(
-    url: &str,
-    body: &str,
-    diagnostics: &mut rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::RequestDiagnostics<'_>,
-) -> Result<Vec<u8>, String> {
-    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
-    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    let init = web_sys::RequestInit::new();
-    init.set_method("POST");
-    init.set_redirect(web_sys::RequestRedirect::Error);
-    let headers = web_sys::Headers::new().map_err(err)?;
-    headers.set("Content-Type", "application/json").map_err(err)?;
-    headers.set("Accept", "application/json").map_err(err)?;
-    init.set_headers(&headers);
-    init.set_body(&wasm_bindgen::JsValue::from_str(body));
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(url, &init))
-        .await
-        .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
-        .dyn_into()
-        .map_err(err)?;
-    diagnostics.answered(resp.status());
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+    let answer = async {
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache;
+        let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+        let window = web_sys::window().ok_or("no window")?;
+        let init = web_sys::RequestInit::new();
+        init.set_method("POST");
+        init.set_redirect(web_sys::RequestRedirect::Error);
+        let headers = web_sys::Headers::new().map_err(err)?;
+        headers.set("Content-Type", "application/json").map_err(err)?;
+        headers.set("Accept", "application/json").map_err(err)?;
+        init.set_headers(&headers);
+        init.set_body(&wasm_bindgen::JsValue::from_str(body));
+        let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(url, &init))
+            .await
+            .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
+            .dyn_into()
+            .map_err(err)?;
+        diagnostics.answered(resp.status());
+        if !resp.ok() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(err)?).await.map_err(err)?;
+        let bytes = js_sys::Uint8Array::new(&buf);
+        if bytes.length() as usize > cache::MAX_BYTES {
+            return Err(format!("{} bytes is too large", bytes.length()));
+        }
+        Ok::<_, String>(bytes.to_vec())
     }
-    let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(err)?).await.map_err(err)?;
-    let bytes = js_sys::Uint8Array::new(&buf);
-    if bytes.length() as usize > cache::MAX_BYTES {
-        return Err(format!("{} bytes is too large", bytes.length()));
-    }
-    Ok(bytes.to_vec())
+    .await;
+    diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
 }
 
 /// Asks for an address's headers (`HEAD`): a TIFF header's announced length and the type. The
@@ -772,46 +765,43 @@ async fn post_json_inner(
 async fn head(url: &str, capture: Capture) -> Result<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Head, String> {
     use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache::RequestDiagnostics, failure::Failure};
     let mut diagnostics = RequestDiagnostics::with_capture(url, "HEAD", capture);
-    head_inner(url, &mut diagnostics).await.inspect_err(|error| diagnostics.failed(&Failure::new(url, error)))
-}
-
-async fn head_inner(
-    url: &str,
-    diagnostics: &mut rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::RequestDiagnostics<'_>,
-) -> Result<rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::Head, String> {
-    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, s3};
-    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    let prepared = s3::prepare(url)?;
-    // A request signed for S3 is signed for a GET.
-    if prepared.signed {
-        return Ok(cache::Head::default());
-    }
-    let init = web_sys::RequestInit::new();
-    init.set_method("HEAD");
-    if !prepared.headers.is_empty() {
-        let headers = web_sys::Headers::new().map_err(err)?;
-        for (k, v) in &prepared.headers {
-            headers.set(k, v).map_err(err)?;
+    let answer = async {
+        use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, s3};
+        let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+        let window = web_sys::window().ok_or("no window")?;
+        let prepared = s3::prepare(url)?;
+        // A request signed for S3 is signed for a GET.
+        if prepared.signed {
+            return Ok(cache::Head::default());
         }
-        init.set_headers(&headers);
+        let init = web_sys::RequestInit::new();
+        init.set_method("HEAD");
+        if !prepared.headers.is_empty() {
+            let headers = web_sys::Headers::new().map_err(err)?;
+            for (k, v) in &prepared.headers {
+                headers.set(k, v).map_err(err)?;
+            }
+            init.set_headers(&headers);
+        }
+        let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&prepared.url, &init))
+            .await
+            .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
+            .dyn_into()
+            .map_err(err)?;
+        diagnostics.answered(resp.status());
+        if !resp.ok() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let header = |k: &str| resp.headers().get(k).ok().flatten();
+        Ok::<_, String>(cache::Head {
+            tiff_header_length: header("x-tiff-header-length").as_deref().and_then(cache::tiff_header_length),
+            content_type: header("content-type"),
+            // Seen only where the server exposes it to pages.
+            accepts_ranges: header("accept-ranges").as_deref().is_some_and(cache::accepts_byte_ranges),
+        })
     }
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&prepared.url, &init))
-        .await
-        .map_err(|_| "the browser couldn't reach it (offline, or the server doesn't accept requests from web pages)".to_string())?
-        .dyn_into()
-        .map_err(err)?;
-    diagnostics.answered(resp.status());
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let header = |k: &str| resp.headers().get(k).ok().flatten();
-    Ok(cache::Head {
-        tiff_header_length: header("x-tiff-header-length").as_deref().and_then(cache::tiff_header_length),
-        content_type: header("content-type"),
-        // Seen only where the server exposes it to pages.
-        accepts_ranges: header("accept-ranges").as_deref().is_some_and(cache::accepts_byte_ranges),
-    })
+    .await;
+    diagnostics.record(answer.map_err(|e| Failure::new(url, e))).map_err(|failure| failure.message)
 }
 
 /// Makes an HTTP request (the AI assistant's calls to its model), returning the response of any
