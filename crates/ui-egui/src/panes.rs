@@ -86,6 +86,7 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
         let (id, width) = match right {
             RightPane::WebData => ("right_pane_web", 440.0),
             RightPane::Notebook => ("right_pane_notebook", (room / 2.0).max(320.0).min(max)),
+            RightPane::DiagnosticLog => ("right_pane_diagnostic_log", 480.0),
             _ => ("right_pane", 320.0),
         };
         let pane = egui::Panel::right(id).resizable(true).default_size(width).size_range(260.0..=max).frame(frame).show(ui, |ui| {
@@ -141,6 +142,7 @@ fn right_title(pane: RightPane) -> (&'static str, &'static str) {
         RightPane::Profile => ("Profile", "ui.pane.profile"),
         RightPane::TimeSeries => ("Time Series", "ui.pane.timeSeries"),
         RightPane::Diagnostics => ("Diagnostic Monitor", "ui.pane.diagnostics"),
+        RightPane::DiagnosticLog => ("Diagnostics", "ui.pane.diagnosticLog"),
         RightPane::Infographics => ("Infographics", "ui.pane.infographics"),
         RightPane::Report => ("Report", "ui.pane.report"),
         RightPane::Presentation => ("Presentation", "ui.pane.presentation"),
@@ -180,6 +182,10 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
         crate::sqlpane::show(app, ui, t);
         return;
     }
+    if right == RightPane::DiagnosticLog {
+        crate::diagnosticlog::show(app, ui, t);
+        return;
+    }
     // The Script pane fits its box to the pane's height, the buttons kept in view (#653).
     if right == RightPane::Script {
         crate::analysispane::script_pane(app, ui, t);
@@ -203,7 +209,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Report => crate::reportpane::report(app, ui, t),
             RightPane::Presentation => crate::docpanes::presentation(app, ui, t),
             RightPane::Notebook => crate::docpanes::notebook(app, ui, t),
-            RightPane::Assistant | RightPane::Sql | RightPane::Script => {}
+            RightPane::Assistant | RightPane::Sql | RightPane::Script | RightPane::DiagnosticLog => {}
             RightPane::Shares => crate::docpanes::shares(app, ui, t),
             RightPane::Directions => crate::navui::show(app, ui, t),
             RightPane::Bookmarks => crate::bookmarkpane::show(app, ui, t),
@@ -2001,7 +2007,12 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
     {
         raster_legend_rows(ui, entries, 74.0, t);
     } else if l.expanded && has_legend {
-        let field = l.renderer.field().unwrap_or("").to_string();
+        // (By expression: the expression, cut short.)
+        let field = match l.renderer.expression() {
+            Some(e) if e.chars().count() > 60 => format!("{}…", e.chars().take(60).collect::<String>()),
+            Some(e) => e.to_string(),
+            None => l.renderer.field().unwrap_or("").to_string(),
+        };
         ui.horizontal(|ui| {
             ui.add_space(74.0);
             ui.label(egui::RichText::new(field).size(11.0).color(t.text_dim));
@@ -2664,6 +2675,9 @@ pub struct GpForm {
     pub web_run: Option<(u64, &'static str, crate::Slot<rustgis_engine::cmd::gp::ExternalOutput>)>,
     /// A plugin tool running on a thread of its own, so the window stays responsive.
     pub plugin_run: Option<PluginJob>,
+    /// A built-in tool running on a thread of its own, likewise (the browser runs them at once).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub tool_run: Option<ToolJob>,
     /// Files picked in the browser for file parameters, which have no paths there: (name,
     /// contents), sent with the run while the parameter still shows that name.
     pub files: HashMap<&'static str, (String, Vec<u8>)>,
@@ -2685,6 +2699,69 @@ pub struct PluginJob {
     pub slot: crate::Slot<Result<rustgis_engine::analysis::ToolResult, String>>,
     /// Stops the run, and shows what it last logged.
     pub control: std::sync::Arc<rustgis_engine::plugins::tools::Control>,
+}
+
+/// A built-in tool running on a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ToolJob {
+    pub id: u64,
+    pub tool: &'static str,
+    /// What the run made, once it has.
+    pub slot: crate::Slot<rustgis_engine::cmd::gp::ToolDone>,
+    /// Stops the run, and counts its progress.
+    pub control: std::sync::Arc<rustgis_engine::analysis::control::Control>,
+}
+
+/// Starts a built-in tool on a thread of its own; [`poll_tool_run`] applies what it made.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_tool_run(app: &mut RustGisApp, tool: &'static str, params: &Value, ctx: &egui::Context) {
+    match rustgis_engine::cmd::gp::tool_start(&mut app.session, tool, params) {
+        Ok(run) => {
+            let slot = crate::Slot::default();
+            let control = rustgis_engine::analysis::control::Control::new();
+            let (out, ctl, ctx) = (slot.clone(), control.clone(), ctx.clone());
+            let id = run.id;
+            let spawned = std::thread::Builder::new().name(tool.into()).spawn(move || {
+                let done = run.run(&ctl);
+                // Filled even when poisoned, or the pane would wait for it forever.
+                *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(done);
+                ctx.request_repaint();
+            });
+            match spawned {
+                Ok(_) => {
+                    app.gp.tool_run = Some(ToolJob { id, tool, slot, control });
+                    app.gp.last = None;
+                }
+                Err(e) => {
+                    rustgis_engine::cmd::gp::tool_abandon(&mut app.session, id);
+                    app.gp.last = Some((false, vec![e.to_string()]));
+                }
+            }
+        }
+        Err(e) => app.gp.last = Some((false, vec![e])),
+    }
+}
+
+/// Applies a built-in tool run that finished on its thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn poll_tool_run(app: &mut RustGisApp, ctx: &egui::Context) {
+    let Some(job) = &app.gp.tool_run else { return };
+    // Its project was closed: stop it, as its result has nowhere to go, and say so.
+    if !rustgis_engine::cmd::gp::tool_waiting(&app.session, job.id) {
+        job.control.cancel();
+        dropped(app, job.tool);
+        app.gp.tool_run = None;
+        return;
+    }
+    let Some(done) = take(&job.slot) else {
+        // Its progress moves as it works.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    };
+    let (id, tool) = (job.id, job.tool);
+    app.gp.tool_run = None;
+    let r = rustgis_engine::cmd::gp::tool_complete(&mut app.session, id, done).and_then(|_| app.run("gp.finish", json!({"id": id})));
+    finished(app, tool, r);
 }
 
 /// Starts a plugin tool on a thread of its own; [`poll_plugin_run`] applies what it returns.
@@ -2720,9 +2797,10 @@ fn start_plugin_run(app: &mut RustGisApp, tool: &'static str, params: &Value, ct
 /// Applies a plugin tool run that finished on its thread.
 pub fn poll_plugin_run(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some(job) = &app.gp.plugin_run else { return };
-    // Its project was closed: stop it, as its result has nowhere to go.
+    // Its project was closed: stop it, as its result has nowhere to go, and say so.
     if !rustgis_engine::cmd::gp::plugin_waiting(&app.session, job.id) {
         job.control.cancel();
+        dropped(app, job.tool);
         app.gp.plugin_run = None;
         return;
     }
@@ -2735,6 +2813,12 @@ pub fn poll_plugin_run(app: &mut RustGisApp, ctx: &egui::Context) {
     app.gp.plugin_run = None;
     let r = rustgis_engine::cmd::gp::plugin_complete(&mut app.session, id, result).and_then(|_| app.run("gp.finish", json!({"id": id})));
     finished(app, tool, r);
+}
+
+/// Says that a tool's run was dropped: its project closed while it ran.
+fn dropped(app: &mut RustGisApp, tool: &'static str) {
+    let name = rustgis_engine::analysis::tool(tool).map(|t| t.name).unwrap_or(tool);
+    app.session.notify(crate::i18n::fmt("{tool} was stopped: its project was closed while it ran.", &[("tool", tl_raw!(name))]), false);
 }
 
 /// Shows how an asynchronous tool run went: under its form when it's open, else as a notice.
@@ -3265,7 +3349,14 @@ pub(crate) fn input_table<'a>(session: &'a Session, name: &str) -> Option<&'a ru
 
 fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let Some(spec) = app.gp.tool.and_then(rustgis_engine::analysis::tool) else {
-        // Tool finder.
+        // Tool finder, under the tool running, if one is.
+        let running = app.gp.web_run.is_some() || app.gp.plugin_run.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let running = running || app.gp.tool_run.is_some();
+        if running {
+            run_status(app, ui, t);
+            ui.add_space(8.0);
+        }
         crate::widgets::search_field(ui, &mut app.gp.search, tl!("Find Tools"));
         ui.separator();
         ui.add_space(4.0);
@@ -3689,8 +3780,10 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     ui.add_space(8.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-        // One browser run at a time, and one plugin run.
+        // One browser run at a time, and one background run.
         let idle = app.gp.web_run.is_none() && app.gp.plugin_run.is_none();
+        #[cfg(not(target_arch = "wasm32"))]
+        let idle = idle && app.gp.tool_run.is_none();
         if crate::widgets::primary_button(ui, tl!("Run"), idle, vec2(96.0, 30.0)).clicked() {
             // A blank output opens Save As before any work starts. Cancelling writes nothing.
             #[cfg(not(target_arch = "wasm32"))]
@@ -3753,6 +3846,10 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 // On a thread of its own: a plugin tool may run for minutes.
                 #[cfg(not(target_arch = "wasm32"))]
                 start_plugin_run(app, spec.id, &params, ui.ctx());
+            } else if !cfg!(target_arch = "wasm32") {
+                // A built-in tool too, with its progress and Cancel; the browser has no threads.
+                #[cfg(not(target_arch = "wasm32"))]
+                start_tool_run(app, spec.id, &params, ui.ctx());
             } else {
                 let r = app.run("gp.run", json!({"tool": spec.id, "params": params}));
                 app.gp.last = Some(match r {
@@ -3763,6 +3860,29 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         }
     });
+    run_status(app, ui, t);
+    if let Some((ok, msgs)) = &app.gp.last {
+        ui.add_space(8.0);
+        let (fill, stroke, head) =
+            if *ok { (t.green.gamma_multiply(0.12), t.green, "Completed") } else { (t.red.gamma_multiply(0.12), t.red, "Failed") };
+        egui::Frame::NONE
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke))
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(tl!(head)).font(semibold(12.5)).color(stroke));
+                for m in msgs {
+                    ui.label(egui::RichText::new(m).size(11.5));
+                }
+            });
+    }
+}
+
+/// The tool running, if one is: in the tool's form and in the finder, so that it can be cancelled
+/// from either.
+fn run_status(app: &RustGisApp, ui: &mut Ui, t: &Tokens) {
     if app.gp.web_run.is_some() {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -3791,22 +3911,27 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             job.control.cancel();
         }
     }
-    if let Some((ok, msgs)) = &app.gp.last {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(job) = &app.gp.tool_run {
         ui.add_space(8.0);
-        let (fill, stroke, head) =
-            if *ok { (t.green.gamma_multiply(0.12), t.green, "Completed") } else { (t.red.gamma_multiply(0.12), t.red, "Failed") };
-        egui::Frame::NONE
-            .fill(fill)
-            .stroke(Stroke::new(1.0, stroke))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(egui::RichText::new(tl!(head)).font(semibold(12.5)).color(stroke));
-                for m in msgs {
-                    ui.label(egui::RichText::new(m).size(11.5));
-                }
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            ui.spinner();
+            let name = rustgis_engine::analysis::tool(job.tool).map(|t| t.name).unwrap_or(job.tool);
+            // Two labels, not one sentence put together from translated pieces.
+            ui.label(egui::RichText::new(tl!("Running…")).size(12.0));
+            ui.label(egui::RichText::new(tl!(name)).size(12.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                cancel = ui.add_enabled(!job.control.is_cancelled(), egui::Button::new(tl!("Cancel"))).clicked();
             });
+        });
+        // How far its current step has come, when it counts its work.
+        if let Some((done, total)) = job.control.progress() {
+            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).show_percentage().desired_height(14.0));
+        }
+        if cancel {
+            job.control.cancel();
+        }
     }
 }
 
@@ -4095,8 +4220,14 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     match &l.renderer {
         Renderer::Single(s) => symbol_editor(app, ui, *s, g, t),
-        Renderer::Unique { field, classes, ramp, .. } => {
-            field_combo(app, ui, "Field", field, &all, "unique");
+        Renderer::Unique { field, classes, ramp, expression, .. } => {
+            field_combo(app, ui, "Field", if expression.is_some() { tl!("(expression)") } else { field.as_str() }, &all, "unique");
+            // Or by an expression's values: blank goes back to the field.
+            let id = egui::Id::unique(("unique_expression", crate::labelpane::layer_key(app, &l)));
+            if let Some(text) = expression_box(ui, id, tl!("Expression"), expression.as_deref(), &l.dataset, t) {
+                let e = if text.is_empty() { Value::Null } else { json!(text) };
+                let _ = app.run("layer.symbology", json!({"type": "unique", "expression": e, "ramp": ramp.name()}));
+            }
             ramp_picker(app, ui, ramp, t);
             ui.add_space(6.0);
             ui.label(
@@ -6349,6 +6480,81 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
 mod tests {
     use super::*;
 
+    /// Run starts a built-in tool on a thread of its own: the pane shows it running, with Cancel,
+    /// and its result lands as gp.run's would, with its layer and history.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_geoprocessing_pane_runs_a_tool_in_the_background() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        let _ = app.run("ui.gp.open", json!({"tool": "buffer"}));
+        app.gp.values.insert("input", "Cities".into());
+        app.gp.values.insert("distance", "50".into());
+        app.ws.recording = Some(Vec::new());
+        let layers = app.session.map().layers.len();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(420.0, 1000.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                poll_tool_run(app, ui.ctx());
+                geoprocessing(app, ui, &Tokens::light());
+            },
+            app,
+        );
+        h.run();
+        h.get_by_label("Run").click();
+        h.step();
+        assert!(h.state().gp.tool_run.is_some(), "it runs in the background");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while h.state().gp.tool_run.is_some() {
+            assert!(std::time::Instant::now() < end, "the run never landed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.step();
+        }
+        let app = h.state();
+        assert_eq!(app.gp.last.as_ref().map(|l| l.0), Some(true), "{:?}", app.gp.last);
+        assert_eq!(app.session.map().layers.len(), layers + 1);
+        assert_eq!(app.session.project.gp_history.last().map(|r| (r.ok, r.tool.as_str())), Some((true, "Buffer")));
+        // Recorded once, as its run.
+        let steps = app.ws.recording.as_deref().unwrap_or_default();
+        assert_eq!(steps.iter().map(|s| s.command.as_str()).collect::<Vec<_>>(), ["gp.run"]);
+        assert_eq!((&steps[0].params["tool"], &steps[0].params["params"]["input"]), (&json!("buffer"), &json!("Cities")));
+    }
+
+    /// The tool running stays in view, with its Cancel button, when the pane goes back to the
+    /// list of tools.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_tool_running_in_the_background_can_be_cancelled_from_the_tool_list() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        let run = rustgis_engine::cmd::gp::tool_start(&mut app.session, "buffer", &json!({"input": "Cities", "distance": 50})).unwrap();
+        let control = rustgis_engine::analysis::control::Control::new();
+        app.gp.tool_run = Some(ToolJob { id: run.id, tool: run.tool, slot: crate::Slot::default(), control: control.clone() });
+        app.gp.tool = None;
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(420.0, 1000.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                geoprocessing(app, ui, &Tokens::light());
+            },
+            app,
+        );
+        // Its spinner keeps repainting: steps, not run.
+        h.run_steps(3);
+        h.get_by_label("Cancel").click();
+        h.run_steps(2);
+        assert!(control.is_cancelled());
+    }
+
     #[test]
     fn field_source_uses_the_longest_input_prefix() {
         use rustgis_engine::analysis::{ParamSpec, ToolSpec};
@@ -6471,6 +6677,7 @@ mod tests {
             other_strokes: Vec::new(),
             class_fills: Default::default(),
             other_fills: Vec::new(),
+            expression: None,
         };
         let listed = stroke_classes(&r);
         let refs: Vec<&ClassRef> = listed.iter().map(|(c, ..)| c).collect();
@@ -7007,6 +7214,41 @@ mod tests {
         );
         h.run_steps(6);
         h
+    }
+
+    /// Unique Values class by the expression typed under the field; clearing it goes back to a field.
+    #[test]
+    fn unique_values_are_classed_by_the_expression_typed() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        let id = layer(h.state(), "retry");
+        h.state_mut().run("layer.symbology", json!({"type": "unique", "field": "c_valid"})).unwrap();
+        h.run_steps(3);
+        let steps = h.state().session.undo_depth();
+        let enter = |h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str| {
+            h.get_by_role_and_label(Role::TextInput, "Expression").focus();
+            h.run();
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.get_by_role_and_label(Role::TextInput, "Expression").type_text(text);
+            h.run();
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+        };
+        let renderer = |h: &egui_kittest::Harness<'static, RustGisApp>| h.state().session.map().layer(id).unwrap().renderer.clone();
+        enter(&mut h, "nosuch + 1");
+        assert!(h.query_by_label_contains("Invalid:").is_some(), "says why");
+        assert_eq!((renderer(&h).expression(), h.state().session.undo_depth()), (None, steps), "not applied");
+        h.get_by_role_and_label(Role::TextInput, "Expression").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        enter(&mut h, "if(c_valid > 15, 'high', 'low')");
+        let Renderer::Unique { classes, expression, .. } = renderer(&h) else { panic!() };
+        assert_eq!(expression.as_deref(), Some("if(c_valid > 15, 'high', 'low')"));
+        assert_eq!(classes.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["high", "low"], "the rows the query keeps");
+        assert_eq!(h.state().session.undo_depth(), steps + 1);
+        assert!(h.query_all_by_role(Role::ComboBox).any(|n| n.value().as_deref() == Some("(expression)")));
     }
 
     /// A different populated field fixes classification without changing the query or styling on failure.
