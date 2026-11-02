@@ -83,10 +83,11 @@ struct State {
     generation: u64,
     records: VecDeque<Record>,
     /// Servers whose expected absences have been said (one note each, so a second misconfigured
-    /// tile source isn't silent once the first has spoken). Bounded; cleared with the records.
-    absences_said: Vec<String>,
-    /// Whether servers past [`MAX_ABSENT_SERVERS`] have been said to go unlisted.
-    absences_overflow_said: bool,
+    /// tile source isn't silent once the first has spoken), each with its note's record id: once
+    /// the note leaves the history, the server is said again. Bounded; cleared with the records.
+    absences_said: Vec<(String, u64)>,
+    /// The note that servers past [`MAX_ABSENT_SERVERS`] go unlisted, while the history holds it.
+    absences_overflow_said: Option<u64>,
 }
 
 static CLOCK: Mutex<Option<fn() -> u64>> = Mutex::new(None);
@@ -197,7 +198,7 @@ impl History {
         state.records.clear();
         // A source said before the clear is said again: the pane must not stay silent about it.
         state.absences_said.clear();
-        state.absences_overflow_said = false;
+        state.absences_overflow_said = None;
         state.generation = state.generation.wrapping_add(1);
     }
 
@@ -246,17 +247,17 @@ impl Capture {
             .unwrap_or_default();
         // Checked, marked and stored under one lock: a Clear between can't leave the note behind.
         let mut guard = lock(&state);
-        if guard.absences_said.contains(&server) {
+        if guard.absences_said.iter().any(|(said, _)| *said == server) {
             return;
         }
         if guard.absences_said.len() >= MAX_ABSENT_SERVERS {
             // Past the cap a new server isn't listed, and that is said once.
-            if std::mem::replace(&mut guard.absences_overflow_said, true) {
+            if guard.absences_overflow_said.is_some() {
                 return;
             }
             let message =
                 format!("expected absences from further servers are not listed: this history names the first {MAX_ABSENT_SERVERS} servers");
-            store(
+            let id = store(
                 &mut guard,
                 Record {
                     id: 0,
@@ -268,9 +269,9 @@ impl Capture {
                     network: None,
                 },
             );
+            guard.absences_overflow_said = Some(id);
             return;
         }
-        guard.absences_said.push(server);
         // The address without its query or fragment, or a secret in its path, as a failure's
         // record keeps it.
         let url = path_secrets_redacted(url.get(..url.find(['?', '#']).unwrap_or(url.len())).unwrap_or(""));
@@ -292,7 +293,8 @@ impl Capture {
                 kind: NetworkKind::Http,
             }),
         };
-        store(&mut guard, record);
+        let id = store(&mut guard, record);
+        guard.absences_said.push((server, id));
     }
 
     /// Retains one sanitized failure only in the originating live session. Callers supply local
@@ -321,15 +323,22 @@ impl Capture {
     }
 }
 
-/// Adds a record to a locked history: numbered, the oldest let go past [`MAX_RECORDS`].
-fn store(state: &mut State, mut record: Record) {
+/// Adds a record to a locked history: numbered, the oldest let go past [`MAX_RECORDS`]. An
+/// absence note let go frees its server to be said again. Returns the record's id.
+fn store(state: &mut State, mut record: Record) -> u64 {
     state.next_id = state.next_id.saturating_add(1);
     state.generation = state.generation.wrapping_add(1);
     record.id = state.next_id;
-    if state.records.len() >= MAX_RECORDS {
-        state.records.pop_front();
+    if state.records.len() >= MAX_RECORDS
+        && let Some(gone) = state.records.pop_front()
+    {
+        state.absences_said.retain(|(_, id)| *id != gone.id);
+        if state.absences_overflow_said == Some(gone.id) {
+            state.absences_overflow_said = None;
+        }
     }
     state.records.push_back(record);
+    state.next_id
 }
 
 /// An address (without its query) with the value of each `name=value` in its path that names a
@@ -485,9 +494,12 @@ fn credential_shaped(word: &str) -> bool {
 }
 
 /// Whether a word after a scheme word (`Basic`) looks like its base64 credential: shaped like a
-/// credential, or a capital past its first letter ("dXNlcjpwYXNz"), so "Basic settings" keeps.
+/// credential, or 8 characters or more with a capital past its first letter ("dXNlcjpwYXNz"), so
+/// "Basic settings" and "Basic API configuration" keep. A shorter one with neither digit nor
+/// padding (`YTpi`, "a:b") reads as a word and keeps too.
 fn base64_shaped(word: &str) -> bool {
-    credential_shaped(word) || word.chars().skip(1).any(char::is_uppercase)
+    let word = word.trim_end_matches(['.', ',', '!', '?', ';', ':', ')']);
+    credential_shaped(word) || (word.chars().count() >= 8 && word.chars().skip(1).any(char::is_uppercase))
 }
 
 /// Sanitizes before bounding. Oversized input is omitted *whole*, so a secret can never be
@@ -845,6 +857,8 @@ mod tests {
             "Exported to alice@example.org: 3 rows",
             "Loaded a@2x.png and parcels@2020",
             "Basic settings were saved",
+            "Basic API configuration failed",
+            "Basic Settings were saved",
             "Column 'key' is missing",
             "Layer 'Body Mass' failed",
             "The 'password' field is required.",
@@ -995,6 +1009,39 @@ mod tests {
             capture.absence_said(&format!("https://tiles{i}.example.org/0/0/0.png"), 404);
         }
         assert_eq!(history.records().len(), MAX_ABSENT_SERVERS + 1);
+    }
+
+    #[test]
+    fn absences_are_said_again_once_their_note_leaves_the_history() {
+        let history = History::default();
+        let capture = history.capture();
+        let notes = |url: &str| history.records().iter().filter(|r| r.network.as_ref().is_some_and(|n| n.url == url)).count();
+        let url = "https://tiles.example.org/0/0/0.png";
+        capture.absence_said(url, 404);
+        capture.absence_said(url, 404);
+        assert_eq!(notes(url), 1, "said once while its note is in the history");
+        for i in 0..MAX_RECORDS {
+            history.push(Severity::Info, "Application", &format!("filler {i}"), "");
+        }
+        assert_eq!(notes(url), 0);
+        capture.absence_said(url, 404);
+        assert_eq!(notes(url), 1, "said again once its note was let go");
+        // So is the note that further servers go unlisted.
+        let unlisted =
+            |history: &History| history.records().iter().filter(|r| r.message.contains("further servers are not listed")).count();
+        for i in 0..MAX_ABSENT_SERVERS + 1 {
+            capture.absence_said(&format!("https://tiles{i}.example.org/0/0/0.png"), 404);
+        }
+        assert_eq!(unlisted(&history), 1);
+        for i in 0..MAX_RECORDS {
+            history.push(Severity::Info, "Application", &format!("filler {i}"), "");
+        }
+        capture.absence_said("https://another.example.org/0/0/0.png", 404);
+        assert_eq!(history.records().iter().filter(|r| r.network.is_some()).count(), 1, "a freed server is listed");
+        for i in 0..MAX_ABSENT_SERVERS {
+            capture.absence_said(&format!("https://more{i}.example.org/0/0/0.png"), 404);
+        }
+        assert_eq!(unlisted(&history), 1, "the unlisted note is said again");
     }
 
     #[test]

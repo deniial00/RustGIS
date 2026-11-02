@@ -137,8 +137,9 @@ older entries are discarded. Each message is limited to 2 KiB and technical deta
 Nothing is saved in `.rgis` projects or sent automatically. Credentials are removed before
 retention: addresses omit user information, query strings and fragments; credential fields
 and structured payloads are omitted conservatively, which can also remove surrounding context.
+A credential field in the middle of a line is removed when its value is one word or quoted, but
+a value of several words reads as prose and is kept (`… password: correct horse battery`).
 Review copied diagnostics for private layer names or file paths before sharing them.
-
 
 ## The ribbon
 

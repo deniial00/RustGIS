@@ -183,12 +183,14 @@ pub fn get(url: &str, want: Want) -> State {
     request(url, want, &[])
 }
 
-/// Like [`get`], for a map tile: a server's 404 for it is routine (the map asks past an area's
-/// edges), so it makes no network record of its own; each would flood the history and evict
-/// real failures. A picture that isn't a tile (a single-image layer, a layout's picture, a
-/// style's sprite sheet) goes through [`get`], so its 404 is recorded.
+/// Like [`get`], for a map tile: a server's 404 (no tile there) or 410 (no longer there) for it
+/// is routine (the map asks past an area's edges, and the map draws both as a gap: see
+/// [`crate::warp::missing`]), so it isn't recorded as a failure; each would flood the history
+/// and evict real failures. The omission is noted once per server instead. A picture that isn't
+/// a tile (a single-image layer, a layout's picture, a style's sprite sheet) goes through
+/// [`get`], so its 404 is recorded.
 pub fn get_tile(url: &str, want: Want) -> State {
-    request(url, want, &[404])
+    request(url, want, &[404, 410])
 }
 
 /// [`get`] with the statuses that are expected answers for this fetch.
@@ -684,12 +686,12 @@ impl<'a> RequestDiagnostics<'a> {
             _ => String::new(),
         };
         // Explicitly exclude Answer::excerpt: an arbitrary server response is not diagnostics.
+        // Each header is redacted on its own line: a credential header (`www-authenticate`) ends
+        // redaction of the text it is in, which would drop the headers after it.
         if let Some(answer) = &failure.answer {
             for (name, value) in &answer.headers {
                 if crate::failure::KEPT_HEADERS.contains(&name.as_str()) {
-                    details.push_str(name);
-                    details.push_str(": ");
-                    details.push_str(value);
+                    details.push_str(&rustgis_data::diagnostics::redact(&format!("{name}: {value}")));
                     details.push('\n');
                 }
             }
@@ -1867,6 +1869,28 @@ mod tests {
         assert!(network_records(&history, &url).is_empty());
     }
 
+    /// A credential header in a refusal is taken out by itself: the headers after it (which
+    /// say who refused) are kept.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn network_diagnostics_keep_headers_after_a_credential_header() {
+        let history = rustgis_data::diagnostics::History::default();
+        let _scope = history.enter();
+        let base = serve(vec![
+            "HTTP/1.1 403 Forbidden\r\nWWW-Authenticate: Basic realm=\"private-realm\"\r\nRetry-After: 30\r\ncf-ray: 8a1-BOG\r\nX-Amzn-RequestId: amzn-1155\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .into(),
+        ]);
+        let url = format!("{base}/refused");
+        native::head_with(&native::agent(), &url).unwrap_err();
+        let records = network_records(&history, &url);
+        assert_eq!(records.len(), 1);
+        let details = &records[0].details;
+        for kept in ["retry-after: 30", "cf-ray: 8a1-BOG", "x-amzn-requestid: amzn-1155"] {
+            assert!(details.contains(kept), "{kept} in {details:?}");
+        }
+        assert!(!details.contains("private-realm"), "{details:?}");
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn network_diagnostics_skip_routine_tile_404s_and_keep_other_statuses() {
@@ -2468,8 +2492,8 @@ mod tests {
         let _ = get("test://omit/style.json", Want::Json);
         let omits = std::mem::take(&mut *OMITS.lock().unwrap());
         let omit = |name: &str| omits.iter().find(|(u, _)| u.ends_with(name)).map(|(_, o)| *o);
-        assert_eq!(omit("tile.png"), Some(&[404][..]));
-        assert_eq!(omit("tile.pbf"), Some(&[404][..]));
+        assert_eq!(omit("tile.png"), Some(&[404, 410][..]));
+        assert_eq!(omit("tile.pbf"), Some(&[404, 410][..]));
         assert_eq!(omit("picture.png"), Some(&[][..]));
         assert_eq!(omit("style.json"), Some(&[][..]));
     }

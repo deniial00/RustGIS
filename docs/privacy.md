@@ -13,11 +13,13 @@ diagnostics** explicitly copies the filtered entries; **Clear** removes the hist
 
 Credentials are removed before diagnostic text is retained. URL user information, all query
 strings (including signed URLs), fragments, credential fields, and structured payloads are
-omitted conservatively. Request and response bodies are not captured by network diagnostics.
+omitted conservatively. A credential field in the middle of a line is removed when its value is
+one word or quoted (`… password: hunter2`), but a value of several words reads as prose and is
+kept (`… password: correct horse battery` keeps all three), so check such text before sharing.
+Request and response bodies are not captured by network diagnostics.
 Background requests carry their originating session's weak capture token; failures are not
 broadcast to other embedded or Python sessions. Layer names, file paths and URL paths can
 still identify private data, so review copied diagnostics before sharing them.
-
 
 ## Online services
 
