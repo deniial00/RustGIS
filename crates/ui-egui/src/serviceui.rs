@@ -451,4 +451,37 @@ mod tests {
         assert_eq!(pages.next_url(), "https://maps.example.org/items?page=3");
         assert_eq!(next_request(&mut app, Some(&connection), &pages).as_deref(), Ok("https://maps.example.org/items?page=3"));
     }
+
+    /// Two saved connections at one origin: a group imported through one of them refreshes
+    /// through it, even after a login to the other made that one the origin's choice (the plan's
+    /// address comes bound to the connection its layers record).
+    #[test]
+    fn a_refresh_reads_through_the_connection_its_layers_record() {
+        let mut app = RustGisApp::with_sample();
+        let url = "https://127.0.0.1:9/collections";
+        let new = |app: &mut RustGisApp, name: &str, key: &str| {
+            let definition = json!({"kind":"ogcapi", "name":name, "address":url, "auth":"header", "keyName":"X-Key"});
+            let id = app.run("connection.new", definition).unwrap()["id"].as_str().unwrap().to_string();
+            app.run("connection.login", json!({"id": id, "apiKey": key})).unwrap();
+            id
+        };
+        let a = new(&mut app, "A", "refresh-a-757");
+        let items = format!("{url}/roads/items");
+        let document = json!({"collections":[{"id":"roads", "title":"roads",
+            "links":[{"rel":"items", "type":"application/geo+json", "href": items}]}]});
+        let features = json!({"type":"FeatureCollection", "features":[{"type":"Feature",
+            "geometry":{"type":"Point", "coordinates":[1, 2]}, "properties":{}}]});
+        let mut p = json!({"url": url, "type":"ogcapi", "connection": a, "text": document.to_string()});
+        let plan = app.session.run("service.layers", &p).unwrap();
+        let offers = plan["layers"].as_array().unwrap().iter();
+        p["responses"] = json!(offers.map(|l| json!({"url": l["offer"]["url"], "text": features.to_string()})).collect::<Vec<_>>());
+        let imported = app.session.run("service.import", &p).unwrap();
+        // Logging in to B makes it the origin's choice; the group's layers still record A.
+        new(&mut app, "B", "refresh-b-757");
+        start(&mut app, &json!({"group": imported["group"]}), true).unwrap();
+        let task = app.ui.service_import.as_ref().unwrap();
+        let capabilities = task.document.as_deref().unwrap();
+        let header = rustgis_engine::render::rustgis_tiles::logins::apply(capabilities).unwrap().and_then(|login| login.header);
+        assert_eq!(header.map(|(_, key)| key).as_deref(), Some("refresh-a-757"));
+    }
 }

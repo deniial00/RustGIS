@@ -584,4 +584,16 @@ fn geoprocessing_history_never_keeps_a_login_binding() {
     let text = record.messages.join("\n");
     assert!(text.contains("https://gp757.example.org/wfs/roads.pmtiles"), "the message quotes the address: {text}");
     assert!(!text.contains(rustgis_data::login_address::PREFIX) && !text.contains("gp-sentinel-757"), "{text}");
+    // The record's params keep the bound output to run again; what is written keeps none.
+    assert!(record.params["output"].as_str().is_some_and(|o| o.starts_with(rustgis_data::login_address::PREFIX)));
+    let (saved, _) = s.project.clone().saved_text(None).unwrap();
+    assert!(!saved.contains(rustgis_data::login_address::PREFIX), "the saved project keeps a binding: {saved}");
+    let package = std::env::temp_dir().join(format!("gp757-{}.rgispkg", std::process::id()));
+    s.run("project.package", &json!({"path": package.to_string_lossy()})).unwrap();
+    let bytes = std::fs::read(&package).unwrap();
+    let _ = std::fs::remove_file(&package);
+    for (name, entry) in rustgis_data::zip::read(&bytes).unwrap() {
+        let entry = String::from_utf8_lossy(&entry);
+        assert!(!entry.contains(rustgis_data::login_address::PREFIX), "{name} keeps a binding: {entry}");
+    }
 }

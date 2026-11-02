@@ -574,7 +574,7 @@ impl Project {
 
     /// The strings of recorded command parameters (geoprocessing history, tasks and models). They
     /// are not layer addresses, and only login bindings are taken from them when saving or opening.
-    fn recorded_mut(&mut self) -> Vec<&mut String> {
+    pub(crate) fn recorded_mut(&mut self) -> Vec<&mut String> {
         let mut addresses = Vec::new();
         for record in &mut self.gp_history {
             recorded_addresses(&mut record.params, &mut addresses);

@@ -736,6 +736,8 @@ fn drop_listing(st: &mut State) {
         st.waiting = None;
     }
     st.walk = None;
+    // Previews are read through the last API's login: another one shows its own, read afresh.
+    st.thumbs.clear();
     // The last listing's status ("Showing 10 items") isn't the new API's; an asset being signed
     // or a link being opened keeps its own.
     if st.waiting.is_none() {
@@ -1226,6 +1228,7 @@ mod tests {
         let old = "https://old-walk757.example.org/catalog.json";
         app.ui.stac.api = old.into();
         app.ui.stac.walk = Some((Walk::new(old, catalog::Filter::default(), 10), Vec::new()));
+        app.ui.stac.thumbs.insert("https://new-walk757.example.org/preview.png".into(), Thumb::Failed);
         let source = rustgis_engine::sources::Source {
             kind: "stac".into(),
             name: "New API".into(),
@@ -1235,6 +1238,7 @@ mod tests {
         crate::sourcespane::open(&mut app, &source).unwrap();
         assert!(app.ui.stac.walk.is_none(), "the old catalog's documents must not land in the new listing");
         assert_eq!(app.ui.stac.api, "https://new-walk757.example.org/stac");
+        assert!(app.ui.stac.thumbs.is_empty(), "a preview read through the last API's login isn't shown for the next");
     }
 
     #[test]

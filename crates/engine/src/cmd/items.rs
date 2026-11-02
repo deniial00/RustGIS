@@ -559,6 +559,8 @@ fn package_project(s: &Session) -> Result<Vec<u8>, String> {
         *m = embedded_map(m, &mut budget);
     }
     crate::project::strip_addresses(p.addresses_mut());
+    // Recorded parameters (history, tasks, models) lose only their login bindings, as when saving.
+    crate::project::clear_login_bindings(p.recorded_mut());
     let text = serde_json::to_string(&p).map_err(|e| e.to_string())?;
     let readme =
         format!("{} — a RustGIS project package.\nOpen it with RustGIS (Project › Open), or unzip it for {}.rgis.\n", p.name, p.name);
