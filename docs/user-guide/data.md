@@ -764,9 +764,12 @@ renaming the connection or changing its path at the same origin does not. **Log 
 (`connection.logout`) removes the session login. Log in again when a new session needs it.
 
 A login is sent only to the connection's origin: the same scheme, host and port, for its
-capabilities, listings, tiles, feature pages and refreshes. A redirect to another origin is
-followed without it (the browser doesn't follow it), and never gets another connection's login
-either. A plain `http://` address sends the login unencrypted, so the form asks for confirmation
+capabilities, listings, tiles, feature pages and refreshes. On the desktop a redirect within that
+origin keeps the login, and a redirect to another origin is followed without it, never getting
+another connection's login either. In the web app a request carrying a login isn't redirected at
+all, since the browser can't take the login off on the way: a service that redirects (to
+`https://` or to another path) fails there, so save the connection with the address it ends at.
+A plain `http://` address sends the login unencrypted, so the form asks for confirmation
 and the command needs `"allowInsecure": true`. Error messages, notices, the preferences,
 projects, History and what the [AI Assistant](assistant.md) sees never hold the password or key.
 
