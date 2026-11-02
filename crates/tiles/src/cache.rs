@@ -190,8 +190,11 @@ pub fn get(url: &str, want: Want) -> State {
 /// a tile (a single-image layer, a layout's picture, a style's sprite sheet) goes through
 /// [`get`], so its 404 is recorded.
 pub fn get_tile(url: &str, want: Want) -> State {
-    request(url, want, &[404, 410])
+    request(url, want, TILE_OMIT)
 }
+
+/// The statuses a map tile's request omits ([`get_tile`]).
+const TILE_OMIT: &[u16] = &[404, 410];
 
 /// [`get`] with the statuses that are expected answers for this fetch.
 fn request(url: &str, want: Want, omit: &'static [u16]) -> State {
@@ -1870,6 +1873,27 @@ mod tests {
         let url = format!("{base}/successful.json");
         assert_eq!(native::get(&native::agent(), &url, &[]).unwrap(), b"{}");
         assert!(network_records(&history, &url).is_empty());
+    }
+
+    /// A map tile a server no longer has (410) is routine, as a missing one (404) is: noted once
+    /// for the server, not recorded as a failure. A server error is still recorded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn network_diagnostics_skip_gone_map_tiles_and_keep_server_errors() {
+        let history = rustgis_data::diagnostics::History::default();
+        let _scope = history.enter();
+        let answer = |status: &str| format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let base = serve(vec![answer("410 Gone"), answer("500 Error")]);
+        let gone = format!("{base}/tiles/0/0/0.png");
+        assert_eq!(native::get(&native::agent(), &gone, TILE_OMIT).unwrap_err(), "http status: 410");
+        let notes = network_records(&history, &gone);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].severity, rustgis_data::diagnostics::Severity::Warning, "a note, not a failure");
+        let failed = format!("{base}/tiles/1/1/1.png");
+        assert_eq!(native::get(&native::agent(), &failed, TILE_OMIT).unwrap_err(), "http status: 500");
+        let records = network_records(&history, &failed);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].severity, rustgis_data::diagnostics::Severity::Error);
     }
 
     /// A credential header in a refusal is taken out by itself: the headers after it (which

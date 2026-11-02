@@ -207,17 +207,17 @@ impl History {
         });
     }
 
-    /// [`History::push`] for text already through [`redact`] (a notice the session redacted for
-    /// its status bar): it is only bounded, so a notice isn't redacted again for each copy. Text
-    /// that might hold a credential goes to `push`.
-    pub fn push_redacted(&self, severity: Severity, source: &str, message: &str, details: &str) {
+    /// [`History::push`] for a message already through [`redact`] (a notice the session redacted
+    /// for its status bar): it is only bounded, so a notice isn't redacted again for each copy.
+    /// Only a [`Redacted`], which `redact` alone makes, gets this path.
+    pub fn push_redacted(&self, severity: Severity, source: &str, message: &Redacted) {
         self.retain(Record {
             id: 0,
             timestamp_ms: timestamp_ms(),
             severity,
-            source: truncated(source, MAX_SOURCE_BYTES),
-            message: truncated(message, MAX_MESSAGE_BYTES),
-            details: truncated(details, MAX_DETAILS_BYTES),
+            source: bounded(source, MAX_SOURCE_BYTES),
+            message: truncated(message.as_str(), MAX_MESSAGE_BYTES),
+            details: String::new(),
             network: None,
         });
     }
@@ -421,6 +421,25 @@ fn path_secrets_redacted(address: &str) -> String {
     out
 }
 
+/// Text that has been through [`redact`]. Only [`Redacted::new`] makes one, so a path that takes
+/// a `Redacted` (the history's bound-only [`History::push_redacted`]) can't be handed raw text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Redacted(String);
+
+impl Redacted {
+    pub fn new(text: &str) -> Self {
+        Self(redact(text))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 /// Redacts, then bounds: a record's copy of a message or of details.
 fn bounded(text: &str, limit: usize) -> String {
     let mut clean = redact(text);
@@ -605,7 +624,9 @@ fn base64_shaped(word: &str) -> bool {
 /// retained because its identifying key lay beyond a clipped prefix. URL queries/fragments
 /// are all omitted, including unknown/encoded signing schemes. JSON/XML bodies are not logged.
 /// A credential field discards the remaining text: quoted, multiline and malformed values need
-/// not be parsed correctly to remain private. Diagnostics intentionally prefer less context.
+/// not be parsed correctly to remain private. Diagnostics intentionally prefer less context. What
+/// counts as a field is narrower in the middle of a line: `name: several words` there reads as
+/// prose and is kept (see `docs/privacy.md`).
 pub fn redact(text: &str) -> String {
     if text.len() > MAX_INPUT_BYTES {
         return "[oversized diagnostic omitted]".to_string();
@@ -1219,12 +1240,13 @@ mod tests {
     fn text_already_redacted_is_only_bounded() {
         let history = History::default();
         let long = "word ".repeat(1000);
-        history.push_redacted(Severity::Info, "Application", &long, &long);
-        history.push(Severity::Info, "Application", &long, &long);
+        history.push_redacted(Severity::Info, "Application", &Redacted::new(&long));
+        history.push(Severity::Info, "Application", &long, "");
         let records = history.records();
         assert_eq!(records[0].message, records[1].message);
-        assert_eq!(records[0].details, records[1].details);
         assert!(records[0].message.len() <= MAX_MESSAGE_BYTES && records[0].message.ends_with('…'));
+        // What the type holds has been through `redact`, whatever went in.
+        assert_eq!(Redacted::new("Authorization: Bearer hidden").as_str(), "[REDACTED]");
     }
 
     #[test]

@@ -1776,8 +1776,8 @@ impl RustGisApp {
         if let Err(e) = &r {
             log::info!("{id}: {e}");
             // UI-only failures can return before an engine command emits a notice.
-            let text = rustgis_engine::data::diagnostics::redact(e);
-            if !self.session.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text) {
+            let text = rustgis_engine::data::diagnostics::Redacted::new(e);
+            if !self.session.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text.as_str()) {
                 self.session.notify_redacted(text, true);
             }
         }
