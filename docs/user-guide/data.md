@@ -759,7 +759,7 @@ header** (the header's name, such as `X-API-Key`, and the key). The connection k
 the user name and the header name, never the password or key.
 The password or key goes to `connection.login {"id":"c1","password":"…"}` (basic) or
 `{"id":"c1","apiKey":"…"}` and lasts only for this session. Web-service logins never access the
-computer's credential store. Editing the origin, method, user or header name ends the login;
+computer's credential store. Editing the origin, kind, method, user or header name ends the login;
 renaming the connection or changing its path at the same origin does not. **Log Out**
 (`connection.logout`) removes the session login. Log in again when a new session needs it.
 
@@ -778,6 +778,9 @@ choice or the only saved connection for their origin. Different connections and 
 different logins at the same origin without sharing credentials or authenticated cached responses.
 When several saved connections match the address, RustGIS asks which one to use (**Choose
 Connection…**, `connection.login {id}` for the one chosen) and never picks one itself.
+When an origin has exactly one saved connection and it has a login method, an address at that
+origin is read through that connection, so it needs that login: log in, or save a public
+connection for the address too.
 A layer that has no login yet asks for one, and a layer whose recorded connection isn't on this computer offers
 to make one for its address. `connection.list` reports these as `loginRequests` with the `origin`.
 CLI and Python use the same session-only `connection.login` commands. ArcGIS sign-in and tokens
