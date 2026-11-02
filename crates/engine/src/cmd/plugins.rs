@@ -283,6 +283,7 @@ const NEVER: &[&str] = &[
     "connection.login",
     "connection.forgetPassword",
     "connection.forgetSavedKeys",
+    "connection.logout",
     "connection.resolveS3",
     "connection.test",
     "connection.browse",
@@ -396,10 +397,17 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
 }
 
 /// Why a plugin may not run `id` with `params`, if it may not.
-fn refused(plugin: &Plugin, spec: &C, params: &Value) -> Option<String> {
+fn refused(s: &Session, plugin: &Plugin, spec: &C, params: &Value) -> Option<String> {
     let m = &plugin.manifest;
     if user_only(spec.id) {
         return Some(format!("plugins can't run '{}'", spec.id));
+    }
+    // A saved web-service connection's login goes where the user chose it: a plugin never picks
+    // which login a request carries, as it never logs in or out.
+    if let Some(id) = params.get("connection").and_then(Value::as_str).map(str::trim)
+        && s.connections.connections.iter().any(|c| c.id == id && crate::service_logins::is_service(c))
+    {
+        return Some(format!("plugins can't use a saved web-service connection's login ('{}')", spec.id));
     }
     // An SQL query reads files and web addresses alike, and a database is a file or a server.
     let database = DATABASES.contains(&spec.id) || (spec.id == "cube.open" && super::cube_catalog::opens_zarr(params));
@@ -517,7 +525,7 @@ impl Bridge<'_> {
             return Err("plugins can't run other plugins' commands".into());
         }
         let spec = self.s.registry.get(id).ok_or_else(|| format!("unknown command '{id}'"))?;
-        if let Some(why) = refused(&self.plugin, spec, params) {
+        if let Some(why) = refused(self.s, &self.plugin, spec, params) {
             return Err(why);
         }
         let (enabled, run, label, mutates) = (spec.enabled, spec.run, spec.label, spec.mutates);
@@ -544,8 +552,11 @@ impl Bridge<'_> {
         // command that only left a request for the front end ([`Session::request_url`]) changed
         // nothing; a later one must not erase the undo step for an earlier edit.
         self.s.request_only = false;
+        // No saved web-service login goes with what a plugin asks for: the user chooses where it is sent.
+        let anonymous = self.s.web_logins.set_anonymous(true);
         let mut res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self.s, params)))
             .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly")));
+        self.s.web_logins.set_anonymous(anonymous);
         let requested = std::mem::take(&mut self.s.request_only);
         self.requested |= requested;
         self.changed |= mutates && !requested;

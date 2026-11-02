@@ -63,6 +63,9 @@ pub const MAX_BYTES: u64 = 512 << 20;
 /// through a saved S3 connection by the address it wraps, the wrapper rebuilt around it (its
 /// binding and endpoint are provenance, not secrets); a COG's look after either is kept.
 fn saved_address(address: &str) -> Option<String> {
+    if let Some(public) = without_login_binding(address) {
+        return Some(saved_address(&public).unwrap_or(public));
+    }
     use rustgis_data::s3_address;
     if let Some((head, archive)) = crate::sources::template_archive(address) {
         let (file, look) = split_look(archive);
@@ -101,6 +104,60 @@ fn split_look(address: &str) -> (&str, &str) {
 /// Packaging calls this without registering the resulting text as a file this process wrote.
 pub(crate) fn strip_addresses(addresses: Vec<&mut String>) -> Vec<Option<String>> {
     addresses.into_iter().map(|a| saved_address(a).map(|redacted| std::mem::replace(a, redacted))).collect()
+}
+
+/// Runtime capabilities never survive a project boundary, including an in-process save restore.
+/// `None` for an address that holds none, and for a wrapper that doesn't parse (kept as it is,
+/// never emptied: its layer then fails to read, saying why).
+fn without_login_binding(address: &str) -> Option<String> {
+    if rustgis_data::login_address::is_wrapper(address) {
+        return rustgis_data::login_address::parse(address).ok().flatten().map(|b| b.url.to_string());
+    }
+    if let Some((head, archive)) = crate::sources::template_archive(address) {
+        return without_login_binding(archive).map(|public| format!("{head}{public}"));
+    }
+    if let Ok(Some(bound)) = rustgis_data::s3_address::parse(address) {
+        return without_login_binding(bound.url)
+            .and_then(|public| rustgis_data::s3_address::bind(bound.binding, bound.endpoint, &public).ok());
+    }
+    None
+}
+
+/// Whether stripping `original` from a saved file lost a secret the user must give again: not
+/// when all it held was a login binding (the layer records its connection, and asks for its login
+/// when it opens), unless the address under the binding held one too.
+fn lost_secret(original: &str) -> bool {
+    without_login_binding(original).is_none_or(|public| saved_address(&public).is_some())
+}
+
+pub(crate) fn clear_login_bindings<'a>(addresses: impl IntoIterator<Item = &'a mut String>) {
+    for address in addresses {
+        if let Some(public) = without_login_binding(address) {
+            *address = public;
+        }
+    }
+}
+
+/// Clears login bindings, keeping the originals in the visitor's order for the caller to restore.
+fn take_login_bindings(addresses: Vec<&mut String>) -> Vec<Option<String>> {
+    addresses.into_iter().map(|a| without_login_binding(a).map(|public| std::mem::replace(a, public))).collect()
+}
+
+pub(crate) fn recorded_addresses<'a>(value: &'a mut serde_json::Value, addresses: &mut Vec<&'a mut String>) {
+    match value {
+        serde_json::Value::String(text) => addresses.push(text),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                recorded_addresses(value, addresses);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                recorded_addresses(value, addresses);
+            }
+        }
+        _ => {}
+    }
 }
 
 struct Written {
@@ -515,6 +572,47 @@ impl Project {
         addresses
     }
 
+    /// The strings of recorded command parameters (geoprocessing history, tasks and models). They
+    /// are not layer addresses, and only login bindings are taken from them when saving or opening.
+    fn recorded_mut(&mut self) -> Vec<&mut String> {
+        let mut addresses = Vec::new();
+        for record in &mut self.gp_history {
+            recorded_addresses(&mut record.params, &mut addresses);
+            if let Some((_, params)) = &mut record.command {
+                recorded_addresses(params, &mut addresses);
+            }
+        }
+        for task in &mut self.tasks {
+            for step in &mut task.steps {
+                recorded_addresses(&mut step.params, &mut addresses);
+            }
+        }
+        for model in &mut self.models {
+            for step in &mut model.steps {
+                recorded_addresses(&mut step.params, &mut addresses);
+            }
+            if let Some(graph) = &mut model.graph {
+                for node in &mut graph.nodes {
+                    recorded_addresses(&mut node.params, &mut addresses);
+                }
+            }
+        }
+        addresses
+    }
+
+    /// How many layers and tile layers read through a login binding but record no connection:
+    /// nothing would tell the opened project which login they need.
+    fn unrecorded_bound(&mut self) -> usize {
+        let mut n = 0;
+        for map in self.maps.iter_mut().chain(self.offline_areas.iter_mut().map(|area| &mut area.data)) {
+            n += map.tiles.iter().filter(|t| t.connection.is_empty() && without_login_binding(&t.url).is_some()).count();
+            for layer in map.layers.iter_mut().filter(|l| l.connection.is_empty()) {
+                n += usize::from(layer.addresses_mut().any(|a| without_login_binding(a).is_some()));
+            }
+        }
+        n
+    }
+
     /// The standalone table of an id.
     pub fn table(&self, id: u32) -> Option<&Table> {
         self.tables.iter().find(|t| t.id == id)
@@ -768,8 +866,10 @@ impl Project {
     /// or RustGIS closes. Packages and imports never restore them.
     pub fn saved_text(&mut self, dir: Option<&Path>) -> Result<(String, usize), String> {
         self.ensure_imports_complete()?;
+        let unrecorded = self.unrecorded_bound();
         let was = strip_addresses(self.addresses_mut());
-        let n = was.iter().flatten().count();
+        let recorded_was = take_login_bindings(self.recorded_mut());
+        let n = was.iter().flatten().filter(|original| lost_secret(original)).count() + unrecorded;
         let originals: Vec<Option<String>> = if let Some(d) = dir.and_then(Path::to_str) {
             self.file_paths_mut()
                 .into_iter()
@@ -796,6 +896,11 @@ impl Project {
         }
         // Serialization can fail: put the live addresses back before handling its result.
         for (address, original) in self.addresses_mut().into_iter().zip(&was) {
+            if let Some(original) = original {
+                *address = original.clone();
+            }
+        }
+        for (address, original) in self.recorded_mut().into_iter().zip(&recorded_was) {
             if let Some(original) = original {
                 *address = original.clone();
             }
@@ -838,6 +943,7 @@ impl Project {
             map.tiles.retain(|tile| !tile.id.starts_with("geolibre-pending:"));
         }
         strip_addresses(self.addresses_mut());
+        clear_login_bindings(self.recorded_mut());
         let text = serde_json::to_string(&self).map_err(|e| e.to_string())?;
         if text.len() as u64 > MAX_BYTES {
             return Err("the project is too large to keep a recovery copy".into());
@@ -853,7 +959,7 @@ impl Project {
             if let Some(full) = original
                 && saved_address(full).as_deref() == Some(address.as_str())
             {
-                *address = full.clone();
+                *address = without_login_binding(full).unwrap_or_else(|| full.clone());
             }
         }
     }
@@ -903,6 +1009,8 @@ impl Project {
         // A binding is this computer's runtime token for a login: one in a file is no authority
         // to use any login here.
         crate::s3_connections::clear_bindings(p.addresses_mut());
+        clear_login_bindings(p.addresses_mut());
+        clear_login_bindings(p.recorded_mut());
         if let Some(d) = dir.and_then(Path::to_str) {
             p.resolve_paths(d);
         }
@@ -947,5 +1055,116 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a mut String>) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod login_binding_tests {
+    use super::*;
+
+    #[test]
+    fn saves_and_imports_strip_runtime_capabilities_including_recorded_urls() {
+        let url = rustgis_data::login_address::bind(
+            "0123456789abcdef",
+            "https://project757.example.org",
+            "https://project757.example.org/tiles/{z}/{x}/{y}.png",
+        )
+        .unwrap();
+        let mut project = Project::default();
+        project.map_mut().tiles.push(rustgis_map::TileLayer::new("Bound", rustgis_map::tiles::TileKind::Raster, &url));
+        project.tasks.push(Task {
+            name: "Recorded".into(),
+            description: String::new(),
+            steps: vec![TaskStep {
+                title: "Add".into(),
+                instructions: String::new(),
+                command: "map.addTiles".into(),
+                params: serde_json::json!({"url": url, "connection": "saved-id"}),
+            }],
+        });
+        let forged = serde_json::to_string(&project).unwrap();
+        let (saved, _) = project.saved_text(None).unwrap();
+        assert!(!saved.contains(rustgis_data::login_address::PREFIX));
+        assert_eq!(project.map().tiles[0].url, url);
+        for text in [&saved, &forged] {
+            let opened = Project::from_json(text).unwrap();
+            assert_eq!(opened.map().tiles[0].url, rustgis_data::login_address::inner(&url));
+            assert_eq!(opened.tasks[0].steps[0].params["url"], rustgis_data::login_address::inner(&url));
+            assert_eq!(opened.tasks[0].steps[0].params["connection"], "saved-id");
+        }
+        let recovery = project.recovery_text().unwrap();
+        assert!(!recovery.contains(rustgis_data::login_address::PREFIX));
+    }
+
+    fn bound(url: &str) -> String {
+        rustgis_data::login_address::bind("0123456789abcdef", "https://project757.example.org", url).unwrap()
+    }
+
+    fn tiles(name: &str, url: &str, connection: &str) -> rustgis_map::TileLayer {
+        let mut t = rustgis_map::TileLayer::new(name, rustgis_map::tiles::TileKind::Raster, url);
+        t.connection = connection.into();
+        t
+    }
+
+    #[test]
+    fn recorded_parameters_are_not_layer_addresses() {
+        let mut project = Project::default();
+        let note = "https://user@project757.example.org/data.csv#part";
+        project.tasks.push(Task {
+            name: "Recorded".into(),
+            description: String::new(),
+            steps: vec![TaskStep {
+                title: "Add".into(),
+                instructions: String::new(),
+                command: "layer.addUrl".into(),
+                params: serde_json::json!({"url": note}),
+            }],
+        });
+        assert!(project.addresses_mut().is_empty());
+        let (saved, stripped) = project.saved_text(None).unwrap();
+        assert_eq!(stripped, 0);
+        assert_eq!(Project::from_json(&saved).unwrap().tasks[0].steps[0].params["url"], note);
+    }
+
+    #[test]
+    fn a_malformed_wrapper_is_never_emptied() {
+        let bad = "rustgis-login:nothex:5:https://project757.example.org/{z}/{x}/{y}.png";
+        let mut project = Project::default();
+        project.tasks.push(Task {
+            name: "Recorded".into(),
+            description: String::new(),
+            steps: vec![TaskStep {
+                title: "Add".into(),
+                instructions: String::new(),
+                command: "map.addTiles".into(),
+                params: serde_json::json!({"url": bad}),
+            }],
+        });
+        let (saved, _) = project.saved_text(None).unwrap();
+        let opened = Project::from_json(&saved).unwrap();
+        assert_eq!(opened.tasks[0].steps[0].params["url"], bad);
+        let mut address = bad.to_string();
+        clear_login_bindings([&mut address]);
+        assert_eq!(address, bad);
+    }
+
+    #[test]
+    fn only_lost_secrets_are_counted_when_saving() {
+        let plain = "https://project757.example.org/{z}/{x}/{y}.png";
+        let mut project = Project::default();
+        project.map_mut().tiles.push(tiles("Recorded", &bound(plain), "saved-id"));
+        assert_eq!(project.saved_text(None).unwrap().1, 0, "a layer that records its connection asks for the login again");
+
+        project.map_mut().tiles.push(tiles("Unrecorded", &bound(plain), ""));
+        assert_eq!(project.saved_text(None).unwrap().1, 1, "a bound layer with no connection can't ask for one");
+
+        project.map_mut().tiles.clear();
+        project.map_mut().tiles.push(tiles("Token", &format!("{plain}?token=abc123"), ""));
+        assert_eq!(project.saved_text(None).unwrap().1, 1, "a real token is still lost");
+
+        project.map_mut().tiles.clear();
+        project.map_mut().tiles.push(tiles("Both", &bound(&format!("{plain}?token=abc123")), "saved-id"));
+        assert_eq!(project.saved_text(None).unwrap().1, 1, "the token under a binding is lost too");
     }
 }
