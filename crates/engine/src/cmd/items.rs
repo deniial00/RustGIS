@@ -109,6 +109,7 @@ pub fn commands() -> Vec<C> {
             l.transparency = st.transparency;
             if relock {
                 s.map_mut().label_lock = None;
+                s.map_mut().label_lock_line_anchors.clear();
             }
             Ok(Value::Null)
         })
@@ -551,6 +552,7 @@ fn template(p: &Project) -> Project {
 }
 
 /// Packages only completed imports; runtime download reservations cannot be reopened.
+/// Refuses JSON beyond the project or ZIP inflation limit before creating the archive.
 fn package_project(s: &Session) -> Result<Vec<u8>, String> {
     s.project.ensure_imports_complete()?;
     let mut p = s.project.clone();
@@ -562,6 +564,10 @@ fn package_project(s: &Session) -> Result<Vec<u8>, String> {
     // Recorded parameters (history, tasks, models) lose only their login bindings, as when saving.
     crate::project::clear_login_bindings(p.recorded_mut());
     let text = serde_json::to_string(&p).map_err(|e| e.to_string())?;
+    let limit = crate::project::MAX_BYTES.min(rustgis_data::zip::MAX_TOTAL as u64);
+    if text.len() as u64 > limit {
+        return Err(format!("the project is too large to package (maximum {} MiB)", limit >> 20));
+    }
     let readme =
         format!("{} — a RustGIS project package.\nOpen it with RustGIS (Project › Open), or unzip it for {}.rgis.\n", p.name, p.name);
     rustgis_data::zip::write(&[
