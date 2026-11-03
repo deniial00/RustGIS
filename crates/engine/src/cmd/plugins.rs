@@ -351,7 +351,9 @@ pub fn user_only(id: &str) -> bool {
 }
 
 /// What running `spec` with `params` reaches beyond the project, if anything: by what the
-/// parameters name, what the command's parameters can name, and what it is.
+/// parameters name, what the command's parameters can name, and what it is. Without the session,
+/// it counts every `raster.mosaic` as reaching files; `refused` lets a plugin's mosaic of the
+/// project's layers through.
 pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     // External tools (the GeoLibre suite) run a native program that reads files a parameter
     // names, including bare file names.
@@ -396,7 +398,7 @@ pub fn reaches(spec: &C, params: &Value) -> Option<Reach> {
     files.then_some(Reach::Files)
 }
 
-/// Why a plugin may not run `id` with `params`, if it may not.
+/// Why a plugin may not run `id` with `params` on the session `s`, if it may not.
 fn refused(s: &Session, plugin: &Plugin, spec: &C, params: &Value) -> Option<String> {
     let m = &plugin.manifest;
     if user_only(spec.id) {
@@ -414,7 +416,11 @@ fn refused(s: &Session, plugin: &Plugin, spec: &C, params: &Value) -> Option<Str
     if database && !(m.has(Permission::Files) && m.has(Permission::Network)) {
         return Some(format!("{} needs the 'files' and 'network' permissions to run '{}'", m.name, spec.id));
     }
-    match reaches(spec, params) {
+    // A mosaic writes a file only when given a `path`, and reads one for an input that is a raster
+    // file name and isn't a raster layer with its cells in memory; a mosaic of the project's layers
+    // stays in it, as `raster.project` does.
+    let reach = reaches(spec, params).filter(|_| !(spec.id == "raster.mosaic" && super::imagery::mosaic_stays_in_project(s, params)));
+    match reach {
         Some(Reach::Files)
             if spec.id == "gp.run"
                 && !m.has(Permission::Files)
