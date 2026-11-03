@@ -1108,9 +1108,9 @@ impl Session {
             }
             // A refused command is said once, without secrets, as the front ends show it.
             if let Err(error) = &res {
-                let text = rustgis_data::diagnostics::redact(&render::rustgis_tiles::logins::scrub(error));
-                if !self.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text) {
-                    self.notify(text, true);
+                let text = Session::redacted(error);
+                if !self.notices_since(notice_mark).iter().any(|notice| notice.error && notice.text == text.as_str()) {
+                    self.notify_redacted(text, true);
                 }
             }
             res
@@ -1528,10 +1528,28 @@ impl Session {
         // first, as its login values are known only here, then redacted for the status bar and
         // the history alike. `redact` bounds the notice to 8 KiB (an ellipsis marks the cut) and
         // omits one over 16 KiB whole, so a clipped credential can't survive; the history's copy
-        // is bounded further, to a record's 2 KiB, in `push`.
-        let text = rustgis_data::diagnostics::redact(&render::rustgis_tiles::logins::scrub(&text));
-        self.diagnostics.push(severity, self.diagnostic_source.unwrap_or("Application"), &text, "");
-        self.notices.push(Notice { text, error: severity == rustgis_data::diagnostics::Severity::Error });
+        // is bounded further, to a record's 2 KiB.
+        self.notice_redacted(Self::redacted(&text), severity);
+    }
+
+    /// `text` scrubbed of every active web-service login (and any login capability), then
+    /// redacted: what a notice or history record may show. Login values are known only here, so
+    /// a failure redacted by [`Session::notify_redacted`]'s callers goes through this first.
+    pub fn redacted(text: &str) -> rustgis_data::diagnostics::Redacted {
+        rustgis_data::diagnostics::Redacted::new(&render::rustgis_tiles::logins::scrub(text))
+    }
+
+    /// [`Session::notify`] for text already scrubbed and redacted by [`Session::redacted`] (a
+    /// failure the caller redacted to compare it with the notices): the type says so, so it isn't
+    /// redacted again.
+    pub fn notify_redacted(&mut self, text: rustgis_data::diagnostics::Redacted, error: bool) {
+        use rustgis_data::diagnostics::Severity;
+        self.notice_redacted(text, if error { Severity::Error } else { Severity::Info });
+    }
+
+    fn notice_redacted(&mut self, text: rustgis_data::diagnostics::Redacted, severity: rustgis_data::diagnostics::Severity) {
+        self.diagnostics.push_redacted(severity, self.diagnostic_source.unwrap_or("Application"), &text);
+        self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error });
         self.notices_given += 1;
         if self.notices.len() > 200 {
             self.notices.remove(0);
