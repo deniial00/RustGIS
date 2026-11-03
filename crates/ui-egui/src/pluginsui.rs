@@ -379,7 +379,7 @@ fn finish_restore(app: &mut RustGisApp, s: Saved, got: Result<Vec<u8>, String>, 
 }
 
 /// Tells, in one notice, which plugins failed to load at start, once every start download is
-/// done. The Plugin Manager lists them with Retry and Remove.
+/// done. The Plugin Manager lists them, with Remove (and Retry for those it can download again).
 fn tell_unloaded(app: &mut RustGisApp) {
     if app.plugins.start_failures.is_empty() || app.plugins.jobs.iter().any(|j| matches!(j, Job::Restore { retry: false, .. })) {
         return;
@@ -398,13 +398,13 @@ fn tell_unloaded(app: &mut RustGisApp) {
     let text = match failed.as_slice() {
         [] => return,
         [(id, reason)] => crate::i18n::fmt(
-            "The plugin {id} wasn't loaded. Open Plugins › Plugin Manager to retry or remove it. {reason}",
+            "The plugin {id} wasn't loaded. Open Plugins › Plugin Manager to see it. {reason}",
             &[("id", id), ("reason", reason)],
         ),
         _ => {
             let ids: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
             crate::i18n::fmt(
-                "{n} plugins weren't loaded: {ids}. Open Plugins › Plugin Manager to retry or remove them.",
+                "{n} plugins weren't loaded: {ids}. Open Plugins › Plugin Manager to see them.",
                 &[("n", &failed.len().to_string()), ("ids", &ids.join(", "))],
             )
         }
