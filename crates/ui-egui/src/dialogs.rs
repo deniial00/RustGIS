@@ -878,6 +878,8 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     let mut back = false;
     let keepable = app.ui.service.as_ref().and_then(|conn| {
         let (url, kind) = app.ui.service_browse.back.first().map(|(u, k)| (u.as_str(), *k)).unwrap_or((&conn.url, conn.kind));
+        // The address as typed: one read through a login is matched and kept without its binding.
+        let url = rustgis_engine::data::login_address::inner(url);
         crate::connectionui::picked(&list, app.dialogs.connection.as_deref(), url).is_none().then(|| (url.to_string(), kind))
     });
     let mut keep_root = false;

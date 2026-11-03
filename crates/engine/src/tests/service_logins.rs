@@ -638,3 +638,18 @@ fn a_legend_that_cant_carry_the_login_is_refused_not_read_without_it() {
     assert!(error.contains("can't carry the connection's login"), "{error}");
     assert!(s.map().tiles[0].legends.is_empty(), "refused before anything changed");
 }
+
+#[test]
+fn service_requests_take_a_connection_without_saying_they_ignore_it() {
+    let url = "https://browse757.example.org/collections";
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"ogcapi","address":url,"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"browse-sentinel-757"})).unwrap();
+    let document = json!({"collections":[{"id":"roads","title":"roads",
+        "links":[{"rel":"items","type":"application/geo+json","href":format!("{url}/roads/items")}]}]});
+    let mark = s.notice_mark();
+    s.run("service.layers", &json!({"url":url,"type":"ogcapi","text":document.to_string(),"connection":id})).unwrap();
+    s.run("service.groupPlan", &json!({"url":url,"type":"ogcapi","sourceOnly":true,"connection":id})).unwrap();
+    let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+    assert!(said.iter().all(|n| !n.contains("ignores")), "{said:?}");
+}

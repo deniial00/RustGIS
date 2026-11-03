@@ -13,10 +13,10 @@ pub fn commands() -> Vec<C> {
             r#"{"url": "an OGC API landing page or collections address", "type"?, "name"?: "group name (default My OGC Layer)", "text"?, "documents"?: "as service.layers", "responses"?: [{"url": "features URL", "text": "downloaded GeoJSON"}], "connection"?: "as service.add"} ("group" and "layer" are rejected: use service.refresh)"#,
         ),
         C::new("service.refresh", "Refresh", "Layers", refresh).params(
-            r#"{"group"?: id, "layer"?: "one child layer id or name", "text"?, "documents"?, "responses"?: "as service.import"}"#,
+            r#"{"group"?: id, "layer"?: "one child layer id or name", "text"?, "documents"?, "responses"?: "as service.import", "connection"?: "as service.add (default: the one its layers record)"}"#,
         ),
         C::new("service.groupPlan", "Service Import Requests", "Layers", plan).view().params(
-            r#"{"url"?, "type"?, "name"?, "group"?: id, "layer"?: "one child layer", "sourceOnly"?: "return the connection without fetching", "text"?, "documents"?} → request, layers, and next while discovery is incomplete"#,
+            r#"{"url"?, "type"?, "name"?, "group"?: id, "layer"?: "one child layer", "sourceOnly"?: "return the connection without fetching", "text"?, "documents"?, "connection"?: "as service.add"} → request, layers, and next while discovery is incomplete"#,
         ),
         C::new("service.group", "Service Group", "Layers", set_group).params(
             r#"{"group"?: id, "layer"?: "a child identifying its group", "name"?: text, "expanded"?: bool, "visible"?: "set all children", "remove"?: "remove the group and its children"}"#,

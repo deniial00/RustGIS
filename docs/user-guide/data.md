@@ -760,8 +760,9 @@ header** (the header's name, such as `X-API-Key`, and the key). The connection k
 the user name and the header name, never the password or key.
 The password or key goes to `connection.login {"id":"c1","password":"…"}` (basic) or
 `{"id":"c1","apiKey":"…"}` and lasts only for this session. Web-service logins never access the
-computer's credential store. Editing the origin, kind, method, user or header name ends the login;
-renaming the connection or changing its path at the same origin does not. **Log Out**
+computer's credential store. Editing the origin, method, user or header name ends the login (a
+connection's kind doesn't change: make a new one); renaming the connection or changing its path
+at the same origin does not. **Log Out**
 (`connection.logout`) removes the session login. Log in again when a new session needs it.
 
 A login is sent only to the connection's origin: the same scheme, host and port, for its
