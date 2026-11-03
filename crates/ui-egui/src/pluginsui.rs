@@ -706,20 +706,22 @@ fn installed_tab(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
         }
         return;
     }
-    // The plugins that weren't loaded come first: (id, why, whether Retry is running).
-    let unloaded: Vec<(String, String, bool)> = app
+    // The plugins that weren't loaded come first: (id, why, whether Retry is running, whether
+    // Retry can download it: a copy kept in the browser would only fail the same way again).
+    let unloaded: Vec<(String, String, bool, bool)> = app
         .plugins
         .unloaded
         .iter()
         .map(|u| {
             let id = &u.saved.id;
             let trying = app.plugins.jobs.iter().any(|j| matches!(j, Job::Restore { saved, .. } if saved.id == *id));
-            (id.clone(), u.reason.clone(), trying)
+            let downloads = u.saved.data.is_none() && u.saved.url.is_some();
+            (id.clone(), u.reason.clone(), trying, downloads)
         })
         .collect();
     // What was clicked: (id, true for Retry, false for Remove).
     let mut act: Option<(String, bool)> = None;
-    for (id, reason, trying) in &unloaded {
+    for (id, reason, trying, downloads) in &unloaded {
         card(ui, t, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(id).font(semibold(13.5)));
@@ -735,7 +737,7 @@ fn installed_tab(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
                         {
                             act = Some((id.clone(), false));
                         }
-                        if ui.small_button(tl!("Retry")).on_hover_text(tl!("Download it again and load it.")).clicked() {
+                        if *downloads && ui.small_button(tl!("Retry")).on_hover_text(tl!("Download it again and load it.")).clicked() {
                             act = Some((id.clone(), true));
                         }
                     }
@@ -1326,5 +1328,14 @@ mod tests {
         assert!(app.plugins.unloaded.is_empty());
         assert_eq!(app.plugins.message, Some((true, "Removed demo.".to_string())));
         assert!(h.query_by_label("Not loaded").is_none());
+
+        // A copy kept in the browser can't be downloaded again: Remove only.
+        h.state_mut()
+            .plugins
+            .unloaded
+            .push(Unloaded { saved: Saved { url: None, data: Some("AA==".into()), ..record("copy", "0") }, reason: "damaged".into() });
+        h.run();
+        assert!(h.query_by_label("Remove").is_some());
+        assert!(h.query_by_label("Retry").is_none());
     }
 }
