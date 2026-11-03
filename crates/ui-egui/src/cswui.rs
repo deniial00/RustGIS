@@ -159,7 +159,8 @@ fn records(app: &mut RustGisApp, ui: &mut egui::Ui) {
         return;
     }
     ui.separator();
-    let url = st.asked["url"].as_str().unwrap_or("").to_string();
+    // The address as typed: one read through a login is matched and kept without its binding.
+    let url = rustgis_engine::data::login_address::inner(st.asked["url"].as_str().unwrap_or("")).to_string();
     let keepable = !url.is_empty() && crate::connectionui::picked(&list, app.dialogs.connection.as_deref(), &url).is_none();
     let mut keep = false;
     ui.horizontal(|ui| {
