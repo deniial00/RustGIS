@@ -1060,6 +1060,9 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         "template" => {
             s.project.ensure_imports_complete()?;
             let mut t = template(&s.project);
+            // As a package: what it reads keeps its plain address, what it records no binding.
+            crate::project::strip_addresses(t.addresses_mut());
+            crate::project::clear_login_bindings(t.recorded_mut());
             if let Some(n) = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
                 t.name = n.chars().take(200).collect();
             }
@@ -1073,8 +1076,13 @@ pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec
         "gpPackage" => ("results".to_string(), package_gp(s)?),
         "bookmarks" => (format!("{} bookmarks", s.map().name), super::navigate::bookmarks_file(s.map())?),
         "task" => {
-            let t = task_ref(s, p)?;
-            (t.name.clone(), to_json(t)?)
+            let mut t = task_ref(s, p)?.clone();
+            let mut addresses = Vec::new();
+            for step in &mut t.steps {
+                crate::project::recorded_addresses(&mut step.params, &mut addresses);
+            }
+            crate::project::clear_login_bindings(addresses);
+            (t.name.clone(), to_json(&t)?)
         }
         "obj" => {
             let id = s.layer_id(p)?;

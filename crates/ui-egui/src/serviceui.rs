@@ -190,6 +190,9 @@ pub fn start(app: &mut RustGisApp, p: &Value, refresh: bool) -> Result<(), Strin
             p.remove("documents");
         }
     }
+    // A refresh reads its linked documents and layers through the connection its layers record,
+    // which the plan names when every child agrees: not the origin's current choice.
+    let connection = if refresh { params.get("connection").filter(|c| !c.is_null()).cloned() } else { connection };
     let mut task = Import {
         params,
         refresh,
@@ -483,5 +486,8 @@ mod tests {
         let capabilities = task.document.as_deref().unwrap();
         let header = rustgis_engine::render::rustgis_tiles::logins::apply(capabilities).unwrap().and_then(|login| login.header);
         assert_eq!(header.map(|(_, key)| key).as_deref(), Some("refresh-a-757"));
+        // The linked documents and the layers' features (`Import::discover`, `Import::next`) are
+        // requested through the task's connection.
+        assert_eq!(task.connection.as_ref().and_then(Value::as_str), Some(a.as_str()));
     }
 }

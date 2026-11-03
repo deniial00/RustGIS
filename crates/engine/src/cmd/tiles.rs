@@ -642,7 +642,7 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     // as the layer's own address does.
     if let Some(connection) = s.map().tiles.get(i).map(|t| t.connection.clone()).filter(|c| !c.is_empty()) {
         for legend in new_legends.iter_mut().flatten() {
-            legend.url = crate::service_logins::bind_logged_in(s, &connection, &legend.url);
+            legend.url = crate::service_logins::bind_logged_in(s, &connection, &legend.url)?;
         }
     }
     let hidden = hidden_layers(p)?;

@@ -588,12 +588,53 @@ fn geoprocessing_history_never_keeps_a_login_binding() {
     assert!(record.params["output"].as_str().is_some_and(|o| o.starts_with(rustgis_data::login_address::PREFIX)));
     let (saved, _) = s.project.clone().saved_text(None).unwrap();
     assert!(!saved.contains(rustgis_data::login_address::PREFIX), "the saved project keeps a binding: {saved}");
-    let package = std::env::temp_dir().join(format!("gp757-{}.rgispkg", std::process::id()));
-    s.run("project.package", &json!({"path": package.to_string_lossy()})).unwrap();
-    let bytes = std::fs::read(&package).unwrap();
-    let _ = std::fs::remove_file(&package);
-    for (name, entry) in rustgis_data::zip::read(&bytes).unwrap() {
-        let entry = String::from_utf8_lossy(&entry);
-        assert!(!entry.contains(rustgis_data::login_address::PREFIX), "{name} keeps a binding: {entry}");
+    // Neither the project package nor the results package (its history.json) keeps one.
+    for (command, file) in [("project.package", "project"), ("gp.package", "results")] {
+        let path = std::env::temp_dir().join(format!("gp757-{file}-{}.rgispkg", std::process::id()));
+        s.run(command, &json!({"path": path.to_string_lossy()})).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (name, entry) in rustgis_data::zip::read(&bytes).unwrap() {
+            let entry = String::from_utf8_lossy(&entry);
+            assert!(!entry.contains(rustgis_data::login_address::PREFIX), "{command}: {name} keeps a binding: {entry}");
+        }
     }
+}
+
+#[test]
+fn templates_tasks_and_models_written_out_keep_no_login_binding() {
+    let mut s = Session::new(crate::sample::world_project());
+    let id = new(&mut s, json!({"kind":"wmts","address":"https://export757.example.org/tiles","auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"export-sentinel-757"})).unwrap();
+    let tile = bound(&mut s, &id, "https://export757.example.org/tiles/{z}/{x}/{y}.png");
+    s.run("map.addTiles", &json!({"url": tile, "name": "Bound"})).unwrap();
+    s.run("task.new", &json!({"name":"Fetch","steps":[{"title":"Add","command":"map.addTiles","params":{"url": tile}}]})).unwrap();
+    s.run("model.new", &json!({"name":"Tiles","steps":[{"tool":"buffer","params":{"input": tile, "distance": 1}}]})).unwrap();
+    // A model drawn as a graph keeps its input's address in the node itself.
+    let graph = json!({"nodes":[{"id":"in","kind":"input","layer": tile}], "edges": []});
+    s.run("model.new", &json!({"name":"Drawn","graph": graph})).unwrap();
+    let dir = std::env::temp_dir().join(format!("export757-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (template, task) = (dir.join("bound.rgistemplate"), dir.join("bound.rgistask"));
+    s.run("project.saveTemplate", &json!({"path": template.to_string_lossy()})).unwrap();
+    s.run("task.save", &json!({"task":"Fetch","path": task.to_string_lossy()})).unwrap();
+    let model = s.run("model.export", &json!({"model":"Tiles"})).unwrap()["text"].as_str().unwrap().to_string();
+    let written = [std::fs::read_to_string(&template).unwrap(), std::fs::read_to_string(&task).unwrap(), model];
+    let _ = std::fs::remove_dir_all(&dir);
+    for text in &written {
+        assert!(!text.contains(rustgis_data::login_address::PREFIX) && !text.contains("export-sentinel-757"), "{text}");
+        assert!(text.contains("export757.example.org/tiles"), "the plain address stays: {text}");
+    }
+}
+
+#[test]
+fn a_legend_that_cant_carry_the_login_is_refused_not_read_without_it() {
+    let origin = "https://legend-space757.example.org";
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"space-sentinel-757"})).unwrap();
+    s.run("map.addTiles", &json!({"url":format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),"name":"T","connection":id})).unwrap();
+    let error = s.run("map.setTiles", &json!({"name":"T","legend":format!("{origin}/my legend.png")})).unwrap_err();
+    assert!(error.contains("can't carry the connection's login"), "{error}");
+    assert!(s.map().tiles[0].legends.is_empty(), "refused before anything changed");
 }

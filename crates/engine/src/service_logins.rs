@@ -246,14 +246,21 @@ pub fn logged_in(s: &Session, c: &Connection) -> bool {
 }
 
 /// A plain address at the origin of a logged-in service connection, bound to that login. Anything
-/// else (another origin, a wrapper, a connection not logged in) comes back unchanged.
-pub(crate) fn bind_logged_in(s: &Session, connection: &str, url: &str) -> String {
-    let Some(c) = s.connections.connections.iter().find(|c| c.id == connection && is_service(c)) else { return url.to_string() };
-    let origin = logins::origin(url);
-    if !logged_in(s, c) || origin.is_none() || login_origin(c) != origin || rustgis_data::login_address::is_wrapper(url) {
-        return url.to_string();
+/// else (another origin, a wrapper, a connection not logged in) comes back unchanged. An address
+/// at that origin that can't carry the login is refused, never read without it.
+pub(crate) fn bind_logged_in(s: &Session, connection: &str, url: &str) -> Result<String, String> {
+    let Some(c) = s.connections.connections.iter().find(|c| c.id == connection && is_service(c)) else { return Ok(url.to_string()) };
+    let Some(origin) = login_origin(c) else { return Ok(url.to_string()) };
+    // At the origin by its text too: an address that doesn't parse (a space in it) still names it.
+    let named = url.get(..origin.len()).is_some_and(|start| start.eq_ignore_ascii_case(&origin))
+        && url.get(origin.len()..).is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']));
+    let at_origin = named || logins::origin(url).as_deref() == Some(origin.as_str());
+    if !logged_in(s, c) || !at_origin || rustgis_data::login_address::is_wrapper(url) {
+        return Ok(url.to_string());
     }
-    s.web_logins.active.get(&c.id).and_then(|a| logins::bind(&a.binding, url).ok()).unwrap_or_else(|| url.to_string())
+    let Some(active) = s.web_logins.active.get(&c.id) else { return Ok(url.to_string()) };
+    logins::bind(&active.binding, url)
+        .map_err(|_| format!("{url}: this address can't carry the connection's login (it has a space, a control character or a backslash)"))
 }
 
 pub fn known_secret(s: &Session, c: &Connection) -> Result<Secret, String> {
@@ -320,6 +327,9 @@ pub fn request(s: &mut Session, connection: Option<&str>, url: &str) -> Result<S
         return Ok(plain.to_string());
     }
     if !logged_in(s, &c) {
+        // Confirmed already: a web connection's session secret is kept only after its login passed
+        // the plain-http:// check (`connection.login`), and is forgotten when the connection's
+        // server changes (`connection.update`), so it never reaches a server nobody confirmed.
         let secret = known_secret(s, &c)?;
         activate(s, &c, Some(&secret), true)?;
     }

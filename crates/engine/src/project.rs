@@ -594,6 +594,10 @@ impl Project {
             if let Some(graph) = &mut model.graph {
                 for node in &mut graph.nodes {
                     recorded_addresses(&mut node.params, &mut addresses);
+                    // A node's input may be an address rather than a layer's name.
+                    if let Some(layer) = &mut node.layer {
+                        addresses.push(layer);
+                    }
                 }
             }
         }
