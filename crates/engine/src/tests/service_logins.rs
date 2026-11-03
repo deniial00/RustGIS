@@ -498,7 +498,8 @@ fn plugins_cannot_send_a_saved_web_service_login() {
     let origin = "https://plugin757.example.org";
     let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
     s.run("connection.login", &json!({"id":id,"apiKey":"plugin-sentinel-757"})).unwrap();
-    super::plugin("eng-login-757", &["edit", "network"]);
+    // With files and network granted too: neither lends the plugin the user's login.
+    super::plugin("eng-login-757", &["edit", "network", "files"]);
     let tiles = format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png");
     // Naming the connection is refused, as logging in to it is.
     for command in ["map.addTiles", "layer.addUrl", "service.layers"] {
@@ -513,6 +514,13 @@ fn plugins_cannot_send_a_saved_web_service_login() {
     s.run("map.addTiles", &json!({"url":tiles,"name":"Mine"})).unwrap();
     let mine = s.map().tiles.iter().find(|t| t.name == "Mine").unwrap();
     assert_eq!(header(&mine.url).unwrap().1, "plugin-sentinel-757");
+    // A legend it sets on the user's logged-in layer stays plain: the layer's login isn't lent.
+    s.run("map.addTiles", &json!({"url":tiles,"name":"Named","connection":id})).unwrap();
+    let legend = format!("{origin}/legend.png");
+    super::forward(&mut s, "eng-login-757", "map.setTiles", json!({"name":"Named","legend":legend})).unwrap();
+    let named = s.map().tiles.iter().find(|t| t.name == "Named").unwrap();
+    assert_eq!(named.connection, id, "the layer records the connection, so its legend could be bound");
+    assert_eq!(named.legends[0].url, legend);
     rustgis_plugins::unload("eng-login-757");
 }
 
@@ -652,4 +660,21 @@ fn service_requests_take_a_connection_without_saying_they_ignore_it() {
     s.run("service.groupPlan", &json!({"url":url,"type":"ogcapi","sourceOnly":true,"connection":id})).unwrap();
     let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
     assert!(said.iter().all(|n| !n.contains("ignores")), "{said:?}");
+}
+
+#[test]
+fn notebook_output_keeps_no_login_binding() {
+    let origin = "https://notebook757.example.org";
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"wmts","address":format!("{origin}/tiles"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"notebook-sentinel-757"})).unwrap();
+    s.run("map.addTiles", &json!({"url":format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),"name":"T","connection":id})).unwrap();
+    assert!(s.map().tiles[0].url.starts_with(rustgis_data::login_address::PREFIX));
+    s.run("notebook.new", &json!({"name": "Tiles"})).unwrap();
+    s.run("notebook.addCell", &json!({"source": "map.tiles"})).unwrap();
+    s.run("notebook.run", &Value::Null).unwrap();
+    let output = s.project.notebooks[0].cells.iter().filter_map(|c| c.output.clone()).collect::<Vec<_>>().join("\n");
+    assert!(output.contains(&format!("{origin}/tiles/")), "the cell still shows the address: {output}");
+    let (saved, _) = s.project.clone().saved_text(None).unwrap();
+    assert!(!saved.contains(rustgis_data::login_address::PREFIX), "the saved project keeps a binding: {saved}");
 }

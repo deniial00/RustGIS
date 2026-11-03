@@ -249,6 +249,10 @@ pub fn logged_in(s: &Session, c: &Connection) -> bool {
 /// else (another origin, a wrapper, a connection not logged in) comes back unchanged. An address
 /// at that origin that can't carry the login is refused, never read without it.
 pub(crate) fn bind_logged_in(s: &Session, connection: &str, url: &str) -> Result<String, String> {
+    // A plugin's command reads anonymously: a legend it sets never takes the user's login.
+    if s.web_logins.is_anonymous() {
+        return Ok(url.to_string());
+    }
     let Some(c) = s.connections.connections.iter().find(|c| c.id == connection && is_service(c)) else { return Ok(url.to_string()) };
     let Some(origin) = login_origin(c) else { return Ok(url.to_string()) };
     // At the origin by its text too: an address that doesn't parse (a space in it) still names it.
