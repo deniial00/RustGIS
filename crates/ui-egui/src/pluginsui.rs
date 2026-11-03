@@ -463,6 +463,8 @@ fn install_confirmed(app: &mut RustGisApp) {
     match rustgis_engine::cmd::plugins::install_bytes(&c.bytes) {
         Ok(p) => {
             app.plugins.unloaded.retain(|u| u.saved.id != p.manifest.id);
+            // A start-up download of the same plugin still running would bring the old record back.
+            app.plugins.jobs.retain(|j| !matches!(j, Job::Restore { saved, .. } if saved.id == p.manifest.id));
             let entry = Saved {
                 id: p.manifest.id.clone(),
                 sha256: p.sha256.clone(),
@@ -1266,6 +1268,7 @@ mod tests {
         impl Drop for Cleanup {
             fn drop(&mut self) {
                 let _ = rustgis_plugins::store::uninstall("restore-ok");
+                let _ = rustgis_plugins::store::uninstall("restore-new");
                 rustgis_plugins::store::set_dir(None);
             }
         }
@@ -1279,6 +1282,19 @@ mod tests {
         assert!(told.is_empty(), "{told:?}");
         assert!(app.plugins.unloaded.is_empty() && app.plugins.start_failures.is_empty());
         assert!(rp::get("restore-ok").is_some());
+
+        // Installed again while its start-up download still runs: that download is dropped, so it
+        // can't list the plugin as not loaded afterwards.
+        let package = rustgis_plugins::testing::skills_package("restore-new", &["s"]);
+        let mut app = RustGisApp::with_sample();
+        app.services.fetch = Some(Box::new(|_: &str, _: Slot<Result<Vec<u8>, String>>| {}));
+        restore_list(&mut app, vec![record("restore-new", "0")]);
+        assert_eq!(app.plugins.jobs.len(), 1);
+        let manifest = Package::from_zip(&package).unwrap().manifest;
+        app.plugins.confirm = Some(Confirm { manifest, bytes: package, from: None });
+        install_confirmed(&mut app);
+        assert!(app.plugins.jobs.is_empty() && app.plugins.unloaded.is_empty());
+        assert!(rp::get("restore-new").is_some());
     }
 
     /// A plugin that wasn't loaded is listed on the Installed tab, with Retry and Remove (#1352).
