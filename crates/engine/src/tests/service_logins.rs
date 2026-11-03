@@ -514,13 +514,21 @@ fn plugins_cannot_send_a_saved_web_service_login() {
     s.run("map.addTiles", &json!({"url":tiles,"name":"Mine"})).unwrap();
     let mine = s.map().tiles.iter().find(|t| t.name == "Mine").unwrap();
     assert_eq!(header(&mine.url).unwrap().1, "plugin-sentinel-757");
-    // A legend it sets on the user's logged-in layer stays plain: the layer's login isn't lent.
+    // A legend it sets at the user's logged-in layer's origin is refused: the next login would
+    // bind it, and the plugin would have picked where the login goes.
     s.run("map.addTiles", &json!({"url":tiles,"name":"Named","connection":id})).unwrap();
-    let legend = format!("{origin}/legend.png");
-    super::forward(&mut s, "eng-login-757", "map.setTiles", json!({"name":"Named","legend":legend})).unwrap();
+    let e = super::forward(&mut s, "eng-login-757", "map.setTiles", json!({"name":"Named","legend":format!("{origin}/legend.png")}))
+        .unwrap_err();
+    assert!(e.contains("plugins can't set a legend"), "{e}");
     let named = s.map().tiles.iter().find(|t| t.name == "Named").unwrap();
-    assert_eq!(named.connection, id, "the layer records the connection, so its legend could be bound");
-    assert_eq!(named.legends[0].url, legend);
+    assert_eq!(named.connection, id, "the layer records the connection, so a legend there would be bound");
+    assert!(named.legends.is_empty());
+    // One at another origin is its own, and stays plain when the user logs in again.
+    let elsewhere = "https://plugin-other757.example.org/legend.png";
+    super::forward(&mut s, "eng-login-757", "map.setTiles", json!({"name":"Named","legend":elsewhere})).unwrap();
+    s.run("connection.login", &json!({"id":id,"apiKey":"plugin-sentinel-757"})).unwrap();
+    let named = s.map().tiles.iter().find(|t| t.name == "Named").unwrap();
+    assert_eq!(named.legends[0].url, elsewhere);
     rustgis_plugins::unload("eng-login-757");
 }
 
