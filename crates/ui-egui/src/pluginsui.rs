@@ -465,6 +465,8 @@ fn install_confirmed(app: &mut RustGisApp) {
             app.plugins.unloaded.retain(|u| u.saved.id != p.manifest.id);
             // A start-up download of the same plugin still running would bring the old record back.
             app.plugins.jobs.retain(|j| !matches!(j, Job::Restore { saved, .. } if saved.id == p.manifest.id));
+            // That download may have been the last one the start-up notice was waiting for.
+            tell_unloaded(app);
             let entry = Saved {
                 id: p.manifest.id.clone(),
                 sha256: p.sha256.clone(),
@@ -1284,16 +1286,24 @@ mod tests {
         assert!(rp::get("restore-ok").is_some());
 
         // Installed again while its start-up download still runs: that download is dropped, so it
-        // can't list the plugin as not loaded afterwards.
+        // can't list the plugin as not loaded afterwards, and the start-up notice it held back
+        // (here for a damaged copy) is given.
         let package = rustgis_plugins::testing::skills_package("restore-new", &["s"]);
         let mut app = RustGisApp::with_sample();
         app.services.fetch = Some(Box::new(|_: &str, _: Slot<Result<Vec<u8>, String>>| {}));
-        restore_list(&mut app, vec![record("restore-new", "0")]);
+        let mark = app.session.notice_mark();
+        let damaged = Saved { data: Some("!not base64!".into()), url: None, ..record("damaged", "0") };
+        restore_list(&mut app, vec![damaged, record("restore-new", "0")]);
         assert_eq!(app.plugins.jobs.len(), 1);
+        assert!(app.session.notices_since(mark).is_empty());
         let manifest = Package::from_zip(&package).unwrap().manifest;
         app.plugins.confirm = Some(Confirm { manifest, bytes: package, from: None });
         install_confirmed(&mut app);
-        assert!(app.plugins.jobs.is_empty() && app.plugins.unloaded.is_empty());
+        assert!(app.plugins.jobs.is_empty());
+        let listed: Vec<&str> = app.plugins.unloaded.iter().map(|u| u.saved.id.as_str()).collect();
+        assert_eq!(listed, ["damaged"]);
+        let told: Vec<&str> = app.session.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+        assert!(told.len() == 1 && told[0].starts_with("The plugin damaged wasn't loaded."), "{told:?}");
         assert!(rp::get("restore-new").is_some());
     }
 
