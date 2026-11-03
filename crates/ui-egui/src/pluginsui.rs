@@ -348,7 +348,7 @@ fn finish_restore(app: &mut RustGisApp, s: Saved, got: Result<Vec<u8>, String>, 
     let r = got.and_then(|bytes| {
         let sha = rp::package::sha256_hex(&bytes);
         if !sha.eq_ignore_ascii_case(&s.sha256) {
-            return Err(tl!("it changed since it was installed: install it again from the plugin registry").to_string());
+            return Err(tl!("it changed since it was installed: install it again from the Plugin Manager").to_string());
         }
         rustgis_engine::cmd::plugins::install_bytes(&bytes)
     });
