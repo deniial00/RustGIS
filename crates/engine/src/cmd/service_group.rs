@@ -10,13 +10,13 @@ use super::{C, CmdResult, MAX_GROUP_BYTES, Session, capabilities, ps, service_js
 pub fn commands() -> Vec<C> {
     vec![
         C::new("service.import", "Import Service", "Home › Add", import).params(
-            r#"{"url": "an OGC API landing page or collections address", "type"?, "name"?: "group name (default My OGC Layer)", "text"?, "documents"?: "as service.layers", "responses"?: [{"url": "features URL", "text": "downloaded GeoJSON"}], "connection"?: "as service.add"} ("group" and "layer" are rejected: use service.refresh)"#,
+            r#"{"url": "an OGC API landing page or collections address", "type"?, "name"?: "group name (default My OGC Layer)", "text"?, "documents"?: "as service.layers", "responses"?: [{"url": "features URL", "text": "downloaded GeoJSON"}], "connection"?: "as service.add", "anonymous"?: bool (internal: preserve plugin-selected service provenance)} ("group" and "layer" are rejected: use service.refresh)"#,
         ),
         C::new("service.refresh", "Refresh", "Layers", refresh).params(
-            r#"{"group"?: id, "layer"?: "one child layer id or name", "text"?, "documents"?, "responses"?: "as service.import", "connection"?: "as service.add (default: the one its layers record)"}"#,
+            r#"{"group"?: id, "layer"?: "one child layer id or name", "text"?, "documents"?, "responses"?: "as service.import", "connection"?: "as service.add (default: the one its layers record)", "anonymous"?: bool (internal: do not borrow a saved login)}"#,
         ),
         C::new("service.groupPlan", "Service Import Requests", "Layers", plan).view().params(
-            r#"{"url"?, "type"?, "name"?, "group"?: id, "layer"?: "one child layer", "sourceOnly"?: "return the connection without fetching", "text"?, "documents"?, "connection"?: "as service.add"} → request, layers, and next while discovery is incomplete"#,
+            r#"{"url"?, "type"?, "name"?, "group"?: id, "layer"?: "one child layer", "sourceOnly"?: "return the connection without fetching", "text"?, "documents"?, "connection"?: "as service.add", "anonymous"?: bool (internal: preserve plugin-selected service provenance)} → request, layers, and next while discovery is incomplete"#,
         ),
         C::new("service.group", "Service Group", "Layers", set_group).params(
             r#"{"group"?: id, "layer"?: "a child identifying its group", "name"?: text, "expanded"?: bool, "visible"?: "set all children", "remove"?: "remove the group and its children"}"#,
@@ -41,9 +41,11 @@ fn target(s: &Session, p: &Value) -> Result<Option<(ServiceGroup, Option<u32>)>,
 
 fn request(s: &mut Session, p: &Value) -> CmdResult {
     let mut q = p.clone();
+    let mut anonymous = s.web_logins.is_anonymous() || p.get("anonymous").and_then(Value::as_bool) == Some(true);
     if let Some((group, child)) = target(s, p)? {
-        // Anonymous reads (a plugin's command, an unsaved Test) never borrow the group's login.
-        if !s.web_logins.is_anonymous() && q.get("connection").is_none_or(Value::is_null) {
+        anonymous |= group.anonymous || child.and_then(|id| s.map().layer(id)).is_some_and(|l| l.anonymous);
+        // A plugin-selected source never borrows a login, including a later user refresh.
+        if !anonymous && q.get("connection").is_none_or(Value::is_null) {
             let mut ids = group
                 .children
                 .iter()
@@ -61,6 +63,12 @@ fn request(s: &mut Session, p: &Value) -> CmdResult {
         q["type"] = json!(group.kind);
         q["name"] = json!(group.name);
     }
+    if anonymous {
+        q["anonymous"] = json!(true);
+        if let Some(q) = q.as_object_mut() {
+            q.remove("connection");
+        }
+    }
     super::url_of(&q)?;
     Ok(crate::service_logins::request_params(s, &q)?.into_owned())
 }
@@ -74,6 +82,13 @@ fn valid_connection(s: &Session, id: &str, url: &str) -> bool {
 }
 
 fn record_connection(s: &mut Session, layer: u32, request: &Value) {
+    if request.get("anonymous").and_then(Value::as_bool) == Some(true) {
+        if let Some(layer) = s.map_mut().layer_mut(layer) {
+            layer.anonymous = true;
+            layer.connection.clear();
+        }
+        return;
+    }
     let Some(id) = ps(request, "connection") else { return };
     let Some(url) = s.map().layer(layer).and_then(|l| l.dataset.source.as_deref()) else { return };
     if valid_connection(s, id, url)
@@ -153,7 +168,12 @@ fn listing(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(next) = found.next {
         out["next"] = json!(next);
     }
-    out["request"] = json!({"url": q.get("url"), "type": ps(&q, "type").unwrap_or("ogcapi"), "connection": q.get("connection")});
+    out["request"] = json!({"url": q.get("url"), "type": ps(&q, "type").unwrap_or("ogcapi")});
+    if q.get("anonymous").and_then(Value::as_bool) == Some(true) {
+        out["request"]["anonymous"] = json!(true);
+    } else if let Some(connection) = q.get("connection").filter(|v| !v.is_null()) {
+        out["request"]["connection"] = connection.clone();
+    }
     Ok(out)
 }
 
@@ -259,6 +279,7 @@ fn import(s: &mut Session, p: &Value) -> CmdResult {
         name,
         url: ps(req, "url").unwrap_or_default().into(),
         kind: ps(req, "type").unwrap_or("ogcapi").into(),
+        anonymous: req.get("anonymous").and_then(Value::as_bool) == Some(true),
         expanded: true,
         children,
     };
@@ -417,6 +438,7 @@ fn refresh(s: &mut Session, p: &Value) -> CmdResult {
     let map = s.map_mut();
     let group = map.service_groups.iter_mut().find(|g| g.id == old.id).ok_or("the group was removed")?;
     if child_id.is_none() {
+        group.anonymous |= listing["request"].get("anonymous").and_then(Value::as_bool) == Some(true);
         group.children = children;
     } else {
         // The child's provenance follows the service (a new source address or token).

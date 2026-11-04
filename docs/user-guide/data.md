@@ -832,6 +832,9 @@ a saved connection later. To use a connection's login, add the layer yourself th
 A plugin cannot set a same-origin legend on a layer tied to a saved connection, even when that
 connection is currently public. If it changes the legends of an unconnected tile layer, that
 layer stays anonymous too.
+Refreshing a plugin-added service group also stays anonymous: its capabilities, linked documents,
+feature downloads and newly discovered collections do not borrow a saved login. The group keeps
+that provenance after saving and reopening, even if a refresh temporarily leaves it empty.
 
 ## Large files
 

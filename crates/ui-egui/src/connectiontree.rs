@@ -882,6 +882,136 @@ mod tests {
         }
     }
 
+    /// A plugin's anonymous group remains anonymous when the user refreshes it, including new
+    /// children and every discovery/download phase after saving and reopening the project.
+    #[test]
+    fn anonymous_service_groups_refresh_without_logins_before_and_after_reopen() {
+        use rustgis_engine::render::rustgis_tiles::logins;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let _turn = crate::fetching::turn();
+        for basic in [false, true] {
+            let revision = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+            let (served_revision, seen) = (revision.clone(), requests.clone());
+            let base = serve(move |head| {
+                seen.lock().unwrap().push(head.to_string());
+                let path = head.split_whitespace().nth(1).unwrap_or("").split('?').next().unwrap_or("");
+                let revision = served_revision.load(Ordering::SeqCst);
+                let body = match path {
+                    "/api" => json!({"links":[{"rel":"data","type":"application/json","href":"/collections"}]}),
+                    "/collections" => {
+                        let collections = ["roads", "buildings"]
+                            .into_iter()
+                            .take(if revision == 0 { 1 } else { 2 })
+                            .map(|id| {
+                                json!({"id":id,"title":id,"links":[
+                                    {"rel":"items","type":"application/geo+json","href":format!("/{id}/items")}
+                                ]})
+                            })
+                            .collect::<Vec<_>>();
+                        json!({"collections":collections})
+                    }
+                    "/roads/items" | "/buildings/items" => json!({
+                        "type":"FeatureCollection",
+                        "features":(0..=revision).map(|id| json!({
+                            "type":"Feature","id":id,
+                            "geometry":{"type":"Point","coordinates":[1,2]},
+                            "properties":{"revision":revision}
+                        })).collect::<Vec<_>>()
+                    }),
+                    _ => return (404, b"Unknown test path".to_vec()),
+                };
+                (200, serde_json::to_vec(&body).unwrap())
+            });
+            let url = format!("{base}/api");
+            let mut h = harness();
+            let app = h.state_mut();
+            app.run("ui.language", json!({"code":"en"})).unwrap();
+            app.run("project.new", json!(null)).unwrap();
+            let connection = app
+                .run(
+                    "connection.new",
+                    json!({
+                        "kind":"ogcapi","address":url,"auth":if basic { "basic" } else { "header" },
+                        "user":if basic { "reader" } else { "" },"keyName":if basic { "" } else { "X-Api-Key" }
+                    }),
+                )
+                .unwrap();
+            let mut login = json!({"id":connection["id"],"allowInsecure":true});
+            login[if basic { "password" } else { "apiKey" }] = json!("anonymous-group-secret-757");
+            app.run("connection.login", login.clone()).unwrap();
+            let authenticated = rustgis_engine::service_logins::request(&mut app.session, None, &url).unwrap();
+            assert!(logins::apply(&authenticated).unwrap().is_some(), "the same origin has a selected session login");
+            // This is the persisted marker produced for a plugin-selected service, without
+            // keeping an anonymous engine context active while the GUI downloads its documents.
+            app.run("ui.importService", json!({"url":url,"type":"ogcapi","name":"Anonymous plugin group","anonymous":true})).unwrap();
+            until(&mut h, |app| app.ui.service_import.is_none());
+            assert!(h.state().dialogs.error.is_none(), "{:?}", h.state().dialogs.error);
+            let group = h.state().session.map().service_groups[0].id;
+            assert!(h.state().session.map().service_groups[0].anonymous);
+            let roads = h.state().session.map().layer_by_name("roads").unwrap().id;
+            assert_eq!(h.state().session.map().layer(roads).unwrap().dataset.features.len(), 1);
+            let dir = tempfile::tempdir().unwrap();
+            let project = dir.path().join("anonymous-service.rgis");
+            for step in 1..=3 {
+                if step == 2 {
+                    h.state_mut().run("project.saveAs", json!({"path":project.display().to_string()})).unwrap();
+                    h.state_mut().run("project.open", json!({"path":project.display().to_string()})).unwrap();
+                    h.state_mut().run("connection.login", login.clone()).unwrap();
+                    assert!(h.state().session.map().service_groups[0].anonymous);
+                }
+                revision.store(step, Ordering::SeqCst);
+                let before = requests.lock().unwrap().len();
+                for _ in 0..4 {
+                    h.step();
+                }
+                // Refresh the newly discovered child on its own too: it cannot silently adopt
+                // the selected connection when it later becomes the user's refresh target.
+                h.get_by_label(if step == 3 { "buildings" } else { "Anonymous plugin group" }).click_secondary();
+                h.step();
+                h.step();
+                h.get_by_label("Refresh").click();
+                h.step();
+                until(&mut h, |app| app.ui.service_import.is_none());
+                assert!(h.state().dialogs.error.is_none(), "{:?}", h.state().dialogs.error);
+                let app = h.state();
+                let saved = &app.session.map().service_groups[0];
+                assert_eq!(saved.id, group);
+                assert!(saved.anonymous);
+                assert_eq!(saved.children.len(), 2, "refresh discovers a new anonymous child");
+                assert_eq!(app.session.map().layer_by_name("roads").unwrap().id, roads);
+                for name in ["roads", "buildings"] {
+                    let layer = app.session.map().layer_by_name(name).unwrap();
+                    assert!(layer.anonymous, "{name} must keep anonymous provenance");
+                    assert!(layer.connection.is_empty(), "{name} cannot record the user's connection");
+                    let expected = if step == 3 && name == "roads" { 3 } else { step + 1 };
+                    assert_eq!(layer.dataset.features.len(), expected, "{name} data is updated");
+                    assert!(logins::apply(layer.dataset.source.as_deref().unwrap()).unwrap().is_none());
+                }
+                let requests = requests.lock().unwrap();
+                let paths = requests[before..]
+                    .iter()
+                    .map(|head| head.split_whitespace().nth(1).unwrap().split('?').next().unwrap())
+                    .collect::<Vec<_>>();
+                let mut expected = vec!["/api", "/collections"];
+                if step != 3 {
+                    expected.push("/roads/items");
+                }
+                expected.push("/buildings/items");
+                assert_eq!(paths, expected, "capabilities, linked collections and all features are fetched");
+            }
+            for head in requests.lock().unwrap().iter() {
+                let lower = head.to_ascii_lowercase();
+                assert!(!lower.contains("authorization:"), "Basic login leaked: {head}");
+                assert!(!lower.contains("x-api-key:"), "header login leaked: {head}");
+                assert!(!head.contains("anonymous-group-secret-757"));
+            }
+        }
+    }
+
     #[test]
     fn a_foreign_followup_does_not_adopt_that_origins_saved_login() {
         let mut app = RustGisApp::with_sample();

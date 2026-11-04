@@ -461,11 +461,11 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
                 rewrite(path);
             }
         }
-        for group in &mut m.service_groups {
+        for group in m.service_groups.iter_mut().filter(|g| !g.anonymous) {
             let ids: BTreeSet<_> = group
                 .children
                 .iter()
-                .filter_map(|child| m.layers.iter().find(|l| l.id == child.layer).map(|l| l.connection.as_str()))
+                .filter_map(|child| m.layers.iter().find(|l| l.id == child.layer && !l.anonymous).map(|l| l.connection.as_str()))
                 .collect();
             if ids.len() == 1 && ids.contains(c.id.as_str()) {
                 rewrite(&mut group.url);
@@ -487,7 +487,7 @@ fn record_choice(s: &mut Session, origin: &str, old: &str, c: &Connection) {
         let group_layers: BTreeSet<_> = m
             .service_groups
             .iter()
-            .filter(|g| logins::origin(&g.url).as_deref() == Some(origin))
+            .filter(|g| !g.anonymous && logins::origin(&g.url).as_deref() == Some(origin))
             .flat_map(|g| g.children.iter().map(|child| child.layer))
             .collect();
         for l in &mut m.layers {
@@ -535,7 +535,7 @@ fn reads(s: &Session) -> BTreeMap<(String, String), Reads> {
         }
         // An imported service's group is read again by a refresh, from its address: it logs in
         // with the connection its layers record.
-        for g in &m.service_groups {
+        for g in m.service_groups.iter().filter(|g| !g.anonymous) {
             let Some(origin) = logins::origin(&g.url) else { continue };
             for child in &g.children {
                 let layer = m.layers.iter().find(|l| l.id == child.layer);
@@ -720,11 +720,12 @@ fn ask(s: &mut Session, request: LoginRequest) {
     s.database_logins.request(request);
 }
 
-/// What the project held before an add command: its layers by live identity and its tile layers, so the
-/// ones the command added can be told apart.
+/// What the project held before an add command: its layers by live identity, tile layers and
+/// service groups, so even an empty group added by a plugin retains anonymous provenance.
 pub(crate) struct Before {
     layers: Vec<BTreeSet<u64>>,
     tiles: Vec<Vec<(String, String, Vec<String>)>>,
+    groups: Vec<BTreeSet<u32>>,
 }
 
 /// The connection an add command names (its `connection`), checked before it runs: a saved
@@ -760,6 +761,11 @@ pub(crate) fn before(s: &Session, id: &str, params: &Value) -> Result<Option<Bef
     }
     Ok(Some(Before {
         layers: s.project.maps.iter().map(|m| m.layers.iter().map(|l| l.instance_id()).collect()).collect(),
+        groups: if anonymous {
+            s.project.maps.iter().map(|m| m.service_groups.iter().map(|g| g.id).collect()).collect()
+        } else {
+            Vec::new()
+        },
         tiles: s
             .project
             .maps
@@ -819,7 +825,7 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
                 }
                 continue;
             }
-            if anonymous {
+            if anonymous || t.anonymous {
                 t.anonymous = true;
                 t.connection.clear();
                 continue;
@@ -834,7 +840,7 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
         let mut added = BTreeSet::new();
         for l in m.layers.iter_mut().filter(|l| old_layers.is_none_or(|old| !old.contains(&l.instance_id()))) {
             added.insert(l.id);
-            if anonymous {
+            if anonymous || l.anonymous {
                 l.anonymous = true;
                 l.connection.clear();
                 continue;
@@ -848,8 +854,13 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
             }
         }
         // An imported service's group is refreshed from its address later.
-        for g in m.service_groups.iter().filter(|g| !anonymous && g.children.iter().any(|c| added.contains(&c.layer))) {
-            origins.extend(logins::origin(&g.url));
+        for g in &mut m.service_groups {
+            if anonymous && before.groups.get(i).is_none_or(|old| !old.contains(&g.id)) {
+                g.anonymous = true;
+            }
+            if !anonymous && !g.anonymous && g.children.iter().any(|c| added.contains(&c.layer)) {
+                origins.extend(logins::origin(&g.url));
+            }
         }
     }
     // A tile layer the command says it added (`index`, with its `kind`): one that replaced a layer
@@ -859,7 +870,7 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
         && tile_kinds.contains(&kind)
         && let Some(t) = usize::try_from(at).ok().and_then(|at| s.project.map_mut().tiles.get_mut(at))
     {
-        if anonymous {
+        if anonymous || t.anonymous {
             t.anonymous = true;
             t.connection.clear();
             return Ok(());

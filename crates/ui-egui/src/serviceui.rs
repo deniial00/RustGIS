@@ -1,6 +1,6 @@
 //! Background group import/refresh for both desktop and browser. Discovery and updates live in
 //! engine commands; this state machine supplies their downloaded documents and preserves the
-//! saved connection id through every deferred add.
+//! saved connection or anonymous provenance through every deferred add.
 
 use crate::{RustGisApp, Slot, fetch_into, fetch_into_limited, i18n};
 use rustgis_engine::data::ogc::{self, Pages, Step};
@@ -215,7 +215,7 @@ pub fn start(app: &mut RustGisApp, p: &Value, refresh: bool) -> Result<(), Strin
         let url = task.params.get("url").and_then(Value::as_str).unwrap_or_default();
         let kind = task.params.get("type").and_then(Value::as_str);
         let caps = rustgis_engine::data::ogc::capabilities_url(url, kind);
-        let caps = match request_from(app, task.connection.as_ref().and_then(Value::as_str), url, &caps) {
+        let caps = match task.request(app, &caps) {
             Ok(caps) => caps,
             Err(e) => {
                 app.session.download_failed(task.token);
@@ -231,11 +231,26 @@ pub fn start(app: &mut RustGisApp, p: &Value, refresh: bool) -> Result<(), Strin
 }
 
 impl Import {
+    /// Anonymous service provenance forbids selecting a login, including for same-origin links.
+    fn request(&self, app: &mut RustGisApp, url: &str) -> Result<String, String> {
+        if self.params.get("anonymous").and_then(Value::as_bool) == Some(true) {
+            return Ok(rustgis_engine::data::login_address::inner(url).to_string());
+        }
+        let base = self.params.get("url").and_then(Value::as_str).unwrap_or_default();
+        request_from(app, self.connection.as_ref().and_then(Value::as_str), base, url)
+    }
+
     fn discover(&mut self, app: &mut RustGisApp) -> Result<(), String> {
         let listing = app.session.run("service.groupPlan", &self.params)?;
+        if listing.get("request").and_then(|p| p.get("anonymous")).and_then(Value::as_bool) == Some(true) {
+            self.params["anonymous"] = json!(true);
+            if let Some(params) = self.params.as_object_mut() {
+                params.remove("connection");
+            }
+            self.connection = None;
+        }
         if let Some(next) = listing.get("next").and_then(Value::as_str) {
-            let url = self.params.get("url").and_then(Value::as_str).unwrap_or_default();
-            let next = request_from(app, self.connection.as_ref().and_then(Value::as_str), url, next)?;
+            let next = self.request(app, next)?;
             self.slot = fetch_into(&next);
             self.document = Some(next);
         } else {
@@ -254,8 +269,7 @@ impl Import {
     fn next(&mut self, app: &mut RustGisApp) -> Result<(), String> {
         self.current = self.remaining.pop_front();
         if let Some(url) = &self.current {
-            let base = self.params.get("url").and_then(Value::as_str).unwrap_or_default();
-            let url = request_from(app, self.connection.as_ref().and_then(Value::as_str), base, url)?;
+            let url = self.request(app, url)?;
             self.slot = fetch_into_limited(&url, rustgis_engine::cmd::service::MAX_GROUP_BYTES.saturating_sub(self.bytes));
         }
         Ok(())

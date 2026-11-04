@@ -15890,6 +15890,7 @@ fn saved_projects_keep_no_layer_tokens() {
         name: "Protected service".into(),
         url: "https://gis.example/wfs?key=k3y&map=m".into(),
         kind: "wfs".into(),
+        anonymous: false,
         expanded: true,
         children: vec![rustgis_map::ServiceChild {
             layer,

@@ -1116,6 +1116,9 @@ pub struct ServiceGroup {
     pub name: String,
     pub url: String,
     pub kind: String,
+    /// Plugin-selected service: never adopt a saved login, even without children or after reopen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anonymous: bool,
     #[serde(default = "yes")]
     pub expanded: bool,
     pub children: Vec<ServiceChild>,
@@ -2954,7 +2957,15 @@ mod tests {
     fn ids_stay_unique_when_a_project_reaches_the_largest_id() {
         let mut m = Map::new("m");
         m.layers.push(Layer::new(u32::MAX, points()));
-        let group = ServiceGroup { id: 0, name: "g".into(), url: String::new(), kind: String::new(), expanded: true, children: vec![] };
+        let group = ServiceGroup {
+            id: 0,
+            name: "g".into(),
+            url: String::new(),
+            kind: String::new(),
+            anonymous: false,
+            expanded: true,
+            children: vec![],
+        };
         let a = m.add_dataset(points());
         let b = m.add_service_group(group);
         let c = m.add_dataset(points());

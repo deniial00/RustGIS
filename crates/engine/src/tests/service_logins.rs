@@ -305,6 +305,7 @@ fn a_group_child_read_in_place_is_counted_once_and_refresh_respects_logout() {
         name: "Imported".into(),
         url: format!("{origin}/ogc/collections"),
         kind: "ogcapi".into(),
+        anonymous: false,
         expanded: true,
         children: vec![rustgis_map::ServiceChild {
             layer: 41,
@@ -338,6 +339,7 @@ fn anonymous_reads_never_borrow_a_groups_recorded_login() {
         name: "Imported".into(),
         url: format!("{origin}/ogc/collections"),
         kind: "ogcapi".into(),
+        anonymous: false,
         expanded: true,
         children: vec![rustgis_map::ServiceChild {
             layer: 42,
@@ -623,6 +625,215 @@ fn plugin_imports_never_acquire_a_later_connections_login() {
         }
     }
     rustgis_plugins::unload("eng-import-login-757");
+}
+
+#[test]
+fn plugin_service_groups_stay_anonymous_through_refresh_and_reopen() {
+    super::isolate_plugins();
+    for (plugin, import_map, auth) in [("eng-group-map-login-757", true, "basic"), ("eng-group-service-login-757", false, "header")] {
+        let origin = format!("https://{plugin}.example.org");
+        let url = format!("{origin}/collections");
+        let collections = |names: &[&str]| {
+            json!({"collections":names.iter().map(|name| json!({
+                "id":name,"title":name,
+                "links":[{"rel":"items","type":"application/geo+json","href":format!("{url}/{name}/items")}]
+            })).collect::<Vec<_>>()})
+            .to_string()
+        };
+        let responses = |plan: &Value| {
+            plan["layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|layer| {
+                    json!({
+                        "url":layer["offer"]["url"],
+                        "text":json!({"type":"FeatureCollection","features":[{
+                            "type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"collection":layer["name"]}
+                        }]}).to_string()
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut s = session(None);
+        super::plugin(plugin, &["edit", "network", "files"]);
+        if import_map {
+            let mut map = Project::default().map().clone();
+            map.name = "Plugin service groups".into();
+            let mut layer = rustgis_map::Layer::new(1, rustgis_data::Dataset::new("roads", rustgis_data::GeometryType::None, Vec::new()));
+            layer.dataset.source = Some(format!("{url}/roads/items"));
+            map.layers.push(layer);
+            map.service_groups = vec![
+                rustgis_map::ServiceGroup {
+                    id: 100,
+                    name: "Plugin".into(),
+                    url: url.clone(),
+                    kind: "ogcapi".into(),
+                    anonymous: false,
+                    expanded: true,
+                    children: vec![rustgis_map::ServiceChild { layer: 1, collection: "roads".into(), source_url: url.clone() }],
+                },
+                rustgis_map::ServiceGroup {
+                    id: 101,
+                    name: "Initially empty".into(),
+                    url: url.clone(),
+                    kind: "ogcapi".into(),
+                    anonymous: false,
+                    expanded: true,
+                    children: vec![],
+                },
+            ];
+            super::forward(&mut s, plugin, "map.import", json!({"text":serde_json::to_string(&map).unwrap()})).unwrap();
+        } else {
+            let plan = super::forward(
+                &mut s,
+                plugin,
+                "service.groupPlan",
+                json!({
+                    "url":url,"type":"ogcapi","text":collections(&["roads"])
+                }),
+            )
+            .unwrap();
+            super::forward(
+                &mut s,
+                plugin,
+                "service.import",
+                json!({
+                    "url":url,"type":"ogcapi","text":collections(&["roads"]),"responses":responses(&plan)
+                }),
+            )
+            .unwrap();
+        }
+        let group = s.map().service_groups[0].id;
+        let id = new(&mut s, json!({"kind":"ogcapi","address":url,"auth":auth,"user":"ana","keyName":"X-Key"}));
+        let login = if auth == "basic" {
+            json!({"id":id,"password":"group-import-sentinel-757"})
+        } else {
+            json!({"id":id,"apiKey":"group-import-sentinel-757"})
+        };
+        s.run("connection.login", &login).unwrap();
+        for g in &s.map().service_groups {
+            assert!(g.anonymous, "even a plugin-imported empty group needs provenance");
+        }
+        for group in s.map().service_groups.iter().map(|g| g.id).collect::<Vec<_>>() {
+            let source = s.run("service.groupPlan", &json!({"group":group,"sourceOnly":true})).unwrap();
+            let prepared = web::request_params(&mut s, &source).unwrap();
+            assert!(header(prepared["url"].as_str().unwrap()).is_none());
+        }
+        let assert_anonymous = |s: &mut Session| {
+            let source = s.run("service.groupPlan", &json!({"group":group,"sourceOnly":true,"connection":id})).unwrap();
+            assert_eq!(source["anonymous"], true);
+            assert!(source.get("connection").is_none());
+            // Exercise the consumer, not just the flag: it must not infer the saved login.
+            let prepared = web::request_params(s, &source).unwrap();
+            assert_eq!(prepared["url"], url);
+            assert!(header(prepared["url"].as_str().unwrap()).is_none());
+            let g = s.map().service_groups.iter().find(|g| g.id == group).unwrap();
+            assert!(g.anonymous);
+            assert!(header(&g.url).is_none());
+            for child in &g.children {
+                let layer = s.map().layer(child.layer).unwrap();
+                assert!(layer.anonymous && layer.connection.is_empty());
+                assert!(header(layer.dataset.source.as_deref().unwrap()).is_none());
+                assert!(header(&child.source_url).is_none());
+            }
+            assert_eq!(requests(s), json!([]));
+        };
+        assert_anonymous(&mut s);
+        for reopen in [false, true] {
+            if reopen {
+                let (text, _) = s.project.clone().saved_text(None).unwrap();
+                s.run("project.openText", &json!({"text":text})).unwrap();
+                s.run("connection.login", &login).unwrap();
+            }
+            let plan = s.run("service.groupPlan", &json!({"group":group,"text":collections(&["roads","water"])})).unwrap();
+            let prepared = web::request_params(&mut s, &plan["request"]).unwrap();
+            assert!(header(prepared["url"].as_str().unwrap()).is_none());
+            s.run(
+                "service.refresh",
+                &json!({
+                    "group":group,"text":collections(&["roads","water"]),"responses":responses(&plan)
+                }),
+            )
+            .unwrap();
+            assert_anonymous(&mut s);
+            let g = s.map().service_groups.iter().find(|g| g.id == group).unwrap();
+            assert_eq!(g.children.len(), 2);
+            assert!(g.children.iter().any(|c| c.collection == "water"));
+            for child in &g.children {
+                assert_eq!(s.map().layer(child.layer).unwrap().dataset.features.len(), 1);
+            }
+            let (text, _) = s.project.clone().saved_text(None).unwrap();
+            s.run("project.openText", &json!({"text":text})).unwrap();
+            s.run("connection.login", &login).unwrap();
+            assert_anonymous(&mut s);
+            // Removing every child must not erase the group's independent provenance.
+            s.run("service.refresh", &json!({"group":group,"text":collections(&[]),"responses":[]})).unwrap();
+            assert!(s.map().service_groups.iter().find(|g| g.id == group).unwrap().children.is_empty());
+            assert_anonymous(&mut s);
+        }
+        rustgis_plugins::unload(plugin);
+    }
+}
+
+#[test]
+fn refreshing_an_anonymous_child_does_not_adopt_or_anonymize_its_user_group() {
+    let mut s = session(None);
+    let url = "https://mixed-group757.example.org/collections";
+    let id = new(&mut s, json!({"kind":"ogcapi","address":url,"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"mixed-group-sentinel-757"})).unwrap();
+    let collections = ["roads", "water"].map(|name| {
+        json!({
+            "id":name,"title":name,"links":[{"rel":"items","type":"application/geo+json","href":format!("{url}/{name}/items")}]
+        })
+    });
+    let document = json!({"collections":collections}).to_string();
+    let features = r#"{"type":"FeatureCollection","features":[]}"#;
+    let responses = |plan: &Value| {
+        plan["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|layer| {
+                json!({
+                    "url":layer["offer"]["url"],"text":features
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let plan = s.run("service.groupPlan", &json!({"url":url,"type":"ogcapi","connection":id,"text":document})).unwrap();
+    let added = s
+        .run(
+            "service.import",
+            &json!({
+                "url":url,"type":"ogcapi","connection":id,"text":document,
+                "responses":responses(&plan)
+            }),
+        )
+        .unwrap();
+    let group = added["group"].clone();
+    let child = s.map().service_groups[0].children[0].layer;
+    let other = s.map().service_groups[0].children[1].layer;
+    s.map_mut().layer_mut(child).unwrap().anonymous = true;
+    s.map_mut().layer_mut(child).unwrap().connection.clear();
+    let source = s.run("service.groupPlan", &json!({"layer":child,"sourceOnly":true,"connection":id})).unwrap();
+    let prepared = web::request_params(&mut s, &source).unwrap();
+    assert!(header(prepared["url"].as_str().unwrap()).is_none());
+    let plan = s.run("service.groupPlan", &json!({"layer":child,"connection":id,"text":document})).unwrap();
+    s.run(
+        "service.refresh",
+        &json!({
+            "layer":child,"connection":id,"text":document,"responses":responses(&plan)
+        }),
+    )
+    .unwrap();
+    assert!(s.map().layer(child).unwrap().anonymous);
+    assert!(s.map().layer(child).unwrap().connection.is_empty());
+    assert!(header(s.map().layer(child).unwrap().dataset.source.as_deref().unwrap()).is_none());
+    assert!(!s.map().service_groups[0].anonymous, "the user's other children keep their login");
+    assert_eq!(s.map().layer(other).unwrap().connection, id);
+    let source = s.run("service.groupPlan", &json!({"group":group,"sourceOnly":true})).unwrap();
+    assert_eq!(header(source["url"].as_str().unwrap()).unwrap().1, "mixed-group-sentinel-757");
 }
 
 #[test]
