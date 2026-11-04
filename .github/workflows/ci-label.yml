@@ -23,7 +23,7 @@ jobs:
 
   plan:
     name: Platforms
-    if: startsWith(github.event.label.name, 'ci:')
+    if: github.event.action == 'labeled' && startsWith(github.event.label.name, 'ci:')
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.os.outputs.os }}
