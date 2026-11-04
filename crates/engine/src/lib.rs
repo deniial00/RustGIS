@@ -1015,11 +1015,17 @@ impl Session {
     /// requests the next is refused rather than silently dropping one already promised.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        if !self.url_requests.iter().any(|q| q == p) {
+        // The front end runs the queued request after the plugin's anonymous scope has ended.
+        // Keep its opt-out through probes, whole-file fallbacks and the eventual addDownload.
+        let mut p = std::borrow::Cow::Borrowed(p);
+        if self.web_logins.is_anonymous() {
+            p.to_mut().as_object_mut().ok_or("download parameters must be an object")?.insert("anonymous".into(), serde_json::json!(true));
+        }
+        if !self.url_requests.iter().any(|q| q == p.as_ref()) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }
-            self.url_requests.push(p.clone());
+            self.url_requests.push(p.into_owned());
         }
         self.request_only = true;
         Ok(serde_json::json!({"pending": true, "url": url}))
@@ -1200,12 +1206,19 @@ impl Session {
         self.merge = merge;
         // A layer added from a saved web-service connection records it, inside the command's step.
         let res = self.guarded(label, mutates, |s| {
-            let before = service_logins::before(s, id, params)?;
-            let out = run(s, params)?;
-            if let Some(before) = before {
-                service_logins::tag(s, params, before, &out)?;
+            let add = |s: &mut Session| {
+                let before = service_logins::before(s, id, params)?;
+                let out = run(s, params)?;
+                if let Some(before) = before {
+                    service_logins::tag(s, params, before, &out)?;
+                }
+                Ok(out)
+            };
+            if matches!(id, "layer.addUrl" | "layer.addDownload") && params.get("anonymous").and_then(Value::as_bool) == Some(true) {
+                service_logins::anonymously(s, true, add).unwrap_or_else(|_| Err(format!("{label} failed unexpectedly")))
+            } else {
+                add(s)
             }
-            Ok(out)
         });
         if id == "layer.addDownload"
             && res.is_ok()

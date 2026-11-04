@@ -508,7 +508,13 @@ fn plugins_cannot_send_a_saved_web_service_login() {
     }
     assert!(s.map().tiles.is_empty());
     // Not naming it, the only one at the origin isn't used for it either; the user's own command is.
-    super::forward(&mut s, "eng-login-757", "map.addTiles", json!({"url":tiles})).unwrap();
+    super::forward(
+        &mut s,
+        "eng-login-757",
+        "map.addTiles",
+        json!({"url":format!("{origin}/plugin/{{z}}/{{x}}/{{y}}.png"),"name":"Plugin"}),
+    )
+    .unwrap();
     assert!(header(&s.map().tiles[0].url).is_none());
     assert!(s.map().tiles[0].connection.is_empty());
     s.run("map.addTiles", &json!({"url":tiles,"name":"Mine"})).unwrap();
@@ -529,7 +535,154 @@ fn plugins_cannot_send_a_saved_web_service_login() {
     s.run("connection.login", &json!({"id":id,"apiKey":"plugin-sentinel-757"})).unwrap();
     let named = s.map().tiles.iter().find(|t| t.name == "Named").unwrap();
     assert_eq!(named.legends[0].url, elsewhere);
+    let plugin_tile = s.map().tiles.iter().find(|t| t.name == "Plugin").unwrap();
+    assert!(header(&plugin_tile.url).is_none(), "a later login must not adopt the plugin's tile");
+    assert!(plugin_tile.connection.is_empty());
+    assert_eq!(header(&named.url).unwrap().1, "plugin-sentinel-757", "the user's layer still uses its login");
+    let (saved, _) = s.project.clone().saved_text(None).unwrap();
+    s.run("project.openText", &json!({"text":saved})).unwrap();
+    s.run("connection.login", &json!({"id":id,"apiKey":"plugin-sentinel-757"})).unwrap();
+    let plugin_tile = s.map().tiles.iter().find(|t| t.name == "Plugin").unwrap();
+    assert!(header(&plugin_tile.url).is_none(), "saving and reopening must preserve anonymous reads");
+    assert!(plugin_tile.connection.is_empty());
     rustgis_plugins::unload("eng-login-757");
+}
+
+#[test]
+fn plugin_legends_are_refused_before_a_public_connection_gains_a_login() {
+    super::isolate_plugins();
+    let mut s = session(None);
+    let origin = "https://public-plugin757.example.org";
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"none"}));
+    s.run("map.addTiles", &json!({"url":format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),"name":"Public","connection":id})).unwrap();
+    super::plugin("eng-public-login-757", &["edit", "network", "files"]);
+    let error = super::forward(
+        &mut s,
+        "eng-public-login-757",
+        "map.setTiles",
+        json!({"name":"Public","legend":format!("{origin}/chosen-by-plugin.png")}),
+    )
+    .unwrap_err();
+    assert!(error.contains("plugins can't set a legend"), "{error}");
+    s.run("connection.edit", &json!({"id":id,"auth":"header","keyName":"X-Key"})).unwrap();
+    s.run("connection.login", &json!({"id":id,"apiKey":"later-sentinel-757"})).unwrap();
+    let tile = s.map().tiles.iter().find(|t| t.name == "Public").unwrap();
+    assert!(tile.legends.is_empty(), "no plugin path was stored for the new login to bind");
+    assert_eq!(header(&tile.url).unwrap().1, "later-sentinel-757");
+    rustgis_plugins::unload("eng-public-login-757");
+}
+
+#[test]
+fn plugin_imports_never_acquire_a_later_connections_login() {
+    super::isolate_plugins();
+    let mut s = session(None);
+    let origin = "https://import-plugin757.example.org";
+    let mut imported = Project::default().map().clone();
+    imported.name = "Plugin imports".into();
+    let mut tile = rustgis_map::TileLayer::new("Dates", rustgis_map::TileKind::Raster, format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"));
+    tile.time_url = Some(format!("{origin}/{{date:YYYY}}.png"));
+    tile.time_urls = vec![(1.0, format!("{origin}/dated.png"))];
+    tile.legends = vec![rustgis_data::ogc::Legend { url: format!("{origin}/legend.png"), ..Default::default() }];
+    imported.tiles.push(tile);
+    let mut layer = rustgis_map::Layer::new(1, rustgis_data::Dataset::new("Remote", rustgis_data::GeometryType::None, Vec::new()));
+    layer.dataset.source = Some(format!("{origin}/data.geojson"));
+    layer.source = Some(serde_json::from_value(json!({"path":format!("{origin}/source.fgb")})).unwrap());
+    layer.raster = Some(serde_json::from_value(json!({"path":format!("{origin}/raster.tif"),"style":{"renderer":"Colormap"}})).unwrap());
+    imported.layers.push(layer);
+    super::plugin("eng-import-login-757", &["edit", "network", "files"]);
+    super::forward(&mut s, "eng-import-login-757", "map.import", json!({"text":serde_json::to_string(&imported).unwrap()})).unwrap();
+    // Identify metadata is runtime-only; it belongs to the same anonymous tile.
+    s.project.map_mut().tiles[0].feature_info =
+        Some(rustgis_data::ogc::FeatureInfo { url: format!("{origin}/identify"), ..Default::default() });
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    for reopened in [false, true] {
+        if reopened {
+            let (text, _) = s.project.clone().saved_text(None).unwrap();
+            s.run("project.openText", &json!({"text":text})).unwrap();
+        }
+        s.run("connection.login", &json!({"id":id,"apiKey":"import-sentinel-757"})).unwrap();
+        let map = s.map();
+        let tile = &map.tiles[0];
+        assert!(tile.connection.is_empty());
+        for address in std::iter::once(tile.url.as_str())
+            .chain(tile.time_url.as_deref())
+            .chain(tile.time_urls.iter().map(|(_, url)| url.as_str()))
+            .chain(tile.legends.iter().map(|legend| legend.url.as_str()))
+            .chain(tile.feature_info.as_ref().map(|info| info.url.as_str()))
+        {
+            assert!(header(address).is_none(), "plugin tile acquired a login: {address}");
+        }
+        let layer = &map.layers[0];
+        assert!(layer.connection.is_empty());
+        for address in [
+            layer.dataset.source.as_deref().unwrap(),
+            layer.source.as_ref().unwrap().path.as_deref().unwrap(),
+            layer.raster.as_ref().unwrap().path.as_deref().unwrap(),
+        ] {
+            assert!(header(address).is_none(), "plugin layer acquired a login: {address}");
+        }
+    }
+    rustgis_plugins::unload("eng-import-login-757");
+}
+
+#[test]
+fn plugin_downloads_stay_anonymous_after_the_front_end_adds_them() {
+    super::isolate_plugins();
+    let mut s = session(None);
+    let origin = "https://deferred-plugin757.example.org";
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"deferred-sentinel-757"})).unwrap();
+    super::plugin("eng-deferred-login-757", &["edit", "network", "files"]);
+    s.run_leaving_downloads(
+        "plugin:eng-deferred-login-757/f",
+        &json!({
+            "op":"layer.addUrl","params":{"url":format!("{origin}/roads.geojson"),"name":"Deferred","anonymous":false}
+        }),
+    )
+    .unwrap();
+    let mut pending = s.take_url_requests().pop().unwrap();
+    // ui.addUrl binds/probes after the plugin has returned. It must still fetch anonymously.
+    let prepared = web::request_params(&mut s, &pending).unwrap().into_owned();
+    assert!(header(prepared["url"].as_str().unwrap()).is_none());
+    let token = s.download_started();
+    assert!(s.download_landed(token, br#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}]}"#.to_vec()));
+    pending["id"] = json!(token);
+    pending["service"] = json!(true);
+    s.run("layer.addDownload", &pending).unwrap();
+    s.run("layer.addUrl", &json!({"url":format!("{origin}/deferred.pmtiles"),"anonymous":true,"name":"Archive"})).unwrap();
+    s.run("connection.login", &json!({"id":id,"apiKey":"deferred-sentinel-757"})).unwrap();
+    let layer = s.map().layers.iter().find(|l| l.name == "Deferred").unwrap();
+    assert!(layer.connection.is_empty());
+    assert!(header(layer.dataset.source.as_deref().unwrap()).is_none());
+    let tile = s.map().tiles.iter().find(|t| t.name == "Archive").unwrap();
+    assert!(tile.connection.is_empty());
+    assert!(header(&tile.url).is_none());
+    rustgis_plugins::unload("eng-deferred-login-757");
+}
+
+#[test]
+fn plugin_legends_on_unconnected_layers_never_acquire_a_login() {
+    super::isolate_plugins();
+    let mut s = session(None);
+    let origin = "https://unconnected-plugin757.example.org";
+    s.run("map.addTiles", &json!({"url":format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),"name":"Unconnected"})).unwrap();
+    super::plugin("eng-unconnected-login-757", &["edit", "network", "files"]);
+    super::forward(
+        &mut s,
+        "eng-unconnected-login-757",
+        "map.setTiles",
+        json!({
+            "name":"Unconnected","legend":format!("{origin}/plugin-legend.png")
+        }),
+    )
+    .unwrap();
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"unconnected-sentinel-757"})).unwrap();
+    let tile = s.map().tiles.iter().find(|t| t.name == "Unconnected").unwrap();
+    assert!(tile.connection.is_empty());
+    assert!(header(&tile.url).is_none());
+    assert!(header(&tile.legends[0].url).is_none());
+    rustgis_plugins::unload("eng-unconnected-login-757");
 }
 
 #[test]

@@ -2626,7 +2626,7 @@ impl RustGisApp {
                 if p.get("zoom").and_then(Value::as_bool) == Some(true) {
                     q["zoom"] = json!(true);
                 }
-                for k in ["service", "coverage"] {
+                for k in ["service", "coverage", "anonymous"] {
                     if p.get(k).and_then(Value::as_bool) == Some(true) {
                         q[k] = json!(true);
                     }
@@ -4478,6 +4478,53 @@ mod record_tests {
         assert!(app.session.notices.iter().any(|n| n.text.contains("session only")));
         app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456"}), None);
         assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_anonymous_download_never_acquires_a_saved_login() {
+        use rustgis_engine::render::rustgis_tiles::{cache, logins};
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", server.local_addr().unwrap());
+        let reply = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let body = br#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/geo+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let mut app = RustGisApp::with_sample();
+        let id = app
+            .run("connection.new", json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Ui-Key"}))
+            .unwrap()["id"]
+            .clone();
+        app.run("connection.login", json!({"id":id,"apiKey":"ui-sentinel-757","allowInsecure":true})).unwrap();
+        app.run("ui.addUrl", json!({"url":format!("{origin}/roads.geojson"),"name":"Anonymous download","service":true,"anonymous":true}))
+            .unwrap();
+        cache::wait(std::time::Duration::from_secs(5));
+        app.poll_data_downloads();
+        crate::serviceui::poll_pages(&mut app, &egui::Context::default());
+        assert!(!reply.join().unwrap().to_ascii_lowercase().contains("x-ui-key:"));
+        app.run("connection.login", json!({"id":id,"apiKey":"ui-sentinel-757","allowInsecure":true})).unwrap();
+        let layer = app.session.map().layers.iter().find(|layer| layer.name == "Anonymous download").unwrap();
+        assert!(layer.connection.is_empty());
+        assert!(logins::apply(layer.dataset.source.as_deref().unwrap()).unwrap().is_none());
     }
 }
 

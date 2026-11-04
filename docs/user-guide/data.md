@@ -827,6 +827,11 @@ to make one for its address. `connection.list` reports these as `loginRequests` 
 CLI and Python use the same session-only `connection.login` commands. ArcGIS sign-in and tokens
 keep their own [ArcGIS sign-in](#web-data). A login ends with the session that made it.
 Unbound fetches never adopt another session's service login.
+Layers added by plugins stay anonymous, including after saving and reopening a project or adding
+a saved connection later. To use a connection's login, add the layer yourself through that connection.
+A plugin cannot set a same-origin legend on a layer tied to a saved connection, even when that
+connection is currently public. If it changes the legends of an unconnected tile layer, that
+layer stays anonymous too.
 
 ## Large files
 

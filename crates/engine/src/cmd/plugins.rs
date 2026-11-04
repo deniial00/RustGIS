@@ -560,8 +560,18 @@ impl Bridge<'_> {
         self.s.request_only = false;
         // No saved web-service login goes with what a plugin asks for: the user chooses where it is sent.
         let anonymous = self.s.web_logins.set_anonymous(true);
-        let mut res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self.s, params)))
-            .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly")));
+        let mut res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let before = if mutates { crate::service_logins::before(self.s, id, params)? } else { None };
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self.s, params)))
+                .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly")));
+            // Mark additions even when a command reports an error after changing the project.
+            // Their addresses must remain anonymous at later logins and after saving/reopening.
+            if let Some(before) = before {
+                crate::service_logins::tag(self.s, params, before, out.as_ref().unwrap_or(&Value::Null))?;
+            }
+            out
+        }))
+        .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly")));
         self.s.web_logins.set_anonymous(anonymous);
         let requested = std::mem::take(&mut self.s.request_only);
         self.requested |= requested;

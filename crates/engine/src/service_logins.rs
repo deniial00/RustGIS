@@ -259,13 +259,10 @@ pub(crate) fn bind_logged_in(s: &Session, connection: &str, url: &str) -> Result
     if !at_origin || rustgis_data::login_address::is_wrapper(url) {
         return Ok(url.to_string());
     }
-    // A plugin's command reads anonymously, and a legend it left here would be bound at the
-    // connection's next login: refused, as naming the connection is (a public one lends none).
+    // Even a public connection can gain a login later. A plugin must not leave a legend for
+    // that login to bind.
     if s.web_logins.is_anonymous() {
-        if c.auth.is_empty() {
-            return Ok(url.to_string());
-        }
-        return Err(format!("plugins can't set a legend at the address of a web-service connection with a login ('{}')", c.name));
+        return Err(format!("plugins can't set a legend at the address of a saved web-service connection ('{}')", c.name));
     }
     if !logged_in(s, c) {
         return Ok(url.to_string());
@@ -357,7 +354,7 @@ pub fn request_params<'a>(s: &mut Session, p: &'a Value) -> Result<std::borrow::
         Some(Value::String(id)) => Some(id.as_str()),
         Some(_) => return Err("connection is a saved web-service connection id.".into()),
     };
-    if id.is_none() && s.web_logins.anonymous {
+    if id.is_none() && (s.web_logins.anonymous || p.get("anonymous").and_then(Value::as_bool) == Some(true)) {
         // An address bound to a login is no authority for it here either.
         let plain = logins::inner(url);
         if plain == url {
@@ -425,7 +422,7 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
         }
     };
     for m in &mut s.project.maps {
-        for t in m.tiles.iter_mut().filter(|t| t.connection == c.id) {
+        for t in m.tiles.iter_mut().filter(|t| !t.anonymous && t.connection == c.id) {
             rewrite(&mut t.url);
             if let Some(url) = &mut t.time_url {
                 rewrite(url);
@@ -440,7 +437,7 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
                 rewrite(&mut info.url);
             }
         }
-        for l in m.layers.iter_mut().filter(|l| l.connection == c.id) {
+        for l in m.layers.iter_mut().filter(|l| !l.anonymous && l.connection == c.id) {
             if let Some(source) = l.source.as_mut()
                 && let Some(path) = source.path.as_mut()
             {
@@ -483,7 +480,7 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
 fn record_choice(s: &mut Session, origin: &str, old: &str, c: &Connection) {
     for m in &mut s.project.maps {
         for t in &mut m.tiles {
-            if t.connection == old && logins::origin(tile_address(&t.url)).as_deref() == Some(origin) {
+            if !t.anonymous && t.connection == old && logins::origin(tile_address(&t.url)).as_deref() == Some(origin) {
                 t.connection = c.id.clone();
             }
         }
@@ -494,7 +491,9 @@ fn record_choice(s: &mut Session, origin: &str, old: &str, c: &Connection) {
             .flat_map(|g| g.children.iter().map(|child| child.layer))
             .collect();
         for l in &mut m.layers {
-            if l.connection == old && (layer_address(l).and_then(logins::origin).as_deref() == Some(origin) || group_layers.contains(&l.id))
+            if !l.anonymous
+                && l.connection == old
+                && (layer_address(l).and_then(logins::origin).as_deref() == Some(origin) || group_layers.contains(&l.id))
             {
                 l.connection = c.id.clone();
             }
@@ -516,7 +515,7 @@ struct Reads {
 fn reads(s: &Session) -> BTreeMap<(String, String), Reads> {
     let mut out = BTreeMap::<(String, String), Reads>::new();
     for (map_index, m) in s.project.maps.iter().enumerate() {
-        for t in &m.tiles {
+        for t in m.tiles.iter().filter(|t| !t.anonymous) {
             let Some(origin) = logins::origin(tile_address(&t.url)) else { continue };
             let r = out.entry((origin, t.connection.clone())).or_default();
             r.tiles += 1;
@@ -524,7 +523,7 @@ fn reads(s: &Session) -> BTreeMap<(String, String), Reads> {
                 r.recorded.insert(t.connection.clone());
             }
         }
-        for l in &m.layers {
+        for l in m.layers.iter().filter(|l| !l.anonymous) {
             let Some(origin) = layer_address(l).and_then(logins::origin) else { continue };
             let r = out.entry((origin, l.connection.clone())).or_default();
             if r.layer_keys.insert((map_index, l.id)) {
@@ -539,7 +538,11 @@ fn reads(s: &Session) -> BTreeMap<(String, String), Reads> {
         for g in &m.service_groups {
             let Some(origin) = logins::origin(&g.url) else { continue };
             for child in &g.children {
-                let id = m.layers.iter().find(|l| l.id == child.layer).map(|l| l.connection.as_str()).unwrap_or("");
+                let layer = m.layers.iter().find(|l| l.id == child.layer);
+                if layer.is_some_and(|l| l.anonymous) {
+                    continue;
+                }
+                let id = layer.map(|l| l.connection.as_str()).unwrap_or("");
                 let r = out.entry((origin.clone(), id.to_string())).or_default();
                 if r.layer_keys.insert((map_index, child.layer)) {
                     r.layers.push(child.layer);
@@ -559,6 +562,11 @@ fn reads(s: &Session) -> BTreeMap<(String, String), Reads> {
 /// recorded connection this computer doesn't have are asked about ([`LoginRequest`]), never
 /// guessed.
 pub(crate) fn resolve(s: &mut Session, only: Option<&BTreeSet<String>>) {
+    // Imports and nested commands a plugin runs must not adopt a login before their additions
+    // have been marked anonymous at the plugin boundary.
+    if s.web_logins.is_anonymous() {
+        return;
+    }
     let mut pending = Vec::new();
     let mut touched = BTreeSet::new();
     for ((origin, recorded_id), r) in reads(s) {
@@ -712,11 +720,11 @@ fn ask(s: &mut Session, request: LoginRequest) {
     s.database_logins.request(request);
 }
 
-/// What the project held before an add command: its layers by id and its tile layers, so the
+/// What the project held before an add command: its layers by live identity and its tile layers, so the
 /// ones the command added can be told apart.
 pub(crate) struct Before {
-    layers: Vec<BTreeSet<u32>>,
-    tiles: Vec<Vec<(String, String)>>,
+    layers: Vec<BTreeSet<u64>>,
+    tiles: Vec<Vec<(String, String, Vec<String>)>>,
 }
 
 /// The connection an add command names (its `connection`), checked before it runs: a saved
@@ -743,21 +751,39 @@ fn named(s: &Session, params: &Value) -> Result<Option<Connection>, String> {
 /// What to compare after command `id` runs, if it adds layers; an error for a `connection` that
 /// isn't a saved web-service connection's id.
 pub(crate) fn before(s: &Session, id: &str, params: &Value) -> Result<Option<Before>, String> {
-    if !ADD_COMMANDS.contains(&id) {
+    let anonymous = s.web_logins.is_anonymous();
+    if !anonymous && !ADD_COMMANDS.contains(&id) {
         return Ok(None);
     }
-    named(s, params)?;
+    if !anonymous {
+        named(s, params)?;
+    }
     Ok(Some(Before {
-        layers: s.project.maps.iter().map(|m| m.layers.iter().map(|l| l.id).collect()).collect(),
-        tiles: s.project.maps.iter().map(|m| m.tiles.iter().map(|t| (t.url.clone(), t.name.clone())).collect()).collect(),
+        layers: s.project.maps.iter().map(|m| m.layers.iter().map(|l| l.instance_id()).collect()).collect(),
+        tiles: s
+            .project
+            .maps
+            .iter()
+            .map(|m| {
+                m.tiles
+                    .iter()
+                    .map(|t| {
+                        let legends = if anonymous { t.legends.iter().map(|legend| legend.url.clone()).collect() } else { Vec::new() };
+                        (t.url.clone(), t.name.clone(), legends)
+                    })
+                    .collect()
+            })
+            .collect(),
     }))
 }
 
 /// Records on the layers an add command made the connection they came from: the one it names
 /// (`connection`) for those read from its origin or holding no address, else the one whose login
 /// their origin is read with. Then logs in for their origins as a project's layers do.
+/// Anonymous plugin additions instead keep a persisted opt-out from all later login adoption.
 pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) -> Result<(), String> {
-    let named = named(s, params)?;
+    let anonymous = s.web_logins.is_anonymous();
+    let named = if anonymous { None } else { named(s, params)? };
     let named_origin = named.as_ref().and_then(login_origin);
     let mut origins = BTreeSet::new();
     // The connection a layer of `origin` (none: it holds no address) records.
@@ -776,12 +802,26 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
             (None, None) => None,
         }
     };
+    let mut old_tiles = before.tiles.into_iter();
     for (i, m) in s.project.maps.iter_mut().enumerate() {
-        let mut old = before.tiles.get(i).cloned().unwrap_or_default();
+        let mut old = old_tiles.next().unwrap_or_default();
         for t in &mut m.tiles {
             // Tile layers have no id: those not there before (each old one matched once).
-            if let Some(at) = old.iter().position(|(url, name)| *url == t.url && *name == t.name) {
-                old.swap_remove(at);
+            if let Some(at) = old.iter().position(|(url, name, _)| *url == t.url && (anonymous || *name == t.name)) {
+                let (_, _, legends) = old.swap_remove(at);
+                // An unconnected user layer may be adopted later too. A plugin changing its
+                // legends must not leave a path for that future login to bind.
+                if anonymous
+                    && t.connection.is_empty()
+                    && !legends.iter().map(String::as_str).eq(t.legends.iter().map(|legend| legend.url.as_str()))
+                {
+                    t.anonymous = true;
+                }
+                continue;
+            }
+            if anonymous {
+                t.anonymous = true;
+                t.connection.clear();
                 continue;
             }
             let origin = logins::origin(tile_address(&t.url));
@@ -792,8 +832,13 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
         }
         let old_layers = before.layers.get(i);
         let mut added = BTreeSet::new();
-        for l in m.layers.iter_mut().filter(|l| old_layers.is_none_or(|old| !old.contains(&l.id))) {
+        for l in m.layers.iter_mut().filter(|l| old_layers.is_none_or(|old| !old.contains(&l.instance_id()))) {
             added.insert(l.id);
+            if anonymous {
+                l.anonymous = true;
+                l.connection.clear();
+                continue;
+            }
             let origin = layer_address(l).or(l.dataset.source.as_deref()).and_then(logins::origin);
             if let Some(id) = pick(origin.as_ref()).filter(|_| named.is_some() || l.connection.is_empty()) {
                 l.connection = id;
@@ -803,7 +848,7 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
             }
         }
         // An imported service's group is refreshed from its address later.
-        for g in m.service_groups.iter().filter(|g| g.children.iter().any(|c| added.contains(&c.layer))) {
+        for g in m.service_groups.iter().filter(|g| !anonymous && g.children.iter().any(|c| added.contains(&c.layer))) {
             origins.extend(logins::origin(&g.url));
         }
     }
@@ -814,6 +859,11 @@ pub(crate) fn tag(s: &mut Session, params: &Value, before: Before, out: &Value) 
         && tile_kinds.contains(&kind)
         && let Some(t) = usize::try_from(at).ok().and_then(|at| s.project.map_mut().tiles.get_mut(at))
     {
+        if anonymous {
+            t.anonymous = true;
+            t.connection.clear();
+            return Ok(());
+        }
         let origin = logins::origin(tile_address(&t.url));
         if let Some(id) = pick(origin.as_ref()) {
             t.connection = id;

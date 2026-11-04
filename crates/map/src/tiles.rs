@@ -184,6 +184,10 @@ pub struct TileLayer {
     /// address. Empty for a layer that came from no connection. Never a secret.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub connection: String,
+    /// Added by an anonymous plugin command: none of its addresses may acquire a saved
+    /// web-service login, including after saving and reopening the project.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub anonymous: bool,
     /// Picked in the Layers pane (`map.selectTiles`), for the session only: it holds while no
     /// map layer is active (the engine's `Session::selected_tile`).
     #[serde(skip)]
@@ -378,6 +382,7 @@ impl TileLayer {
             feature_info: None,
             legends: Vec::new(),
             connection: String::new(),
+            anonymous: false,
             expanded: false,
             selected: false,
             single_image: false,

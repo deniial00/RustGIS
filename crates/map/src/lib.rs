@@ -217,6 +217,10 @@ pub struct Layer {
     /// connection. Never a secret.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub connection: String,
+    /// Added by an anonymous plugin command: never adopt a saved web-service login, including
+    /// after saving and reopening the project.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anonymous: bool,
     /// Process-local identity, preserved by snapshots but never stored in a project.
     #[serde(skip, default = "next_layer_instance")]
     instance_id: u64,
@@ -410,6 +414,7 @@ impl Layer {
             postgis: None,
             gpkg: None,
             connection: String::new(),
+            anonymous: false,
             projected: Default::default(),
             display: None,
             display_rejected: Vec::new(),
