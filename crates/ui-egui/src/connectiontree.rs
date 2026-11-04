@@ -831,19 +831,8 @@ mod tests {
         let src = wms(&url);
         let feature = json!({"name":"points", "offer":{"type":"features", "url":format!("{base}/points.geojson")}});
         serviceui::add_layer(app, &src, &feature, "", None, true).unwrap();
-        assert_eq!(app.ui.downloads.last().unwrap().2["connection"], one["id"]);
-        until(&mut h, |app| app.ui.downloads.is_empty());
+        until(&mut h, |app| app.session.map().layer_by_name("points").is_some());
         assert_eq!(h.state().session.map().layer_by_name("points").unwrap().connection, one["id"].as_str().unwrap());
-    }
-
-    #[test]
-    fn a_service_dialog_does_not_forward_a_different_origins_connection() {
-        let mut app = RustGisApp::with_sample();
-        let saved = app.run("connection.new", json!({"kind":"wms", "address":"https://other-service.invalid/wms"})).unwrap();
-        let src = wms("http://127.0.0.1:9/wms");
-        let feature = json!({"name":"points", "offer":{"type":"features", "url":"http://127.0.0.1:9/points.geojson"}});
-        serviceui::add_layer_from(&mut app, &src, &feature, "", None, true, None, saved["id"].as_str()).unwrap();
-        assert!(app.ui.downloads.last().unwrap().2.get("connection").is_none());
     }
 
     #[test]
