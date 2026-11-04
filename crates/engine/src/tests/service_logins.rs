@@ -34,6 +34,234 @@ fn requests(s: &mut Session) -> Value {
     s.run("connection.list", &Value::Null).unwrap()["loginRequests"].clone()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct LoginFile {
+    base: String,
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl LoginFile {
+    fn new(body: Vec<u8>) -> Self {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stopping, log) = (stop.clone(), requests.clone());
+        let worker = std::thread::spawn(move || {
+            while !stopping.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(stream) => stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while request.len() < 32768 && !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let cap = chunk.len().min(32768 - request.len());
+                    match stream.read(&mut chunk[..cap]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let authorized = request.to_ascii_lowercase().contains("\r\nx-key: fixture-login-757\r\n")
+                    || request.split_whitespace().nth(1).is_some_and(|p| p.starts_with("/public"));
+                log.lock().unwrap().push(request);
+                let (status, bytes) = if authorized { ("200 OK", body.as_slice()) } else { ("401 Unauthorized", &[][..]) };
+                let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+                let _ = stream.write_all(bytes);
+            }
+        });
+        Self { base, requests, stop, worker: Some(worker) }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for LoginFile {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_reopened_http_raster_recovers_its_pixels_after_login_without_reloading_unchanged_paths() {
+    let bytes = rustgis_data::raster::cog::example(256, 256);
+    let pixels = rustgis_data::raster::read_bytes("scene.tif", &bytes).unwrap();
+    let server = LoginFile::new(bytes);
+    let mut seed = session(None);
+    let id = new(&mut seed, json!({"kind":"ogcapi","address":format!("{}/collections",server.base),"auth":"header","keyName":"X-Key"}));
+    seed.run("connection.login", &json!({"id":id,"apiKey":"fixture-login-757","allowInsecure":true})).unwrap();
+    let mut layer = rustgis_map::Layer::new(1, rustgis_data::Dataset::new("Secured raster", rustgis_data::GeometryType::None, Vec::new()));
+    layer.connection = id.clone();
+    layer.raster = Some(rustgis_map::RasterLayer::from_path(pixels, bound(&mut seed, &id, &format!("{}/scene.tif", server.base))));
+    layer.transparency = 0.25;
+    let style = serde_json::to_value(&layer.raster.as_ref().unwrap().style).unwrap();
+    seed.map_mut().layers.push(layer);
+    let text = seed.project.saved_text(None).unwrap().0;
+    let mut reopened = session(None);
+    reopened.connections = crate::connections::Connections::from_json(&seed.connections.to_json());
+    reopened.run("project.openText", &json!({"text":text})).unwrap();
+    assert!(reopened.map().layers[0].raster.as_ref().unwrap().data.is_none());
+    assert_eq!(requests(&mut reopened)[0]["reason"], "password");
+    let from = server.requests.lock().unwrap().len();
+    reopened.run("connection.login", &json!({"id":id,"apiKey":"fixture-login-757","allowInsecure":true})).unwrap();
+    let view = rustgis_geom::Extent::new(-180.0, -85.0, 180.0, 85.0);
+    let scale = reopened.map().scale();
+    let start = std::time::Instant::now();
+    while reopened.map_mut().sync_sources(&view, scale, false) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(30), "raster recovery timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let layer = &reopened.map().layers[0];
+    let raster = layer.raster.as_ref().unwrap();
+    let pixels = raster.data.as_ref().expect("login must restart the failed raster read");
+    assert_eq!((pixels.width, pixels.height), (256, 256));
+    assert!(raster.error.is_none(), "{:?}", raster.error);
+    assert_eq!(layer.transparency, 0.25);
+    assert_eq!(serde_json::to_value(&raster.style).unwrap(), style);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests[from..].len(), 1);
+    assert!(requests[from].to_ascii_lowercase().contains("\r\nx-key: fixture-login-757\r\n"));
+    drop(requests);
+    let pixels = pixels.clone();
+    let count = server.requests.lock().unwrap().len();
+    for _ in 0..3 {
+        web::resolve(&mut reopened, None);
+        assert!(!reopened.map_mut().sync_sources(&view, scale, false));
+    }
+    assert!(Arc::ptr_eq(&pixels, reopened.map().layers[0].raster.as_ref().unwrap().data.as_ref().unwrap()));
+    assert_eq!(server.requests.lock().unwrap().len(), count);
+}
+
+#[test]
+fn a_reopened_dated_tile_authenticates_its_recorded_origin_not_the_displayed_foreign_origin() {
+    let (a_origin, b_origin) = ("https://dates-a757.example.org", "https://dates-b757.example.org");
+    let mut seed = session(None);
+    let a = new(&mut seed, json!({"kind":"wmts","address":a_origin,"auth":"header","keyName":"X-Key"}));
+    let b = new(&mut seed, json!({"kind":"wmts","address":b_origin,"auth":"header","keyName":"X-Key"}));
+    let mut tile = rustgis_map::TileLayer::new("Dates", rustgis_map::TileKind::Raster, format!("{b_origin}/b/{{z}}/{{x}}/{{y}}.png"));
+    tile.connection = a.clone();
+    tile.time_urls = vec![(1704067200000.0, format!("{a_origin}/a/{{z}}/{{x}}/{{y}}.png")), (1704153600000.0, tile.url.clone())];
+    seed.map_mut().tiles.push(tile);
+    seed.run("time.set", &json!({"dates":["2024-01-01","2024-01-02"],"date":"2024-01-02"})).unwrap();
+    let text = seed.project.saved_text(None).unwrap().0;
+    let mut reopened = session(None);
+    reopened.connections = crate::connections::Connections::from_json(&seed.connections.to_json());
+    reopened.run("connection.login", &json!({"id":b,"apiKey":"dated-b-757"})).unwrap();
+    reopened.run("project.openText", &json!({"text":text})).unwrap();
+    let pending = requests(&mut reopened);
+    assert_eq!(pending.as_array().unwrap().len(), 1, "{pending}");
+    assert_eq!(pending[0]["origin"], a_origin);
+    assert_eq!(pending[0]["connections"], json!([a]));
+    assert_eq!(pending[0]["layers"], 1, "the dated addresses count as one tile");
+    assert!(header(&reopened.map().tiles[0].url).is_none());
+    reopened.run("connection.login", &json!({"id":a,"apiKey":"dated-a-757"})).unwrap();
+    assert_eq!(requests(&mut reopened), json!([]));
+    assert!(header(&reopened.map().tiles[0].url).is_none(), "B stays anonymous even with B logged in");
+    reopened.run("time.set", &json!({"date":"2024-01-01"})).unwrap();
+    assert_eq!(header(&reopened.map().tiles[0].url).unwrap().1, "dated-a-757");
+    reopened.run("time.set", &json!({"date":"2024-01-02"})).unwrap();
+    assert!(header(&reopened.map().tiles[0].url).is_none());
+    assert_eq!(reopened.map().tiles[0].connection, a);
+}
+
+#[test]
+fn a_missing_dated_tiles_connection_asks_only_about_its_displayed_origin() {
+    let mut s = session(None);
+    let b = new(&mut s, json!({"kind":"wmts","address":"https://missing-dates-b757.example.org","auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":b,"apiKey":"missing-b-757"})).unwrap();
+    let mut p = Project::default();
+    let mut tile = rustgis_map::TileLayer::new(
+        "Unknown dates",
+        rustgis_map::TileKind::Raster,
+        "https://missing-dates-b757.example.org/b/{z}/{x}/{y}.png",
+    );
+    tile.connection = "gone".into();
+    tile.time_urls =
+        vec![(1704067200000.0, "https://missing-dates-a757.example.org/a/{z}/{x}/{y}.png".into()), (1704153600000.0, tile.url.clone())];
+    p.map_mut().tiles.push(tile);
+    let mut seed = Session::new(p);
+    seed.run("time.set", &json!({"dates":["2024-01-01","2024-01-02"],"date":"2024-01-02"})).unwrap();
+    let text = seed.project.saved_text(None).unwrap().0;
+    s.run("project.openText", &json!({"text":text})).unwrap();
+    let pending = requests(&mut s);
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+    assert_eq!(pending[0]["reason"], "connection");
+    assert_eq!(pending[0]["origin"], "https://missing-dates-b757.example.org");
+    assert!(header(&s.map().tiles[0].url).is_none());
+    assert_eq!(s.map().tiles[0].connection, "gone");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_oversized_ogc_items_binding_is_refused_before_native_fetch() {
+    use crate::render::rustgis_tiles::cache;
+    let server = LoginFile::new(br#"{"type":"FeatureCollection","features":[]}"#.to_vec());
+    let public = LoginFile::new(b"public".to_vec());
+    let mut s = session(None);
+    let id = new(&mut s, json!({"kind":"ogcapi","address":format!("{}/collections",server.base),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"fixture-login-757","allowInsecure":true})).unwrap();
+    let address = bound(&mut s, &id, &format!("{}/collections", server.base));
+    let long = format!("{}/items?filter={}&limit=10&f=json", server.base, "a".repeat(17000));
+    let document = serde_json::to_vec(&json!({"collections":[
+        {"id":"long","links":[{"rel":"items","type":"application/geo+json","href":long}]},
+        {"id":"valid","links":[{"rel":"items","type":"application/geo+json","href":format!("{}/items?limit=10",server.base)}]},
+        {"id":"foreign","links":[{"rel":"items","type":"application/geo+json","href":format!("{}/public?limit=10",public.base)}]}
+    ]}))
+    .unwrap();
+    let service = rustgis_data::ogc::parse(&address, &document).unwrap();
+    let items = |id: &str| match &service.layers.iter().find(|l| l.name == id).unwrap().offer {
+        rustgis_data::ogc::Offer::Features { url } => url.as_str(),
+        _ => panic!("feature offer"),
+    };
+    let oversized = items("long");
+    assert!(rustgis_data::login_address::is_wrapper(oversized));
+    assert!(rustgis_data::login_address::parse(oversized).is_err());
+    assert!(cache::download_blocking(oversized).is_err());
+    assert!(server.requests.lock().unwrap().is_empty(), "an oversized binding must never fetch anonymously");
+    assert!(cache::download_blocking(items("valid")).is_ok());
+    assert!(server.requests.lock().unwrap()[0].to_ascii_lowercase().contains("\r\nx-key: fixture-login-757\r\n"));
+    assert!(!rustgis_data::login_address::is_wrapper(items("foreign")));
+    assert_eq!(cache::download_blocking(items("foreign")).unwrap(), b"public");
+    assert!(!public.requests.lock().unwrap()[0].to_ascii_lowercase().contains("\r\nx-key:"));
+}
+
+#[test]
+fn failed_same_origin_rebinding_keeps_the_old_address_and_reports_its_count() {
+    let mut s = session(None);
+    let origin = "https://rebind-limit757.example.org";
+    let id = new(&mut s, json!({"kind":"wmts","address":origin,"auth":"header","keyName":"X-Key"}));
+    let long = format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png?filter={}", "a".repeat(17000));
+    let mut tile = rustgis_map::TileLayer::new("Long", rustgis_map::TileKind::Raster, &long);
+    tile.connection = id.clone();
+    s.map_mut().tiles.push(tile);
+    let mark = s.notice_mark();
+    s.run("connection.login", &json!({"id":id,"apiKey":"rebind-limit-757"})).unwrap();
+    assert_eq!(s.map().tiles[0].url, long);
+    let notices = s.notices_since(mark);
+    assert_eq!(notices.len(), 1);
+    let counts: Vec<usize> = notices[0].text.split_whitespace().filter_map(|word| word.parse().ok()).collect();
+    assert_eq!(counts, [1], "count failed rebinding without treating foreign-origin anonymity as an error");
+    s.map_mut().tiles[0].url = "https://foreign-rebind757.example.org/tiles/{z}/{x}/{y}.png".into();
+    let mark = s.notice_mark();
+    s.run("connection.login", &json!({"id":id,"apiKey":"rebind-limit-757"})).unwrap();
+    assert!(s.notices_since(mark).is_empty());
+}
+
 #[test]
 fn web_login_goes_only_to_its_connections_origin() {
     let mut s = session(None);

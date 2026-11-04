@@ -190,7 +190,8 @@ fn clear_cache() {
 
 /// Replaces only this connection's binding, after the complete new credential has validated.
 /// Other sessions and other connections at this origin retain their own bindings.
-pub(crate) fn activate(s: &mut Session, c: &Connection, secret: Option<&Secret>, insecure: bool) -> Result<(), String> {
+/// Returns the number of addresses that could not be rebound; resolution reports it once.
+pub(crate) fn activate(s: &mut Session, c: &Connection, secret: Option<&Secret>, insecure: bool) -> Result<usize, String> {
     let origin = login_origin(c).ok_or(NO_ORIGIN)?;
     let next = match secret.and_then(|secret| method(c, secret.expose())) {
         Some((method, value)) => {
@@ -203,21 +204,22 @@ pub(crate) fn activate(s: &mut Session, c: &Connection, secret: Option<&Secret>,
     if let Some(next) = next {
         s.web_logins.active.insert(c.id.clone(), next);
     }
-    reselect(s, c, &origin);
+    let failed = reselect(s, c, &origin);
     // Only a login that was replaced or removed leaves cached authenticated responses to drop;
     // a first login, or none, changes no cached tile.
     if replaced {
         clear_cache();
     }
-    Ok(())
+    Ok(failed)
 }
 
 /// Chooses `c` for its origin again and rebinds its layers, keeping its live binding (and so
 /// its cached tiles): logging in again to a connection that is already logged in.
-pub(crate) fn reselect(s: &mut Session, c: &Connection, origin: &str) {
+/// Returns the full connection's failed-address count for resolution to report.
+pub(crate) fn reselect(s: &mut Session, c: &Connection, origin: &str) -> usize {
     s.database_logins.select(WEB, origin, &c.id);
     s.database_logins.clear_requests_for(WEB, origin);
-    rebind_connection(s, c);
+    rebind_connection(s, c)
 }
 
 pub(crate) fn deactivate(s: &mut Session, c: &Connection, _origin: Option<String>) {
@@ -410,15 +412,33 @@ fn layer_address(l: &rustgis_map::Layer) -> Option<&str> {
 }
 
 /// Rebinds only addresses belonging to this connection. Cross-origin links stay anonymous.
-fn rebind_connection(s: &mut Session, c: &Connection) {
+/// Keeps failed addresses unchanged and returns their count without reporting it mid-activation.
+fn rebind_connection(s: &mut Session, c: &Connection) -> usize {
     let binding = s.web_logins.active.get(&c.id).map(|a| a.binding.as_str());
-    let rewrite = |address: &mut String| {
+    let origin = login_origin(c);
+    let mut failed = 0usize;
+    let mut rewrite = |address: &mut String| {
         let (prefix, raw) = crate::sources::template_archive(address).unwrap_or(("", address.as_str()));
         let plain = logins::inner(raw);
-        let next = binding.and_then(|b| logins::bind(b, plain).ok()).unwrap_or_else(|| plain.to_string());
+        let next = if let Some(binding) = binding
+            && logins::origin(plain) == origin
+        {
+            match logins::bind(binding, plain) {
+                Ok(next) => next,
+                Err(_) => {
+                    failed += 1;
+                    return false;
+                }
+            }
+        } else {
+            plain.to_string()
+        };
         let next = if prefix.is_empty() { next } else { format!("{prefix}{next}") };
         if *address != next {
             *address = next;
+            true
+        } else {
+            false
         }
     };
     for m in &mut s.project.maps {
@@ -441,12 +461,11 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
             if let Some(source) = l.source.as_mut()
                 && let Some(path) = source.path.as_mut()
             {
-                let before = path.clone();
-                rewrite(path);
+                let changed = rewrite(path);
                 // The changed address deserves a new try: an open source still reads through the
                 // old binding, so it opens afresh (a failure is kept in its `error`, as any open's
                 // is); one not open yet, or whose open failed, opens on the next sync.
-                if *path != before {
+                if changed {
                     if source.is_open() {
                         let _ = source.reopen();
                     } else {
@@ -454,8 +473,12 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
                     }
                 }
             }
-            if let Some(path) = l.raster.as_mut().and_then(|raster| raster.path.as_mut()) {
-                rewrite(path);
+            if let Some(raster) = l.raster.as_mut()
+                && let Some(path) = raster.path.as_mut()
+                && rewrite(path)
+            {
+                // Reload keeps the style and publishes any failure through raster.error.
+                let _ = raster.reload();
             }
             if let Some(path) = &mut l.dataset.source {
                 rewrite(path);
@@ -475,6 +498,7 @@ fn rebind_connection(s: &mut Session, c: &Connection) {
             }
         }
     }
+    failed
 }
 
 fn record_choice(s: &mut Session, origin: &str, old: &str, c: &Connection) {
@@ -516,7 +540,21 @@ fn reads(s: &Session) -> BTreeMap<(String, String), Reads> {
     let mut out = BTreeMap::<(String, String), Reads>::new();
     for (map_index, m) in s.project.maps.iter().enumerate() {
         for t in m.tiles.iter().filter(|t| !t.anonymous) {
-            let Some(origin) = logins::origin(tile_address(&t.url)) else { continue };
+            let recorded_origin = s.connections.connections.iter().find(|c| c.id == t.connection && is_service(c)).and_then(login_origin);
+            // A dated link on another origin still belongs to the recorded connection, not to
+            // that other origin's saved login. If the connection is gone, only the displayed
+            // address is evidence for the request: do not guess which dated origin owned it.
+            let origin = if let Some(recorded) = recorded_origin {
+                std::iter::once(t.url.as_str())
+                    .chain(t.time_url.as_deref())
+                    .chain(t.time_urls.iter().map(|(_, url)| url.as_str()))
+                    .any(|url| logins::origin(tile_address(url)).as_deref() == Some(recorded.as_str()))
+                    .then_some(recorded)
+                    .or_else(|| logins::origin(tile_address(&t.url)))
+            } else {
+                logins::origin(tile_address(&t.url))
+            };
+            let Some(origin) = origin else { continue };
             let r = out.entry((origin, t.connection.clone())).or_default();
             r.tiles += 1;
             if !t.connection.is_empty() {
@@ -569,6 +607,7 @@ pub(crate) fn resolve(s: &mut Session, only: Option<&BTreeSet<String>>) {
     }
     let mut pending = Vec::new();
     let mut touched = BTreeSet::new();
+    let mut rebind_failures = BTreeMap::new();
     for ((origin, recorded_id), r) in reads(s) {
         if only.is_some_and(|only| !only.contains(&origin)) {
             continue;
@@ -625,13 +664,21 @@ pub(crate) fn resolve(s: &mut Session, only: Option<&BTreeSet<String>>) {
         if recorded_id != c.id {
             record_choice(s, &origin, &recorded_id, &c);
         }
-        if c.auth.is_empty() || logged_in(s, &c) {
-            rebind_connection(s, &c);
-            continue;
-        }
-        // A secret given this session was confirmed for this origin when it was typed.
-        match known_secret(s, &c).and_then(|secret| activate(s, &c, Some(&secret), true)) {
-            Ok(()) => {}
+        let rebound = if c.auth.is_empty() || logged_in(s, &c) {
+            Ok(rebind_connection(s, &c))
+        } else {
+            // A secret given this session was confirmed for this origin when it was typed.
+            known_secret(s, &c).and_then(|secret| activate(s, &c, Some(&secret), true))
+        };
+        match rebound {
+            Ok(failed) => {
+                // Each rebind covers the whole connection, not only this read entry.
+                if failed > 0 {
+                    rebind_failures.insert(c.id, (c.name, failed));
+                } else {
+                    rebind_failures.remove(&c.id);
+                }
+            }
             Err(e) => {
                 let already_asked = s
                     .database_logins
@@ -642,6 +689,11 @@ pub(crate) fn resolve(s: &mut Session, only: Option<&BTreeSet<String>>) {
                 }
                 pending.push(request(LoginReason::Password, vec![c.id.clone()]));
             }
+        }
+    }
+    for (_, (name, failed)) in rebind_failures {
+        if failed > 0 {
+            s.notify(format!("{name}: {failed} address(es) could not carry the service login; their previous addresses were kept."), true);
         }
     }
     for origin in touched {

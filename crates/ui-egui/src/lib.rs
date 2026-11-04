@@ -159,6 +159,8 @@ pub const TOOL_FILE_PICK: &str = "\u{1}toolfile:";
 
 /// The preference the default raster style (`raster.setDefaultStyle`) is kept under.
 const RASTER_DEFAULTS_PREF: &str = "raster_default_style";
+/// The preference holding the favourite arrangement of publication layouts (`layout.arrangement`).
+const LAYOUT_FAVOURITE_PREF: &str = "layout_favourite_arrangement";
 
 /// A result an asynchronous service fills in when it's done (the app polls it each frame).
 pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
@@ -745,6 +747,8 @@ pub struct UiState {
     pub connections_saved: u64,
     /// The default raster style last kept in the preferences.
     pub raster_defaults_saved: rustgis_engine::map::RasterDefaults,
+    /// The favourite arrangement last saved, to save it again only when it changes.
+    pub layout_favourite_saved: Value,
     /// Home › Add › Add Data › Zarr…: its store, choices and fetches.
     pub zarr: zarrui::State,
     /// Independent Zarr reads for imported GeoLibre layers; does not share the picker state.
@@ -885,6 +889,7 @@ impl Default for UiState {
             sources_saved: 0,
             connections_saved: 0,
             raster_defaults_saved: Default::default(),
+            layout_favourite_saved: Value::Null,
             zarr: Default::default(),
             geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
@@ -1086,7 +1091,10 @@ impl RustGisApp {
         if s.active_layer.is_none() {
             s.active_layer = s.map().layers.first().map(|l| l.id);
         }
-        let ui = UiState { keymap: keymap::Keymap::new(&s.registry), ..UiState::default() };
+        // The favourite arrangement counts as saved until a command changes it, so one never set
+        // isn't written to the preferences.
+        let ui =
+            UiState { keymap: keymap::Keymap::new(&s.registry), layout_favourite_saved: s.layout_favourite.clone(), ..UiState::default() };
         RustGisApp {
             session: s,
             ui,
@@ -1183,6 +1191,31 @@ impl RustGisApp {
             self.session.raster_defaults = d.sanitized();
         }
         self.ui.raster_defaults_saved = self.session.raster_defaults.clone();
+        // The favourite arrangement of publication layouts; one no longer valid is passed over,
+        // said, and classic used.
+        if let Some(text) = self.services.load_pref.as_ref().and_then(|load| load(LAYOUT_FAVOURITE_PREF)) {
+            let read = serde_json::from_str::<Value>(&text)
+                .map_err(|e| e.to_string())
+                .and_then(|v| rustgis_engine::cmd::layout::parse_arrangement(&v).map(|_| v));
+            match read {
+                // A saved null is the default, named.
+                Ok(v) if v.is_null() => self.session.layout_favourite = Value::String("classic".into()),
+                Ok(v) => self.session.layout_favourite = v,
+                Err(why) => {
+                    // Notices are shown as written, and the language is set only in `start`.
+                    i18n::set_current(self.chosen_lang());
+                    self.session.layout_favourite = Value::String("classic".into());
+                    self.session.notify(
+                        crate::i18n::fmt(
+                            "The saved favourite arrangement of publication layouts can't be used ({why}), so \"classic\" is used.",
+                            &[("why", &why)],
+                        ),
+                        false,
+                    );
+                }
+            }
+        }
+        self.ui.layout_favourite_saved = self.session.layout_favourite.clone();
         self.forms.distance_units = self
             .services
             .load_pref
@@ -1885,6 +1918,7 @@ impl RustGisApp {
         sourcespane::save(self);
         sourcespane::save_connections(self);
         self.save_raster_defaults();
+        self.save_layout_favourite();
         r
     }
 
@@ -1943,9 +1977,7 @@ impl RustGisApp {
             let Some(h) = self.session.project.gp_history.last().filter(|h| !h.id.is_empty()) else { return };
             finished = json!({"tool": h.id, "params": h.params});
             ("gp.run", &finished)
-        } else if matches!(id, "analysis.viewshed" | "analysis.interpolate" | "raster.classify" | "dl.classify")
-            && params.get("ran").is_some()
-        {
+        } else if rustgis_engine::cmd::workflows::runs_in_background(id).is_some() && params.get("ran").is_some() {
             // A raster an Analysis workflow made on a thread (`ran`): the step is the command
             // itself, which a replay runs again from its parameters.
             let mut again = params.clone();
@@ -2075,6 +2107,17 @@ impl RustGisApp {
             command: id.to_string(),
             params: params.clone(),
         });
+    }
+
+    /// Saves the favourite arrangement of publication layouts when `layout.arrangement` changed it.
+    fn save_layout_favourite(&mut self) {
+        if self.session.layout_favourite == self.ui.layout_favourite_saved {
+            return;
+        }
+        self.ui.layout_favourite_saved = self.session.layout_favourite.clone();
+        if let Some(save) = &self.services.save_pref {
+            save(LAYOUT_FAVOURITE_PREF, &self.session.layout_favourite.to_string());
+        }
     }
 
     /// Keeps the default raster style with the preferences when it changed.
@@ -2538,13 +2581,19 @@ impl RustGisApp {
                 }
                 // The connection a Connections tree add is for (named in Recent once it is added).
                 let origin = connectiontree::take_origin(self);
-                let Some(url) = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()) else {
+                let Some(raw_url) = p.get("url").and_then(Value::as_str).filter(|u| !u.trim().is_empty()) else {
                     return self.run("ui.dialog", json!({"name": "addUrl"}));
                 };
-                let url = rustgis_engine::data::login_address::inner(url);
-                let bound =
-                    rustgis_engine::service_logins::request_params(&mut self.session, p).map_err(|e| connectionui::translated(&e))?;
+                let url = raw_url.trim();
+                // Bind the same normalized address that every deferred consumer receives.
+                let mut normalized = std::borrow::Cow::Borrowed(p);
+                if url.len() != raw_url.len() {
+                    normalized.to_mut()["url"] = json!(url);
+                }
+                let bound = rustgis_engine::service_logins::request_params(&mut self.session, normalized.as_ref())
+                    .map_err(|e| connectionui::translated(&e))?;
                 let p = bound.as_ref();
+                let url = rustgis_engine::data::login_address::inner(p.get("url").and_then(Value::as_str).unwrap_or(url));
                 if url.to_ascii_lowercase().split(['?', '#']).next().is_some_and(|u| u.ends_with(".pmtiles")) {
                     return connectiontree::run_named(self, "layer.addUrl", p.clone(), origin.as_deref());
                 }
@@ -2615,8 +2664,10 @@ impl RustGisApp {
                         q[k] = v.clone();
                     }
                 }
-                if p.get("zoom").and_then(Value::as_bool) == Some(true) {
-                    q["zoom"] = json!(true);
+                if let Some(zoom) =
+                    p.get("zoom").and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| matches!(s, "true" | "yes" | "1" | "on"))))
+                {
+                    q["zoom"] = json!(zoom);
                 }
                 for k in ["service", "coverage", "anonymous"] {
                     if p.get(k).and_then(Value::as_bool) == Some(true) {
@@ -2647,7 +2698,8 @@ impl RustGisApp {
                 }
                 let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
                 let land = slot.clone();
-                rustgis_engine::render::rustgis_tiles::cache::download_limited(
+                // A Shapefile's `.shp` address brings its `.dbf`, `.shx`, `.prj` and `.cpg` too.
+                rustgis_engine::cmd::layer::download_data(
                     &url,
                     if q.get("geolibreProject").and_then(Value::as_bool) == Some(true) {
                         rustgis_engine::map::geolibre::MAX_TEXT
@@ -3692,7 +3744,12 @@ impl RustGisApp {
                 Err(e) => {
                     self.session.download_failed(id);
                     rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &p);
-                    self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
+                    // Named without the address's keys, token or signature.
+                    let e = e.strip_prefix(url.as_str()).map(|r| r.trim_start_matches(": ").to_string()).unwrap_or(e);
+                    let why = rustgis_engine::sources::redact_text(&e);
+                    // An error that names its own address (a Shapefile's part) isn't named again.
+                    let named = why.split_once(": ").is_some_and(|(head, _)| head.contains("://") && !head.contains(' '));
+                    self.session.notify(if named { why } else { format!("{}: {why}", rustgis_engine::sources::redact(&url)) }, true);
                 }
             }
         }
@@ -3701,8 +3758,26 @@ impl RustGisApp {
     /// Adds a download that landed (`layer.addDownload`), named in Recent after the connection it
     /// came from; one whose project was closed meanwhile is said and dropped.
     pub(crate) fn add_landed(&mut self, landed: serviceui::Landed, bytes: Vec<u8>) {
+        let current = self.session.download_landed(landed.id, bytes);
+        self.add_download(landed, current);
+    }
+
+    /// Adds a service layer's features that landed read already (its protocol buffer pages,
+    /// joined), as [`Self::add_landed`] adds a download.
+    pub(crate) fn add_landed_read(
+        &mut self,
+        landed: serviceui::Landed,
+        dataset: rustgis_engine::data::Dataset,
+        report: rustgis_engine::data::ReadReport,
+    ) {
+        let current = self.session.download_landed_read(landed.id, dataset, report);
+        self.add_download(landed, current);
+    }
+
+    /// Adds a download handed to the session (`current`: it still belongs to this project).
+    fn add_download(&mut self, landed: serviceui::Landed, current: bool) {
         let serviceui::Landed { id, url, params: mut p, origin } = landed;
-        if !self.session.download_landed(id, bytes) {
+        if !current {
             self.session.notify(i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &url)]), false);
             return;
         }
@@ -3941,6 +4016,7 @@ impl RustGisApp {
         sourcespane::save(self);
         sourcespane::save_connections(self);
         self.save_raster_defaults();
+        self.save_layout_favourite();
         cswui::poll(self);
         stacui::poll(self, ctx);
         s3ui::poll(self, ctx);
@@ -4428,7 +4504,7 @@ mod record_tests {
     #[test]
     fn a_raster_made_on_a_thread_is_recorded_as_its_command() {
         let mut app = RustGisApp::with_sample();
-        for id in ["analysis.viewshed", "analysis.interpolate", "raster.classify", "dl.classify"] {
+        for id in ["analysis.viewshed", "analysis.interpolate", "raster.classify", "dl.classify", "raster.function", "imagery.mosaic"] {
             app.ws.recording = Some(Vec::new());
             app.record_step(id, &json!({"layer": "Cities", "ran": 7}), None);
             let steps = app.ws.recording.as_deref().unwrap_or_default();
@@ -4547,6 +4623,67 @@ mod record_tests {
         let layer = app.session.map().layers.iter().find(|layer| layer.name == "Anonymous download").unwrap();
         assert!(layer.connection.is_empty());
         assert!(logins::apply(layer.dataset.source.as_deref().unwrap()).unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn whitespace_downloads_keep_their_login_choice_and_read_options() {
+        use rustgis_engine::render::rustgis_tiles::{cache, logins};
+        use std::io::{Read, Write};
+        for anonymous in [false, true] {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let origin = format!("http://{}", server.local_addr().unwrap());
+            let reply = std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let body = b"name;east;north\nCentral Park;992000;220000\n";
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                    .unwrap();
+                stream.write_all(body).unwrap();
+                String::from_utf8(request).unwrap()
+            });
+            let mut app = RustGisApp::with_sample();
+            let id = app
+                .run("connection.new", json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Ui-Key"}))
+                .unwrap()["id"]
+                .clone();
+            app.run("connection.login", json!({"id":id,"apiKey":"ui-whitespace-757","allowInsecure":true})).unwrap();
+            let mut params = json!({
+                "url":format!(" \t{origin}/parks.csv \r\n"), "name":"Downloaded parks",
+                "anonymous":anonymous, "x":"east", "y":"north", "delimiter":";", "crs":"EPSG:2263", "zoom":false
+            });
+            if !anonymous {
+                params["connection"] = id.clone();
+            }
+            app.run("ui.addUrl", params).unwrap();
+            cache::wait(std::time::Duration::from_secs(5));
+            app.poll_data_downloads();
+            let request = reply.join().unwrap().to_ascii_lowercase();
+            assert!(request.starts_with("get /parks.csv http/1.1\r\n"), "{request}");
+            assert_eq!(request.contains("\r\nx-ui-key: ui-whitespace-757\r\n"), !anonymous, "{request}");
+            // Reacquiring the same saved login must not authenticate an anonymous layer.
+            app.run("connection.login", json!({"id":id,"apiKey":"ui-whitespace-757","allowInsecure":true})).unwrap();
+            let layer = app.session.map().layer_by_name("Downloaded parks").unwrap();
+            assert_eq!(layer.dataset.features.len(), 1);
+            let extent = layer.extent();
+            assert!((extent.min_x + 73.96).abs() < 0.05 && (extent.min_y - 40.78).abs() < 0.05, "{extent:?}");
+            if anonymous {
+                assert!(layer.anonymous);
+                assert!(layer.connection.is_empty());
+                assert!(layer.dataset.source.as_deref().is_none_or(|source| logins::apply(source).unwrap().is_none()));
+            } else {
+                assert_eq!(layer.connection, id.as_str().unwrap());
+            }
+        }
     }
 }
 

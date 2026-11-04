@@ -118,7 +118,9 @@ pub fn inherit(base: &str, url: &str) -> String {
     let url = inner(url);
     let Ok(Some(b)) = parse(base) else { return url.to_string() };
     if origin(url).as_deref() == Some(b.origin) {
-        bind(b.binding, b.origin, url).unwrap_or_else(|_| url.to_string())
+        // Keep the actual derived binding even when its size exceeds the parser's bound.
+        // Request validation then refuses it instead of sending an anonymous request.
+        format!("{PREFIX}{}:{}:{}:{url}", b.binding, b.origin.len(), b.origin)
     } else {
         url.to_string()
     }
@@ -154,6 +156,21 @@ mod tests {
         assert!(parse(&wrapped(&"a".repeat(65))).is_err());
         assert!(parse(&wrapped(&format!("{}g", "a".repeat(31)))).is_err());
         assert!(parse(&wrapped(&"A".repeat(32))).is_err());
+    }
+
+    #[test]
+    fn oversized_same_origin_inheritance_is_refused_not_anonymous() {
+        let base = bind("0123456789abcdef", "https://a.test", "https://a.test/collections").unwrap();
+        let derived = format!("https://a.test/items?filter={}", "a".repeat(17000));
+        let inherited = inherit(&base, &derived);
+        assert!(is_wrapper(&inherited));
+        assert!(inherited.ends_with(&derived), "keep the derived target, not the base document");
+        assert_eq!(parse(&inherited).unwrap_err(), BAD);
+        assert_eq!(check(&inherited).unwrap_err(), BAD);
+        let valid = inherit(&base, "https://a.test/items");
+        assert_eq!(parse(&valid).unwrap().unwrap().url, "https://a.test/items");
+        let foreign = format!("https://b.test/items?filter={}", "a".repeat(17000));
+        assert_eq!(inherit(&base, &foreign), foreign);
     }
 
     #[test]

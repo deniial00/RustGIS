@@ -810,9 +810,14 @@ origin keeps the login, and a redirect to another origin is followed without it,
 another connection's login either. In the web app a request carrying a login isn't redirected at
 all, since the browser can't take the login off on the way: a service that redirects (to
 `https://` or to another path) fails there, so save the connection with the address it ends at.
+If a service supplies a same-origin link too long to carry its login, the request is refused
+instead of being fetched anonymously. Addresses that cannot be rebound to a login are left
+unchanged and reported.
 A plain `http://` address sends the login unencrypted, so the form asks for confirmation
 and the command needs `"allowInsecure": true`. Error messages, notices, the preferences,
 projects, History and what the [AI Assistant](assistant.md) sees never hold the password or key.
+Runtime login bindings are also removed from recorded command parameters, including addresses
+embedded in text, when saving, recovering or exporting them. The live session keeps its originals.
 
 A project's layers use the connection they record; layers recording none use an explicit session
 choice or the only saved connection for their origin. Different connections and sessions can use
@@ -824,6 +829,9 @@ origin is read through that connection, so it needs that login: log in, or save 
 connection for the address too.
 A layer that has no login yet asks for one, and a layer whose recorded connection isn't on this computer offers
 to make one for its address. `connection.list` reports these as `loginRequests` with the `origin`.
+Logging in retries waiting remote rasters without changing their style. A dated layer also asks
+for the login covering dates at its recorded connection's origin, even when it reopens on a date
+hosted elsewhere. Those foreign-origin dates stay anonymous.
 CLI and Python use the same session-only `connection.login` commands. ArcGIS sign-in and tokens
 keep their own [ArcGIS sign-in](#web-data). A login ends with the session that made it.
 Unbound fetches never adopt another session's service login.
