@@ -617,6 +617,12 @@ fn resolve_inner(from: &str, href: &str) -> Option<String> {
     if is_web(href) {
         return Some(href.to_string());
     }
+    if href.starts_with('?') {
+        return Some(format!("{}{href}", base(from)));
+    }
+    if href.starts_with('#') {
+        return Some(format!("{}{href}", from.split('#').next().unwrap_or(from)));
+    }
     let has_scheme = href.split_once(':').is_some_and(|(scheme, _)| {
         let mut bytes = scheme.bytes();
         bytes.next().is_some_and(|b| b.is_ascii_alphabetic()) && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
@@ -630,9 +636,6 @@ fn resolve_inner(from: &str, href: &str) -> Option<String> {
     }
     if href.starts_with('/') {
         return Some(format!("{}{href}", origin(from)));
-    }
-    if href.starts_with('?') {
-        return Some(format!("{}{href}", base(from)));
     }
     let b = base(from);
     let dir = if after_host(b).is_empty() {
@@ -4198,6 +4201,18 @@ mod tests {
         );
         assert_eq!(resolve("https://x.org/folder/c", "path/part:detail").as_deref(), Some("https://x.org/folder/path/part:detail"));
         assert_eq!(resolve("https://x.org/folder/c", "?key=value:detail").as_deref(), Some("https://x.org/folder/c?key=value:detail"));
+        for (from, href, expected) in [
+            ("https://x.org/cgi-bin/mapserv#old", "#frag", "https://x.org/cgi-bin/mapserv#frag"),
+            ("https://x.org/cgi-bin/mapserv?map=kept#old", "#frag", "https://x.org/cgi-bin/mapserv?map=kept#frag"),
+            ("https://x.org/cgi-bin/mapserv?map=kept#old", "#", "https://x.org/cgi-bin/mapserv?map=kept#"),
+            (
+                "https://x.org/cgi-bin/mapserv?old=discard#old",
+                "?upstream=https://data.example/tiles",
+                "https://x.org/cgi-bin/mapserv?upstream=https://data.example/tiles",
+            ),
+        ] {
+            assert_eq!(resolve(from, href).as_deref(), Some(expected), "{href}");
+        }
         for bad in ["file:///etc/passwd", "file:/etc/passwd", "mailto:x", "CuStOm+v1.0:payload", "httpfoo://x/a", "javascript:alert(1)", ""]
         {
             assert_eq!(resolve("https://x.org/c", bad), None, "{bad}");

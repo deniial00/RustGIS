@@ -55,6 +55,11 @@ fn document_endpoints_inherit_only_the_trusted_base_login() {
         ("/advertised", "https://maps.example.org/advertised", true),
         ("advertised", "https://maps.example.org/folder/advertised", true),
         ("?map=advertised", "https://maps.example.org/folder/caps.xml?map=advertised", true),
+        (
+            "?upstream=https://foreign.example.org/tiles",
+            "https://maps.example.org/folder/caps.xml?upstream=https://foreign.example.org/tiles",
+            true,
+        ),
         (foreign.as_str(), "https://foreign.example.org/advertised", false),
         (same_origin_foreign.as_str(), "https://maps.example.org/advertised", true),
     ] {
@@ -77,6 +82,24 @@ fn document_endpoints_inherit_only_the_trusted_base_login() {
                     Offer::Features { .. } => assert!(inner.contains("REQUEST=GetFeature")),
                     Offer::Coverage(_) => assert!(inner.contains("REQUEST=DescribeCoverage")),
                     other => panic!("unexpected offer: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fragment_only_document_links_retain_the_endpoint_and_query() {
+    let source = format!("{BASE}?map=kept#old");
+    let bound_source = crate::login_address::bind(BASE_BINDING, ORIGIN, &source).unwrap();
+    for href in ["#frag", "#"] {
+        for (source, has_login) in [(source.as_str(), false), (bound_source.as_str(), true)] {
+            for (boundary, document) in documents::documents(href) {
+                let service = parse(source, document.as_bytes()).unwrap();
+                for request in requests(&service) {
+                    assert_authority(&request, has_login.then_some(BASE_BINDING), BASE, boundary);
+                    let target = url::Url::parse(crate::login_address::inner(&request)).unwrap();
+                    assert!(target.query_pairs().any(|(key, value)| key == "map" && value == "kept"), "{boundary}: {request}");
                 }
             }
         }
