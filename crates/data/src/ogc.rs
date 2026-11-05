@@ -627,6 +627,9 @@ fn resolve_inner(from: &str, href: &str) -> Option<String> {
     if href.starts_with('/') {
         return Some(format!("{}{href}", origin(from)));
     }
+    if href.starts_with('?') {
+        return Some(format!("{}{href}", base(from)));
+    }
     let b = base(from);
     let dir = if after_host(b).is_empty() {
         format!("{b}/")
@@ -4185,6 +4188,10 @@ mod tests {
         assert_eq!(resolve("https://x.org", "a/items").as_deref(), Some("https://x.org/a/items"));
         assert_eq!(resolve("http://x.org/c", "//y.org/a").as_deref(), Some("http://y.org/a"));
         assert_eq!(resolve("https://x.org/c", "https://y.org/a").as_deref(), Some("https://y.org/a"));
+        assert_eq!(
+            resolve("https://x.org/cgi-bin/mapserv?SERVICE=WMS&REQUEST=GetCapabilities#old", "?map=advertised").as_deref(),
+            Some("https://x.org/cgi-bin/mapserv?map=advertised")
+        );
         for bad in ["file:///etc/passwd", "httpfoo://x/a", "javascript:alert(1)", ""] {
             assert_eq!(resolve("https://x.org/c", bad), None, "{bad}");
         }

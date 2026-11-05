@@ -54,6 +54,7 @@ fn document_endpoints_inherit_only_the_trusted_base_login() {
         ("//foreign.example.org/advertised", "https://foreign.example.org/advertised", false),
         ("/advertised", "https://maps.example.org/advertised", true),
         ("advertised", "https://maps.example.org/folder/advertised", true),
+        ("?map=advertised", "https://maps.example.org/folder/caps.xml?map=advertised", true),
         (foreign.as_str(), "https://foreign.example.org/advertised", false),
         (same_origin_foreign.as_str(), "https://maps.example.org/advertised", true),
     ] {
