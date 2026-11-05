@@ -153,3 +153,163 @@ fn oversized_same_origin_document_targets_fail_closed() {
         }
     }
 }
+
+fn assert_operation(request: &str, service: &str, operation: &str, version: &str) {
+    let inner = crate::login_address::inner(request);
+    let url = url::Url::parse(inner).unwrap();
+    for (key, expected) in [("SERVICE", service), ("REQUEST", operation), ("VERSION", version)] {
+        let values: Vec<_> = url.query_pairs().filter(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.into_owned()).collect();
+        assert_eq!(values, [expected], "{key}: {request}");
+    }
+    let query = inner.split_once('?').unwrap().1.split('#').next().unwrap();
+    for pair in ["map=kept", "token=a%2Bb"] {
+        assert_eq!(query.split('&').filter(|p| *p == pair).count(), 1, "{pair}: {request}");
+    }
+}
+
+#[test]
+fn fragment_endpoints_replace_capabilities_operation_parameters() {
+    for (boundary, document) in documents::documents("#frag") {
+        let (kind, version, operation) = match boundary {
+            "WMS 1.3 GetMap" => ("WMS", "1.3.0", "GetMap"),
+            "WMS 1.1 GetMap" => ("WMS", "1.1.1", "GetMap"),
+            "WMTS KVP GetTile" => ("WMTS", "1.0.0", "GetTile"),
+            "WFS 1.0 GetFeature" => ("WFS", "1.0.0", "GetFeature"),
+            "WFS 2.0 GetFeature" => ("WFS", "2.0.0", "GetFeature"),
+            "WCS 1.0 GetCoverage" => ("WCS", "1.0.0", "DescribeCoverage"),
+            "WCS 2.0 GetCoverage" => ("WCS", "2.0.1", "DescribeCoverage"),
+            "WMTS ResourceURL" => continue,
+            other => panic!("unexpected fixture: {other}"),
+        };
+        let source = capabilities_url("https://maps.example.org/mapserv?map=kept&token=a%2Bb&VERSION=obsolete", Some(kind));
+        let bound_source = crate::login_address::bind(BASE_BINDING, ORIGIN, &source).unwrap();
+        for (source, has_login) in [(source.as_str(), false), (bound_source.as_str(), true)] {
+            let service = parse(source, document.as_bytes()).unwrap();
+            // Legends and REST templates have their own query semantics, not operation keys.
+            for (i, request) in requests(&service).iter().take(if kind == "WCS" { 2 } else { 1 }).enumerate() {
+                assert_authority(request, has_login.then_some(BASE_BINDING), "https://maps.example.org/mapserv", boundary);
+                assert_operation(request, kind, if i == 1 { "GetCoverage" } else { operation }, version);
+            }
+        }
+    }
+}
+
+#[test]
+fn parsed_fragment_wfs_offer_reads_all_offset_pages() {
+    let document = documents::documents("#frag").into_iter().find(|(name, _)| *name == "WFS 2.0 GetFeature").unwrap().1;
+    let source = capabilities_url("https://maps.example.org/mapserv?map=kept&token=a%2Bb&VERSION=obsolete", Some("WFS"));
+    let bound_source = crate::login_address::bind(BASE_BINDING, ORIGIN, &source).unwrap();
+    for (source, has_login) in [(source.as_str(), false), (bound_source.as_str(), true)] {
+        let service = parse(source, document.as_bytes()).unwrap();
+        let Offer::Features { url } = &service.layers[0].offer else { panic!("expected WFS features") };
+        let mut calls = 0;
+        let (joined, note) = super::join_pages(url, 100, |next| {
+            calls += 1;
+            assert_authority(next, has_login.then_some(BASE_BINDING), "https://maps.example.org/mapserv", "WFS paging");
+            assert_operation(next, "WFS", "GetFeature", "2.0.0");
+            let parsed = url::Url::parse(crate::login_address::inner(next)).unwrap();
+            let values = |key: &str| {
+                parsed.query_pairs().filter(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.into_owned()).collect::<Vec<_>>()
+            };
+            match calls {
+                1 => {
+                    assert_eq!(next, url);
+                    assert_eq!(values("COUNT"), [FEATURE_LIMIT.to_string()]);
+                    assert!(values("STARTINDEX").is_empty());
+                    assert!(values("RESULTTYPE").is_empty());
+                    Ok(br#"{"type":"FeatureCollection","features":[{"id":"a.1"},{"id":"a.2"}]}"#.to_vec())
+                }
+                2 => {
+                    assert_eq!(values("RESULTTYPE"), ["hits"]);
+                    assert!(values("OUTPUTFORMAT").is_empty());
+                    Ok(br#"<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0" numberMatched="3" numberReturned="0"/>"#
+                        .to_vec())
+                }
+                3 => {
+                    assert_eq!(values("STARTINDEX"), ["2"]);
+                    assert_eq!(values("COUNT"), ["2"]);
+                    assert!(values("RESULTTYPE").is_empty());
+                    Ok(br#"{"type":"FeatureCollection","features":[{"id":"a.3"}]}"#.to_vec())
+                }
+                _ => panic!("unexpected WFS request: {next}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        let joined: serde_json::Value = serde_json::from_slice(&joined).unwrap();
+        let ids: Vec<_> = joined["features"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["a.1", "a.2", "a.3"]);
+        assert_eq!(note, None);
+    }
+}
+
+fn resource_document(template: &str) -> String {
+    let document = documents::documents("RESOURCE_TEMPLATE").into_iter().find(|(name, _)| *name == "WMTS ResourceURL").unwrap().1;
+    let escaped = template.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+    document.replace("RESOURCE_TEMPLATE/{TileMatrix}/{TileRow}/{TileCol}.png", &escaped)
+}
+
+#[test]
+fn relative_resource_templates_resolve_literal_dot_segments_without_rewriting_bytes() {
+    let bound_base = crate::login_address::bind(BASE_BINDING, ORIGIN, BASE).unwrap();
+    for (href, expected, same_origin) in [
+        (
+            "../tiles/{TileMatrix}/{TileRow}/{TileCol}.png?sig=a%2Bb&x=../kept",
+            "https://maps.example.org/tiles/{z}/{y}/{x}.png?sig=a%2Bb&x=../kept",
+            true,
+        ),
+        ("../../../../tiles/{TileMatrix}/{TileRow}/{TileCol}.png", "https://maps.example.org/tiles/{z}/{y}/{x}.png", true),
+        ("/../tiles/./{TileMatrix}/{TileRow}/{TileCol}.png", "https://maps.example.org/tiles/{z}/{y}/{x}.png", true),
+        ("../tiles/{TileMatrix}/{TileRow}/{TileCol}/.", "https://maps.example.org/tiles/{z}/{y}/{x}/", true),
+        ("../tiles/{TileMatrix}/{TileRow}/{TileCol}/..", "https://maps.example.org/tiles/{z}/{y}/", true),
+        ("..", "https://maps.example.org/", true),
+        (".", "https://maps.example.org/folder/", true),
+        ("../tiles//./{TileMatrix}//{TileRow}/{TileCol}.png/", "https://maps.example.org/tiles//{z}//{y}/{x}.png/", true),
+        ("../tiles//../{TileMatrix}/{TileRow}/{TileCol}.png", "https://maps.example.org/tiles/{z}/{y}/{x}.png", true),
+        (
+            "../%2e/%2E%2e/{TileMatrix}/{TileRow}/{TileCol}.png?b=2&a=%2f#../fragment",
+            "https://maps.example.org/%2e/%2E%2e/{z}/{y}/{x}.png?b=2&a=%2f#../fragment",
+            true,
+        ),
+        (
+            "tiles/{TileMatrix}/{TileRow}/{TileCol}.png?x=../kept&sig=a%2Bb",
+            "https://maps.example.org/folder/tiles/{z}/{y}/{x}.png?x=../kept&sig=a%2Bb",
+            true,
+        ),
+        ("//maps.example.org/folder/../tiles/{TileMatrix}/{TileRow}/{TileCol}.png", "https://maps.example.org/tiles/{z}/{y}/{x}.png", true),
+        (
+            "//foreign.example.org/folder/../tiles/{TileMatrix}/{TileRow}/{TileCol}.png",
+            "https://foreign.example.org/tiles/{z}/{y}/{x}.png",
+            false,
+        ),
+        (
+            "https://maps.example.org/folder/../tiles/{TileMatrix}/{TileRow}/{TileCol}.png",
+            "https://maps.example.org/folder/../tiles/{z}/{y}/{x}.png",
+            true,
+        ),
+    ] {
+        let document = resource_document(href);
+        for (source, has_login) in [(BASE, false), (bound_base.as_str(), true)] {
+            let service = parse(source, document.as_bytes()).unwrap();
+            let Offer::Tiles { template } = &service.layers[0].offer else { panic!("expected WMTS tiles") };
+            assert_authority(template, (has_login && same_origin).then_some(BASE_BINDING), expected, href);
+            assert_eq!(crate::login_address::inner(template), expected, "{href}");
+        }
+    }
+}
+
+#[test]
+fn advertised_absolute_dotpaths_keep_bytes_but_never_supply_login_authority() {
+    let source = crate::login_address::bind(BASE_BINDING, ORIGIN, BASE).unwrap();
+    for (target_origin, target, expected_binding) in [
+        (ORIGIN, "https://maps.example.org/folder/../tiles/{TileMatrix}/{TileRow}/{TileCol}.png", Some(BASE_BINDING)),
+        ("https://foreign.example.org", "https://foreign.example.org/folder/../tiles/{TileMatrix}/{TileRow}/{TileCol}.png", None),
+    ] {
+        let href = crate::login_address::bind(FOREIGN_BINDING, target_origin, target).unwrap();
+        let service = parse(&source, resource_document(&href).as_bytes()).unwrap();
+        let Offer::Tiles { template } = &service.layers[0].offer else { panic!("expected WMTS tiles") };
+        let expected = target.replace("{TileMatrix}", "{z}").replace("{TileRow}", "{y}").replace("{TileCol}", "{x}");
+        assert_authority(template, expected_binding, &expected, target);
+        assert_eq!(crate::login_address::inner(template), expected);
+    }
+}
