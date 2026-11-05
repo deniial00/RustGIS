@@ -617,7 +617,11 @@ fn resolve_inner(from: &str, href: &str) -> Option<String> {
     if is_web(href) {
         return Some(href.to_string());
     }
-    if href.contains("://") || href.starts_with("data:") || href.starts_with("javascript:") || href.is_empty() {
+    let has_scheme = href.split_once(':').is_some_and(|(scheme, _)| {
+        let mut bytes = scheme.bytes();
+        bytes.next().is_some_and(|b| b.is_ascii_alphabetic()) && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+    });
+    if href.contains("://") || has_scheme || href.is_empty() {
         return None;
     }
     if let Some(rest) = href.strip_prefix("//") {
@@ -4192,7 +4196,10 @@ mod tests {
             resolve("https://x.org/cgi-bin/mapserv?SERVICE=WMS&REQUEST=GetCapabilities#old", "?map=advertised").as_deref(),
             Some("https://x.org/cgi-bin/mapserv?map=advertised")
         );
-        for bad in ["file:///etc/passwd", "httpfoo://x/a", "javascript:alert(1)", ""] {
+        assert_eq!(resolve("https://x.org/folder/c", "path/part:detail").as_deref(), Some("https://x.org/folder/path/part:detail"));
+        assert_eq!(resolve("https://x.org/folder/c", "?key=value:detail").as_deref(), Some("https://x.org/folder/c?key=value:detail"));
+        for bad in ["file:///etc/passwd", "file:/etc/passwd", "mailto:x", "CuStOm+v1.0:payload", "httpfoo://x/a", "javascript:alert(1)", ""]
+        {
             assert_eq!(resolve("https://x.org/c", bad), None, "{bad}");
         }
         assert!(is_web("HTTPS://x.org") && !is_web("httpfoo:x") && !is_web("http:/x"));

@@ -92,6 +92,9 @@ fn malformed_document_wrappers_cannot_supply_authority() {
         "rustgis-login:fedcba9876543210:0::https://foreign.example.org/advertised",
         "httpfoo://foreign.example.org/advertised",
         "file:///etc/passwd",
+        "file:/etc/passwd",
+        "mailto:x",
+        "CuStOm+v1.0:payload",
     ] {
         for (boundary, document) in documents::documents(bad) {
             let service = parse(&base, document.as_bytes()).unwrap();
