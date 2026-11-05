@@ -816,6 +816,9 @@ unchanged and reported.
 A plain `http://` address sends the login unencrypted, so the form asks for confirmation
 and the command needs `"allowInsecure": true`. Error messages, notices, the preferences,
 projects, History and what the [AI Assistant](assistant.md) sees never hold the password or key.
+On the desktop, a failed HEAD request that carried a web-service login records the HTTP status
+without response headers, including after logout or a redirect to another origin: a server could
+echo credentials in those headers. Anonymous HEAD failures keep their selected diagnostic headers.
 Runtime login bindings are also removed from recorded command parameters, including addresses
 embedded in text, when saving, recovering or exporting them. The live session keeps its originals.
 
