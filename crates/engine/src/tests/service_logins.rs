@@ -1289,6 +1289,25 @@ fn delayed_head_refusal_keeps_secrets_out_of_history_across_login_lifecycle() {
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
+    if std::env::var_os("RUSTGIS_TEST_SERVICE_HEAD_DIAGNOSTICS").is_none() {
+        // Other engine tests can fill the native HEAD admission limit and skip this probe.
+        // Isolate the scenario so every iteration exercises the real public HEAD transport.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::service_logins::delayed_head_refusal_keeps_secrets_out_of_history_across_login_lifecycle",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RUSTGIS_TEST_SERVICE_HEAD_DIAGNOSTICS", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("1 passed; 0 failed"), "the child must run the delayed-HEAD test: {stdout}");
+        return;
+    }
+
     for action in ["active", "logout", "replace", "drop", "anonymous"] {
         for basic in [false, true] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1318,7 +1337,9 @@ fn delayed_head_refusal_keeps_secrets_out_of_history_across_login_lifecycle() {
                     assert!(!request.to_ascii_lowercase().contains("x-key:") && !request.to_ascii_lowercase().contains("authorization:"));
                 } else {
                     let name = if basic { "authorization" } else { "x-key" };
-                    assert!(request.to_ascii_lowercase().contains(&format!("{name}: {}\r\n", expected.to_ascii_lowercase())));
+                    assert!(request.lines().any(|line| {
+                        line.split_once(':').is_some_and(|(n, v)| n.eq_ignore_ascii_case(name) && v.trim_start() == expected)
+                    }));
                 }
                 received_tx.send(()).unwrap();
                 release_rx.recv_timeout(Duration::from_secs(10)).unwrap();

@@ -1410,7 +1410,7 @@ mod native {
                 if resp.status().as_u16() >= 400 {
                     // A server can echo credentials in retained headers, even after logout has
                     // removed their redaction patterns. Remember every hop, including before a
-                    // cross-origin redirect: authenticated refusals keep only the status.
+                    // cross-origin redirect: HEAD refusals keep only the status after any login hop.
                     if carried_login {
                         let status = resp.status().as_u16();
                         return Err(Failure::without_answer("", format!("http status: {status}"), Reason::Status(status)));
@@ -2499,7 +2499,9 @@ mod tests {
         received_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(logins::deactivate(&binding));
         release_tx.send(()).unwrap();
-        assert_eq!(worker.join().unwrap().unwrap_err(), "http status: 403");
+        // Other parallel tests can register short credentials that scrub ordinary message
+        // words. Check the failure status here and its structured diagnostic status below.
+        assert!(worker.join().unwrap().unwrap_err().contains("403"));
         server.join().unwrap();
         let records = history.records();
         assert_eq!(records.len(), 1);
