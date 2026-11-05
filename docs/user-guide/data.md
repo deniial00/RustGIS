@@ -810,6 +810,9 @@ origin keeps the login, and a redirect to another origin is followed without it,
 another connection's login either. In the web app a request carrying a login isn't redirected at
 all, since the browser can't take the login off on the way: a service that redirects (to
 `https://` or to another path) fails there, so save the connection with the address it ends at.
+Service documents cannot supply a login binding. Advertised endpoints and tile templates inherit
+only the login used to read the document, and only at that same origin; a runtime wrapper in a
+document link contributes its ordinary URL, never its login.
 If a service supplies a same-origin link too long to carry its login, the request is refused
 instead of being fetched anonymously. Addresses that cannot be rebound to a login are left
 unchanged and reported.

@@ -603,7 +603,8 @@ fn is_web(url: &str) -> bool {
 
 /// A link from a document at `from`, resolved: absolute, scheme-relative (`//host/…`),
 /// host-relative (`/…`) or relative to the document's folder. `None` for other schemes.
-/// Only links at the bound document's canonical origin retain its runtime login binding.
+/// A supplied runtime wrapper contributes only its URL, never its authority: only the bound
+/// document's canonical origin retains that document's runtime login binding.
 fn resolve(from: &str, href: &str) -> Option<String> {
     crate::login_address::parse(from).ok()?;
     crate::login_address::parse(href.trim()).ok()?;
@@ -831,7 +832,7 @@ fn wms(url: &str, root: &Node) -> Service {
         .and_then(|g| g.descendants().find(|n| n.is_element() && local(n) == "Get"))
         .and_then(|g| child(&g, "OnlineResource"))
         .and_then(|o| href(&o))
-        .filter(|h| is_web(h))
+        .and_then(|h| resolve(url, &h))
         // The request's own parameters replace any the advertised address carries (a `TIME`).
         .map(|h| info::without_wms_keys(&h))
         .unwrap_or_else(|| endpoint(url));
@@ -1309,7 +1310,7 @@ fn wmts(url: &str, root: &Node) -> Service {
         .find(|n| n.is_element() && local(n) == "GetTile")
         .and_then(|g| g.descendants().find(|n| n.is_element() && local(n) == "Get"))
         .and_then(|g| href(&g))
-        .filter(|h| is_web(h))
+        .and_then(|h| resolve(url, &h))
         .unwrap_or_else(|| endpoint(url));
     let (mut skipped, mut too_long) = (0, 0);
     for layer in children(&contents, "Layer").take(MAX_LAYERS) {
@@ -1415,7 +1416,7 @@ fn wmts(url: &str, root: &Node) -> Service {
                 let f = r.attribute("format").unwrap_or("");
                 !f.contains("pbf") && !f.contains("mvt")
             })
-            .filter_map(|r| r.attribute("template").filter(|t| is_web(t)).map(str::to_string))
+            .filter_map(|r| r.attribute("template").and_then(|t| resolve(url, t)))
             .collect();
         let timed = |t: &&String| t.contains("{Time}");
         let resource =
@@ -1515,7 +1516,7 @@ fn wfs(url: &str, root: &Node) -> Service {
         })
         .and_then(|g| g.descendants().find(|n| n.is_element() && local(n) == "Get"))
         .and_then(|g| href(&g).or_else(|| g.attribute("onlineResource").map(str::to_string)))
-        .filter(|h| is_web(h))
+        .and_then(|h| resolve(url, &h))
         .unwrap_or_else(|| endpoint(url));
     // The GeoJSON output format the server names (GetFeature's, else the service-wide list);
     // `application/json` when it lists none.
@@ -1692,7 +1693,7 @@ fn wcs(url: &str, root: &Node) -> Service {
         .and_then(|g| href(&g).or_else(|| g.descendants().find(|n| n.is_element() && local(n) == "OnlineResource").and_then(|o| href(&o))))
         // MapServer escapes its `&` twice: `&amp;` is still there after the XML is read.
         .map(|h| h.replace("&amp;", "&"))
-        .filter(|h| is_web(h))
+        .and_then(|h| resolve(url, &h))
         .unwrap_or_else(|| endpoint(url));
     let formats: Vec<String> = root
         .descendants()
@@ -3880,6 +3881,10 @@ pub fn fix_axes(bytes: &[u8], bounds: Option<[f64; 4]>) -> Option<Vec<u8>> {
 #[cfg(test)]
 #[path = "../../../tests/support/ogc.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "ogc_document_tests.rs"]
+mod document_tests;
 
 #[cfg(test)]
 mod tests {
