@@ -60,6 +60,11 @@ fn document_endpoints_inherit_only_the_trusted_base_login() {
             "https://maps.example.org/folder/caps.xml?upstream=https://foreign.example.org/tiles",
             true,
         ),
+        ("proxy?src=https://data.example/t&sig=a%2Bb", "https://maps.example.org/folder/proxy?src=https://data.example/t&sig=a%2Bb", true),
+        ("/proxy?src=https://data.example/t&sig=a%2Bb", "https://maps.example.org/proxy?src=https://data.example/t&sig=a%2Bb", true),
+        ("//maps.example.org/proxy?src=https://data.example/t", "https://maps.example.org/proxy?src=https://data.example/t", true),
+        ("//foreign.example.org/proxy?src=https://data.example/t", "https://foreign.example.org/proxy?src=https://data.example/t", false),
+        ("proxy/https://data.example/t", "https://maps.example.org/folder/proxy/https://data.example/t", true),
         (foreign.as_str(), "https://foreign.example.org/advertised", false),
         (same_origin_foreign.as_str(), "https://maps.example.org/advertised", true),
     ] {
@@ -274,6 +279,31 @@ fn relative_resource_templates_resolve_literal_dot_segments_without_rewriting_by
         (
             "tiles/{TileMatrix}/{TileRow}/{TileCol}.png?x=../kept&sig=a%2Bb",
             "https://maps.example.org/folder/tiles/{z}/{y}/{x}.png?x=../kept&sig=a%2Bb",
+            true,
+        ),
+        (
+            "tiles/{TileMatrix}/{TileRow}/{TileCol}.png?src=https://data.example/t&sig=a%2Bb",
+            "https://maps.example.org/folder/tiles/{z}/{y}/{x}.png?src=https://data.example/t&sig=a%2Bb",
+            true,
+        ),
+        (
+            "/tiles/{TileMatrix}/{TileRow}/{TileCol}.png?src=https://data.example/t",
+            "https://maps.example.org/tiles/{z}/{y}/{x}.png?src=https://data.example/t",
+            true,
+        ),
+        (
+            "//maps.example.org/tiles/{TileMatrix}/{TileRow}/{TileCol}.png?src=https://data.example/t",
+            "https://maps.example.org/tiles/{z}/{y}/{x}.png?src=https://data.example/t",
+            true,
+        ),
+        (
+            "//foreign.example.org/tiles/{TileMatrix}/{TileRow}/{TileCol}.png?src=https://data.example/t",
+            "https://foreign.example.org/tiles/{z}/{y}/{x}.png?src=https://data.example/t",
+            false,
+        ),
+        (
+            "proxy/https://data.example/{TileMatrix}/{TileRow}/{TileCol}.png",
+            "https://maps.example.org/folder/proxy/https://data.example/{z}/{y}/{x}.png",
             true,
         ),
         ("//maps.example.org/folder/../tiles/{TileMatrix}/{TileRow}/{TileCol}.png", "https://maps.example.org/tiles/{z}/{y}/{x}.png", true),

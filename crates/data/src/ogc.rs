@@ -627,7 +627,7 @@ fn resolve_inner(from: &str, href: &str) -> Option<String> {
         let mut bytes = scheme.bytes();
         bytes.next().is_some_and(|b| b.is_ascii_alphabetic()) && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
     });
-    if href.contains("://") || has_scheme || href.is_empty() {
+    if has_scheme || href.is_empty() {
         return None;
     }
     if let Some(rest) = href.strip_prefix("//") {

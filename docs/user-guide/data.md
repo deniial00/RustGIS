@@ -814,8 +814,9 @@ Service documents cannot supply a login binding. While resolving their links, Ru
 only the login used to read the document, and only at that same origin. A runtime wrapper in a
 document link contributes its ordinary URL, never its login.
 Relative links, including parent paths, resolve against the document's address without rewriting
-template placeholders or query values. KVP requests replace capabilities operation parameters,
-keeping unrelated parameters such as MapServer's `map=`.
+template placeholders or query values, including proxy parameters containing `https://` URLs.
+KVP requests replace capabilities operation parameters, keeping unrelated parameters such as
+MapServer's `map=`.
 If a service supplies a same-origin link too long to carry its login, the request is refused
 instead of being fetched anonymously. Addresses that cannot be rebound to a login are left
 unchanged and reported.
