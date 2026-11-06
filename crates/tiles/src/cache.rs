@@ -3039,33 +3039,91 @@ mod tests {
 
     #[test]
     fn fetches_through_the_fetcher_once() {
+        use std::sync::mpsc;
+
+        // The fetcher and cache are process-global. Other tests legitimately clear caches on
+        // logout; this fixture must neither lose its answers nor intercept their requests.
+        if std::env::var("RUSTGIS_CACHE_FETCHER_SCENARIO").as_deref() != Ok("once") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cache::tests::fetches_through_the_fetcher_once", "--test-threads=1", "--nocapture"])
+                .env("RUSTGIS_CACHE_FETCHER_SCENARIO", "once")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let ran_one = stdout.lines().any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+            assert!(
+                output.status.success() && ran_one,
+                "isolated fetcher scenario failed or did not run exactly one test:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        fn receive(rx: &mpsc::Receiver<()>) {
+            rx.recv_timeout(Duration::from_secs(10)).expect("the test fetcher answered or admitted the request");
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let (completed_tx, completed_rx) = mpsc::channel();
         static CALLS: AtomicUsize = AtomicUsize::new(0);
-        set_fetcher(|url, done| {
+        set_fetcher(move |url, done| {
+            if url == "test://cache/blocker.json" {
+                entered_tx.send(()).unwrap();
+                receive(&release_rx.lock().unwrap());
+                done(Ok(b"0".to_vec()));
+                return;
+            }
             CALLS.fetch_add(1, Ordering::Relaxed);
-            if url.ends_with("ok.json") { done(Ok(b"[1, 2]".to_vec())) } else { done(Err("404".into())) }
+            if url.ends_with("ok.json") {
+                done(Ok(b"[1, 2]".to_vec()))
+            } else {
+                done(Err("404".into()))
+            }
+            completed_tx.send(()).unwrap();
         });
-        let g = generation();
-        assert!(matches!(get("test://cache/ok.json", Want::Json), State::Pending));
-        assert!(generation() > g);
+        // Hold the shared launcher in another fetcher invocation. Even a synchronous fetcher
+        // need not answer this request before get() returns when a launcher already owns it.
+        let blocker = std::thread::spawn(|| get("test://cache/blocker.json", Want::Json));
+        receive(&entered_rx);
+        let requested = get("test://cache/ok.json", Want::Json);
+        let retained = peek("test://cache/ok.json");
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+        assert!(matches!(requested, State::Pending));
+        assert!(retained.is_none(), "the request is still pending while the launcher is held");
+        receive(&completed_rx);
         assert!(matches!(get("test://cache/ok.json", Want::Json), State::Ready(_)));
         assert!(peek("test://cache/ok.json").is_some());
         assert!(matches!(get("test://cache/missing.json", Want::Json), State::Pending));
+        receive(&completed_rx);
         assert!(matches!(get("test://cache/missing.json", Want::Json), State::Failed(_)));
         assert!(peek("test://cache/never.json").is_none());
         // A request the fetcher dropped is forgotten, not failed: asked for again, it is fetched.
-        set_fetcher(|url, done| {
+        let (completed_tx, completed_rx) = mpsc::channel();
+        set_fetcher(move |url, done| {
             CALLS.fetch_add(1, Ordering::Relaxed);
-            if url.ends_with("first.json") { done(Err(DROPPED.into())) } else { done(Ok(b"1".to_vec())) }
+            if url.ends_with("first.json") {
+                done(Err(DROPPED.into()))
+            } else {
+                done(Ok(b"1".to_vec()))
+            }
+            completed_tx.send(()).unwrap();
         });
         assert!(matches!(get("test://cache/first.json", Want::Json), State::Pending));
+        receive(&completed_rx);
         assert!(matches!(get("test://cache/first.json", Want::Json), State::Pending), "fetched again");
+        receive(&completed_rx);
         assert_eq!(CALLS.load(Ordering::Relaxed), 4);
 
         // A server has a few fetches under way at once; the newest waiting tile goes next (#635).
         static HELD: Mutex<Vec<(String, Done)>> = Mutex::new(Vec::new());
-        set_fetcher(|url, done| {
+        let (started_tx, started_rx) = mpsc::channel();
+        set_fetcher(move |url, done| {
             if url.starts_with("test://held/") {
                 HELD.lock().unwrap().push((url, done));
+                started_tx.send(()).unwrap();
             } else {
                 done(Ok(b"1".to_vec()));
             }
@@ -3074,16 +3132,25 @@ mod tests {
         for i in 0..n {
             assert!(matches!(get(&format!("test://held/{i}.json"), Want::Json), State::Pending));
         }
+        for _ in 0..crate::schedule::PER_HOST {
+            receive(&started_rx);
+        }
         assert_eq!(HELD.lock().unwrap().len(), crate::schedule::PER_HOST);
-        let (_, done) = HELD.lock().unwrap().remove(0);
+        let (completed_url, done) = HELD.lock().unwrap().remove(0);
         done(Ok(b"2".to_vec()));
+        receive(&started_rx);
         let held: Vec<String> = HELD.lock().unwrap().iter().map(|(u, _)| u.clone()).collect();
         assert_eq!(held.len(), crate::schedule::PER_HOST);
         assert_eq!(held.last().map(String::as_str), Some(format!("test://held/{}.json", n - 1).as_str()));
-        assert!(matches!(get("test://held/0.json", Want::Json), State::Ready(_)));
+        assert!(matches!(get(&completed_url, Want::Json), State::Ready(_)));
         // The rest finish, and so do the waiting ones they make room for.
-        loop {
-            let Some((_, done)) = HELD.lock().unwrap().pop() else { break };
+        for _ in 1..n {
+            let (_, done) = loop {
+                if let Some(job) = HELD.lock().unwrap().pop() {
+                    break job;
+                }
+                receive(&started_rx);
+            };
             done(Ok(b"3".to_vec()));
         }
         for i in 0..n {
@@ -3093,10 +3160,12 @@ mod tests {
         // A fetcher that drops a request unanswered (or panics) gives its server's place back:
         // more requests than the cap still all reach it, and each is forgotten, not stuck.
         static SEEN: AtomicUsize = AtomicUsize::new(0);
-        set_fetcher(|url, done| {
+        let (completed_tx, completed_rx) = mpsc::channel();
+        set_fetcher(move |url, done| {
             if url.starts_with("test://lost/") {
                 SEEN.fetch_add(1, Ordering::Relaxed);
                 drop(done);
+                completed_tx.send(()).unwrap();
             } else {
                 done(Ok(b"1".to_vec()));
             }
@@ -3104,15 +3173,20 @@ mod tests {
         for i in 0..3 * crate::schedule::PER_HOST {
             assert!(matches!(get(&format!("test://lost/{i}.json"), Want::Json), State::Pending));
         }
+        for _ in 0..3 * crate::schedule::PER_HOST {
+            receive(&completed_rx);
+        }
         assert_eq!(SEEN.load(Ordering::Relaxed), 3 * crate::schedule::PER_HOST);
         assert!(peek("test://lost/0.json").is_none());
 
         // Waiting for news: a fetch never answered (another's, a slow server's) doesn't hold up
         // one waiting for what has come.
         static STUCK: Mutex<Vec<Done>> = Mutex::new(Vec::new());
-        set_fetcher(|url, done| {
+        let (started_tx, started_rx) = mpsc::channel();
+        set_fetcher(move |url, done| {
             if url.starts_with("test://stuck/") {
                 STUCK.lock().unwrap().push(done);
+                started_tx.send(()).unwrap();
             } else {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3121,6 +3195,7 @@ mod tests {
             }
         });
         assert!(matches!(get("test://stuck/0.json", Want::Json), State::Pending));
+        receive(&started_rx);
         let g = generation();
         assert!(matches!(get("test://news/0.json", Want::Json), State::Pending));
         let t = Instant::now();
@@ -3136,19 +3211,25 @@ mod tests {
         // Only a map tile's 404 is an expected answer: a picture that isn't a tile (a single
         // image, a layout's picture, a sprite sheet) and a style keep theirs.
         static OMITS: Mutex<Vec<(String, &'static [u16])>> = Mutex::new(Vec::new());
-        set_fetcher_omitting(|url, done, omit| {
+        let (completed_tx, completed_rx) = mpsc::channel();
+        set_fetcher_omitting(move |url, done, omit| {
             OMITS.lock().unwrap().push((url, omit));
             done(Err("http status: 404".into()));
+            completed_tx.send(()).unwrap();
         });
         let _ = get_tile("test://omit/tile.png", Want::Image);
         let _ = get_tile("test://omit/tile.pbf", Want::Vector);
         let _ = get("test://omit/picture.png", Want::Image);
         let _ = get("test://omit/style.json", Want::Json);
+        for _ in 0..4 {
+            receive(&completed_rx);
+        }
         let omits = std::mem::take(&mut *OMITS.lock().unwrap());
         let omit = |name: &str| omits.iter().find(|(u, _)| u.ends_with(name)).map(|(_, o)| *o);
         assert_eq!(omit("tile.png"), Some(&[404, 410][..]));
         assert_eq!(omit("tile.pbf"), Some(&[404, 410][..]));
         assert_eq!(omit("picture.png"), Some(&[][..]));
         assert_eq!(omit("style.json"), Some(&[][..]));
+        clear_fetcher();
     }
 }
