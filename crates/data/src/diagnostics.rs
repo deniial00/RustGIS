@@ -622,6 +622,14 @@ fn base64_shaped(word: &str) -> bool {
     credential_shaped(word) || (word.chars().count() >= 8 && word.chars().skip(1).any(char::is_uppercase))
 }
 
+/// A slash before `@` can disguise userinfo as an authority and path.
+fn ambiguous_userinfo(address: &str) -> bool {
+    let Some((_, rest)) = address.split_once("://") else { return false };
+    let Some((authority, path)) = rest.split_once('/') else { return false };
+    let Some((before_at, _)) = path.split_once('@') else { return false };
+    !authority.contains('@') && !authority.starts_with('[') && (authority.contains(':') || before_at.contains(':'))
+}
+
 /// Sanitizes a known address on its own, before composing it with diagnostic prose.
 /// Unlike a raw URL with a secret query, this result can be redacted again without losing
 /// the reason that follows it. This does not establish a boundary for unknown URLs in prose.
@@ -648,6 +656,10 @@ pub fn address_in_message(address: &str) -> String {
     if before_query.contains('@')
         && before_query.chars().any(|c| c.is_whitespace() || hostile_control(c) || matches!(c, '"' | '\'' | '<' | '>' | '`'))
     {
+        return "[address omitted]".to_string();
+    }
+    // Do not guess which interpretation of a slash-containing authority held a password.
+    if ambiguous_userinfo(before_query) {
         return "[address omitted]".to_string();
     }
     let url = address.contains("://");
@@ -725,6 +737,17 @@ pub fn message_with_address(address: &str, reason: &str) -> String {
 /// counts as a field is narrower in the middle of a line: `name: several words` there reads as
 /// prose and is kept (see `docs/privacy.md`).
 pub fn redact(text: &str) -> String {
+    redact_impl(text, true)
+}
+
+/// Sanitizes a replay parameter without treating innocent JSON/XML syntax or public URL
+/// queries as diagnostic payloads. Credential fields and secret query continuations still
+/// discard their remaining text; the same input and scanning bounds apply.
+pub fn redact_parameter(text: &str) -> String {
+    redact_impl(text, false)
+}
+
+fn redact_impl(text: &str, diagnostic: bool) -> String {
     if text.len() > MAX_INPUT_BYTES {
         return "[oversized diagnostic omitted]".to_string();
     }
@@ -752,8 +775,20 @@ pub fn redact(text: &str) -> String {
             continue;
         }
         if matches!(c, '{' | '[' | '<') && opens_structured(rest) {
-            out.push_str("[structured content omitted]");
-            break;
+            if diagnostic {
+                out.push_str("[structured content omitted]");
+                break;
+            }
+            // A parameter may legitimately be markup. A credential-bearing tag is not
+            // innocent syntax: its value can span words and lines, so omit the remainder.
+            if c == '<' {
+                let tag =
+                    rest.trim_start_matches(['<', '/']).split(|c: char| c.is_whitespace() || matches!(c, '>' | '/')).next().unwrap_or("");
+                if secret_name(tag.rsplit(':').next().unwrap_or(tag)) {
+                    out.push_str(REDACTED);
+                    break;
+                }
+            }
         }
         if matches!(c, '"' | '\'') {
             let quote = c;
@@ -795,6 +830,18 @@ pub fn redact(text: &str) -> String {
             if after.starts_with("://") {
                 let url_end = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`')).unwrap_or(rest.len());
                 let address = rest.get(..url_end).unwrap_or("");
+                if !diagnostic && ambiguous_userinfo(address.split(['?', '#']).next().unwrap_or("")) {
+                    out.push_str("[address omitted]");
+                    break;
+                }
+                let query = address.split_once(['?', '#']).map_or("", |(_, q)| q);
+                let names = || query.split(['&', ';', '#']).map(|pair| pair.split('=').next().unwrap_or(""));
+                let has_name = |name: &str| {
+                    names().any(|key| {
+                        key.eq_ignore_ascii_case(name) || (key.contains(['%', '\\']) && decoded_name(key).eq_ignore_ascii_case(name))
+                    })
+                };
+                let secret = names().any(secret_name) || (!diagnostic && has_name("code") && has_name("state"));
                 match url::Url::parse(address) {
                     // Nothing to take out: the address stays as written, its punctuation too
                     // ("https://example.org: timeout"), unless it holds control characters.
@@ -802,7 +849,7 @@ pub fn redact(text: &str) -> String {
                         if url.has_host()
                             && url.username().is_empty()
                             && url.password().is_none()
-                            && url.query().is_none()
+                            && (url.query().is_none() || (!diagnostic && !secret))
                             && url.fragment().is_none()
                             && !address.chars().any(hostile_control) =>
                     {
@@ -823,7 +870,9 @@ pub fn redact(text: &str) -> String {
                         }
                         let _ = url.set_username("");
                         let _ = url.set_password(None);
-                        url.set_query(None);
+                        if diagnostic || secret {
+                            url.set_query(None);
+                        }
                         url.set_fragment(None);
                         out.push_str(&path_secrets_redacted(url.as_str()));
                         out.extend(kept);
@@ -832,13 +881,11 @@ pub fn redact(text: &str) -> String {
                 }
                 i += url_end;
                 field_before = false;
-                if address.contains(['?', '#']) {
+                if address.contains(['?', '#']) && (diagnostic || secret || address.contains('#')) {
                     // Its query or fragment is gone, and that is said. When a pair in it named a
                     // secret, an unescaped value may run on past whitespace: the rest of the text
                     // goes too, said. Otherwise the rest keeps going through the field rules, so a
                     // failure's reason after the address isn't lost.
-                    let query = address.split_once(['?', '#']).map_or("", |(_, q)| q);
-                    let secret = query.split(['&', ';', '#']).any(|pair| secret_name(pair.split('=').next().unwrap_or("")));
                     if secret {
                         out.push_str("[query and the rest omitted]");
                         break;
@@ -1049,6 +1096,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_parameters_keep_public_structure_but_not_credentials() {
+        for public in ["<div> https://example.org?format=plain </div>", r#"{"label":"public","link":"https://example.org?format=json"}"#] {
+            assert_eq!(redact_parameter(public), public);
+            assert_eq!(redact(public), "[structured content omitted]");
+        }
+        for private in [
+            "<Password>hidden hidden-tail</Password> https://example.org",
+            "<x:Password>hidden hidden-tail</x:Password> https://example.org",
+            r#"{"password":"hidden hidden-tail","link":"https://example.org"}"#,
+            "GET https://example.org?%2574oken=hidden hidden-tail",
+            "GET https://example.org?code=hidden&state=hidden hidden-tail",
+            "GET https://example.org?%2563ode=hidden&%2573tate=hidden hidden-tail",
+            "GET https://alice:hidden@example.org?format=json",
+            "GET https://u:123/w@host/x",
+            "GET https://alice/part:123@host/x",
+        ] {
+            let clean = redact_parameter(private);
+            assert!(!clean.contains("hidden") && !clean.contains("alice") && !clean.contains("123"), "{private} -> {clean}");
+        }
+    }
+
+    #[test]
     fn known_addresses_preserve_reasons_through_repeated_redaction() {
         for address in [
             "https://example.org/data?token=hidden",
@@ -1120,14 +1189,31 @@ mod tests {
             "alice:hidden more-hidden@example.org",
             "https://alice:hidden@/data",
             "https://alice:hidden more-hidden",
+            "https://u:123/w@host/x",
+            "https://u:123/w@host/x?token=hidden",
+            "https://alice:hidden/path@host/x",
+            "https://alice/part:123@host/x",
         ] {
             let shown = address_in_message(address);
             let clean = message_with_address(address, &format!("{address}: HTTP 401"));
             assert!(!shown.contains("hidden") && !shown.contains("alice"), "{address} -> {shown}");
             assert!(!clean.contains("hidden") && !clean.contains("alice"), "{address} -> {clean}");
+            assert!(!shown.contains("123") && !clean.contains("123"), "{address} -> {clean}");
             assert!(clean.ends_with(": HTTP 401"), "{clean}");
             assert_eq!(redact(&clean), clean);
         }
+    }
+
+    #[test]
+    fn unambiguous_ports_and_path_at_signs_keep_address_context() {
+        for address in
+            ["https://host:123/data", "https://host/data@edition", "https://host/data@edition:123", "https://[::1]:8080/data@edition"]
+        {
+            assert_eq!(address_in_message(address), address);
+            assert_eq!(message_with_address(address, "HTTP 503"), format!("{address}: HTTP 503"));
+        }
+        let clean = message_with_address("https://alice:123%2Fw@host/x", "HTTP 503");
+        assert!(clean.contains("HTTP 503") && !clean.contains("alice") && !clean.contains("123"), "{clean}");
     }
 
     #[test]

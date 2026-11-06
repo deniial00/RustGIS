@@ -750,6 +750,9 @@ pub struct Session {
     pub zarr_off_frame: bool,
     /// The Zarr steps landed that [`Session::follow_time_landed`] has seen.
     zarr_seen: u64,
+    /// A read the app made on a thread of its own for the command it runs next, which takes it
+    /// instead of reading again ([`cmd::reads`]).
+    pub(crate) read_ahead: Option<cmd::reads::Read>,
     /// Set where a person at a terminal waits on a command (`rustgis-cli run` with stdin and
     /// stderr a terminal), who can stop it with Ctrl-C: tools and rasters take no work cap
     /// ([`rustgis_analysis::control::Control::stoppable`]). A program that calls it (an agent, a
@@ -848,10 +851,12 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
 /// A lock names each label by its feature's id, and [`rustgis_data::Dataset::push`] hands the
 /// largest id out again once its feature is deleted: the new feature would take the lock's place
 /// without having been placed (#1135). Saved moved-label positions have the same identity rule.
-/// So a command that removes features removes their locks and saved moves,
+/// So a command that removes features removes their locks, line anchors and saved moves,
 /// whichever way it removes them. Undo brings them back with the rest of the project. A streamed
 /// layer holds only the window in view, so its other features aren't gone. It compares ids, so an
 /// id a single command both removes and hands out stays locked: only restoring from an archive can.
+/// A command that removes a layer removes its locks and line anchors too, or each frame would read
+/// them for nothing.
 fn forget_label_state_of_removed_features(before: &Project, after: &mut Project) {
     for (i, m) in after.maps.iter_mut().enumerate() {
         let was = before.maps.get(i).filter(|o| o.name == m.name);
@@ -879,7 +884,13 @@ fn forget_label_state_of_removed_features(before: &Project, after: &mut Project)
             if let Some(lock) = &mut m.label_lock {
                 lock.retain(|((layer, id, ..), _)| *layer != l.id || !gone.contains(id));
             }
+            m.label_lock_line_anchors.retain(|(layer, id, ..), _| *layer != l.id || !gone.contains(id));
         }
+        let kept: std::collections::HashSet<u32> = m.layers.iter().map(|l| l.id).collect();
+        if let Some(lock) = &mut m.label_lock {
+            lock.retain(|((layer, ..), _)| kept.contains(layer));
+        }
+        m.label_lock_line_anchors.retain(|(layer, ..), _| kept.contains(layer));
     }
 }
 
@@ -1003,6 +1014,7 @@ impl Session {
             long_runs: None,
             zarr_off_frame: false,
             zarr_seen: 0,
+            read_ahead: None,
             stoppable: false,
         };
         for text in label_notices {
@@ -1144,6 +1156,12 @@ impl Session {
     /// step to be read off the frame ([`Session::zarr_off_frame`]): playing holds its next step.
     pub fn zarr_waiting(&self) -> bool {
         self.zarr_off_frame && cmd::zarr::waiting(self)
+    }
+
+    /// Drops a read placed for a command ([`cmd::reads::Read::placed`]) that the command didn't
+    /// take: one refused before it read, or that read another way.
+    pub fn drop_read(&mut self) {
+        self.read_ahead = None;
     }
 
     /// Shows the Zarr steps read off the frame ([`Session::zarr_off_frame`]) once they land: the

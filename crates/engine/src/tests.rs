@@ -4124,6 +4124,58 @@ fn map_and_layer_files_report_label_setting_losses() {
     }
 }
 
+/// Two layers whose only features have the same id, each with a locked label and a line anchor.
+fn two_locked_layers() -> (Session, u32, u32) {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let mut s = Session::new(Project::default());
+    let mut layer = |name: &str| {
+        let mut d = Dataset::new(name, GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![V::Text(name.into())]);
+        s.map_mut().add_dataset(d)
+    };
+    let (a, b) = (layer("A"), layer("B"));
+    let keys = [(a, 1, 0, 0), (b, 1, 0, 0)];
+    s.map_mut().label_lock = Some(keys.map(|k| (k, Default::default())).to_vec());
+    s.map_mut().label_lock_line_anchors = keys.map(|k| (k, Default::default())).into_iter().collect();
+    (s, a, b)
+}
+
+/// The layers a map's lock and line anchors name, each sorted.
+fn locked_layers(s: &Session) -> (Vec<u32>, Vec<u32>) {
+    let mut lock: Vec<u32> = s.map().label_lock.iter().flatten().map(|((l, ..), _)| *l).collect();
+    let mut anchors: Vec<u32> = s.map().label_lock_line_anchors.keys().map(|(l, ..)| *l).collect();
+    lock.sort_unstable();
+    anchors.sort_unstable();
+    (lock, anchors)
+}
+
+/// A removed layer's locked labels and line anchors go with it, and only its own; undo brings them
+/// back.
+#[test]
+fn a_removed_layers_locked_labels_go_with_it() {
+    let (mut s, a, b) = two_locked_layers();
+    s.run("layer.remove", &json!({"layer": a})).unwrap();
+    assert_eq!(locked_layers(&s), (vec![b], vec![b]));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(locked_layers(&s), (vec![a, b], vec![a, b]));
+    s.run("edit.redo", &Value::Null).unwrap();
+    assert_eq!(locked_layers(&s), (vec![b], vec![b]));
+}
+
+/// A deleted feature's lock entry and line anchor go with it, not those of another layer's feature
+/// with the same id; undo brings them back.
+#[test]
+fn a_deleted_feature_leaves_another_layers_lock_alone() {
+    let (mut s, a, b) = two_locked_layers();
+    s.map_mut().layer_mut(a).unwrap().selection = vec![0];
+    s.run("edit.delete", &Value::Null).unwrap();
+    assert_eq!(locked_layers(&s), (vec![b], vec![b]));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(locked_layers(&s), (vec![a, b], vec![a, b]));
+    s.run("edit.redo", &Value::Null).unwrap();
+    assert_eq!(locked_layers(&s), (vec![b], vec![b]));
+}
+
 /// A streamed layer holds only the window in view: a lock's entry for a feature outside it stays
 /// when the window changes (#1135).
 #[test]
@@ -10727,7 +10779,7 @@ fn duckdb_queries_and_databases() {
         assert!(e.contains("need DuckDB"), "{e}");
         return;
     }
-    // A result mixing geometry types: a layer per type.
+    // A result mixing geometry types: a layer per type, its points on top (#1488).
     let r = s.run("layer.addSql", &json!({"sql": query, "name": "Trip"})).unwrap();
     let names: Vec<String> = s.map().layers.iter().map(|l| l.name.clone()).collect();
     assert_eq!(names, vec!["Trip (points)", "Trip (lines)"], "{r}");
@@ -10812,6 +10864,95 @@ fn duckdb_queries_and_databases() {
     let r = s.run("layer.addSql", &json!({"sql": projected, "name": "Utm2", "crs": "EPSG:32633"})).unwrap();
     let e = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().extent();
     assert!((e.min_x - 15.0).abs() < 0.01 && (e.min_y - 37.95).abs() < 0.05, "{e:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A source split by geometry type is added polygons first, so its points end on top and none hides
+/// under its own polygons, whether DuckDB or GDAL split it (#1488). Neither program is needed: the
+/// parts are files already written, as they would have converted them.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn split_sources_keep_their_points_on_top() {
+    use crate::cmd::layer::{add_converted, duckdb_parts, gdal_parts};
+    use rustgis_data::source::{Family, duckdb, gdal};
+    let dir = std::env::temp_dir().join(format!("rustgis-split-order-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let geometry = |f: Family| match f {
+        Family::Points => r#"{"type": "Point", "coordinates": [10, 50]}"#,
+        Family::Lines => r#"{"type": "LineString", "coordinates": [[10, 50], [11, 51]]}"#,
+        Family::Polygons => r#"{"type": "Polygon", "coordinates": [[[10, 50], [11, 50], [11, 51], [10, 50]]]}"#,
+    };
+    // A file per part, in the order both programs give them: points first (`Family::ALL`).
+    let write = |stem: &str, f: Family| {
+        let path = dir.join(format!("{stem}-{}.geojson", f.label()));
+        let feature = format!(r#"{{"type": "Feature", "properties": {{}}, "geometry": {}}}"#, geometry(f));
+        std::fs::write(&path, format!(r#"{{"type": "FeatureCollection", "features": [{feature}]}}"#)).unwrap();
+        path
+    };
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+
+    // A DuckDB query.
+    let mut s = Session::new(Project::default());
+    let parts = Family::ALL.iter().map(|f| duckdb::Part { path: write("query", *f), family: *f, count: 1 }).collect();
+    let origin =
+        |family| rustgis_map::source::DuckdbOrigin { sql: Some("SELECT 1".into()), database: None, table: None, crs: None, family };
+    let parts = duckdb_parts(&mut s, "Trip", duckdb::Output { parts, skipped: 0 }, origin);
+    add_converted(&mut s, &json!({}), "the query", "DuckDB query", parts).unwrap();
+    assert_eq!(names(&s), ["Trip (points)", "Trip (lines)", "Trip (polygons)"]);
+
+    // A GDAL file with two mixed layers: each keeps its points on top, and the file's second layer
+    // goes above its first, as any layer added after another does.
+    let mut s = Session::new(Project::default());
+    let converted = ["a", "b"]
+        .into_iter()
+        .flat_map(|layer| Family::ALL.map(|f| (layer, f)))
+        .map(|(layer, f)| gdal::Converted {
+            path: write(layer, f),
+            name: format!("{layer} ({})", f.label()),
+            layer: layer.to_string(),
+            family: Some(f),
+            unprojected: false,
+        })
+        .collect();
+    let original = dir.join("file.gpx").display().to_string();
+    add_converted(&mut s, &json!({}), &original, &original, gdal_parts(converted, &original, None)).unwrap();
+    assert_eq!(names(&s), ["b (points)", "b (lines)", "b (polygons)", "a (points)", "a (lines)", "a (polygons)"]);
+
+    // A file the built-in readers split by type (a KML here, as GPX, OSM or DXF): the same order,
+    // and the first layer added (the polygons, away from the rest) still frames an empty map on
+    // its own extent, not on all the data's.
+    let kml = r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<Placemark><name>p</name><Point><coordinates>10.5,50.5</coordinates></Point></Placemark>
+<Placemark><name>l</name><LineString><coordinates>10,50 11,51</coordinates></LineString></Placemark>
+<Placemark><name>a</name><Polygon><outerBoundaryIs><LinearRing><coordinates>12,52 13,52 13,53 12,52</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Document></kml>"#;
+    let path = dir.join("trip.kml");
+    std::fs::write(&path, kml).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(names(&s), ["trip points", "trip lines", "trip polygons"]);
+    let c = s.map().center_lonlat();
+    assert!((c.x - 12.5).abs() < 0.1 && (c.y - 52.5).abs() < 0.2, "{c:?}");
+
+    // A KMZ's ground overlay goes under its layers, and the empty map is framed on the layers, not
+    // on the picture.
+    let mut red = tiny_skia::Pixmap::new(8, 8).unwrap();
+    red.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+    let doc = r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<GroundOverlay><name>Over</name><Icon><href>files/red.png</href></Icon><LatLonBox><north>41</north><south>40</south><east>11</east><west>10</west></LatLonBox></GroundOverlay>
+<Placemark><name>l</name><LineString><coordinates>30,30 31,31</coordinates></LineString></Placemark>
+</Document></kml>"#;
+    let kmz = rustgis_data::zip::write(&[("doc.kml".into(), doc.as_bytes().to_vec()), ("files/red.png".into(), red.encode_png().unwrap())])
+        .unwrap();
+    let path = dir.join("site.kmz");
+    std::fs::write(&path, kmz).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let all = names(&s);
+    assert_eq!(all.last().map(String::as_str), Some("Over"), "{all:?}");
+    assert_eq!(all.len(), 2, "{all:?}");
+    let c = s.map().center_lonlat();
+    assert!((c.x - 30.5).abs() < 0.1 && (c.y - 30.5).abs() < 0.2, "{c:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -20693,7 +20834,15 @@ fn history_exports_never_keep_unknown_url_credential_continuations() {
     s.project.gp_history.push(crate::GpRecord {
         tool: "Buffer".into(),
         id: "buffer".into(),
-        params: json!({"input":"Cities", "note":raw, "url":"https://history.example/data?page=2&token=hidden"}),
+        params: json!({
+            "input":"Cities",
+            "note":raw,
+            "url":"https://history.example/data?page=2&token=hidden",
+            "markup":"<Password>hidden hidden-tail</Password> https://history.example/data",
+            "payload":r#"{"password":"hidden hidden-tail","link":"https://history.example/data"}"#,
+            "compact":r#"{"password":"hidden"}"#,
+            "markupWithoutUrl":"<Password>hidden</Password>",
+        }),
         command: None,
         at: 0,
         ok: false,
@@ -20707,6 +20856,42 @@ fn history_exports_never_keep_unknown_url_credential_continuations() {
         assert!(!exported.contains("hidden"), "{exported}");
         assert!(exported.contains("GET https://history.example/data"), "{exported}");
         assert!(exported.contains("https://history.example/data?page=2"), "{exported}");
+    }
+}
+
+#[test]
+fn copied_history_replays_public_structured_parameters_without_changing_results() {
+    let mut s = Session::new(Project::default());
+    s.run(
+        "layer.addDataText",
+        &json!({
+            "fileName":"Words.geojson",
+            "text":r#"{"type":"FeatureCollection","features":[
+            {"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"word":"A"}},
+            {"type":"Feature","geometry":{"type":"Point","coordinates":[1,1]},"properties":{"word":"B"}}
+        ]}"#,
+        }),
+    )
+    .unwrap();
+    for separator in ["<div> https://example.org </div>", r#"{"label":"public","link":"https://example.org?format=json"}"#] {
+        s.run(
+            "gp.run",
+            &json!({
+                "tool":"summaryStatistics",
+                "params":{"input":"Words","statistics":[{"field":"word","statistic":"CONCATENATE"}],"separator":separator}
+            }),
+        )
+        .unwrap();
+        let run = s.project.gp_history.len() - 1;
+        let copied = s.run("gp.historyCode", &json!({"run":run,"as":"command"})).unwrap();
+        let (command, params) = copied["code"].as_str().unwrap().split_once(' ').unwrap();
+        let params: Value = serde_json::from_str(params).unwrap();
+        s.run(command, &params).unwrap();
+        let replayed = s.project.tables.last().unwrap();
+        assert_eq!(
+            replayed.value(0, replayed.field_index("CONCATENATE_word").unwrap()),
+            &rustgis_data::Value::Text(format!("A{separator}B"))
+        );
     }
 }
 
@@ -28587,4 +28772,92 @@ fn raster_classes_run_on_another_thread() {
     let r = s.run("dl.classify", &with).unwrap();
     assert_eq!((&r["model"], &r["replaced"]), (&json!("scene_model 2"), &json!(false)), "{r}");
     assert_eq!(s.project.dl_models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["scene_model", "scene_model 2"]);
+}
+
+/// Add Data's and Load All's reads made before the command runs (the desktop app's, on a thread
+/// of their own) are the ones the command takes: it adds what they read, without reading again.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn reads_made_ahead_are_taken_by_the_command() {
+    use base64::Engine;
+    use rustgis_analysis::control::Control;
+    let dir = std::env::temp_dir().join(format!("rustgis-reads-ahead-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let points = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"n":1},"geometry":{"type":"Point","coordinates":[8,47]}},{"type":"Feature","properties":{"n":2},"geometry":{"type":"Point","coordinates":[9,46]}}]}"#;
+    let files = [
+        ("points.geojson", points.as_bytes().to_vec()),
+        ("places.csv", b"name,x,y\nA,8,47\nB,9,46\nC,10,45\n".to_vec()),
+        ("places.xlsx", rustgis_data::sheets::xlsx(&[("Places", &[&["name", "longitude", "latitude"], &["A", "10", "20"]])])),
+        ("utm.tif", base64::engine::general_purpose::STANDARD.decode(utm_tiff_b64()).unwrap()),
+    ];
+    let mut s = Session::new(Project::default());
+    for (name, bytes) in files {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let p = json!({"path": path.display().to_string(), "zoom": false});
+        let ahead = crate::cmd::reads::read_ahead(&s, "layer.addData", &p).unwrap_or_else(|| panic!("{name} is read ahead"));
+        let read = ahead.run(&Control::new()).unwrap();
+        // The file gone: what the command adds can only come from the read.
+        std::fs::remove_file(&path).unwrap();
+        read.placed(&mut s);
+        let r = s.run("layer.addData", &p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(s.read_ahead.is_none(), "{name}: the read was taken");
+        assert!(r.get("layer").is_some() || r.get("layers").is_some(), "{name}: {r}");
+    }
+    assert_eq!(s.map().layers.len(), 4, "{:?}", s.map().layers.iter().map(|l| &l.name).collect::<Vec<_>>());
+    // A file read in place (and any the command reads differently) reads as it runs.
+    let gpkg = json!({"path": dir.join("table.gpkg").display().to_string()});
+    assert!(crate::cmd::reads::read_ahead(&s, "layer.addData", &gpkg).is_none());
+
+    // Load All's read, on a copy of the streamed layer.
+    let path = dir.join("streamed.geojson");
+    std::fs::write(&path, points).unwrap();
+    let id = s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.map().layer(id as u32).unwrap().is_streamed());
+    let p = json!({"layer": id});
+    let read = crate::cmd::reads::read_ahead(&s, "layer.loadAll", &p).unwrap().run(&Control::new()).unwrap();
+    read.placed(&mut s);
+    assert_eq!(s.run("layer.loadAll", &p).unwrap()["features"], 2);
+    assert!(s.read_ahead.is_none());
+    assert!(!s.map().layer(id as u32).unwrap().is_streamed());
+    let unread = |s: &Session| s.notices.iter().filter(|n| n.text.contains("couldn't be read and were left out")).count();
+    assert_eq!(unread(&s), 0, "every row read: nothing said");
+
+    // A row that can't be read is left out and said, once, read ahead or here.
+    let bad = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[8,47]}},{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":"x"}}]}"#;
+    let path = dir.join("bad.geojson");
+    std::fs::write(&path, bad).unwrap();
+    for ahead in [true, false] {
+        let mut s = Session::new(Project::default());
+        let id = s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap();
+        let p = json!({"layer": id});
+        if ahead {
+            crate::cmd::reads::read_ahead(&s, "layer.loadAll", &p).unwrap().run(&Control::new()).unwrap().placed(&mut s);
+        }
+        let before = unread(&s);
+        assert_eq!(s.run("layer.loadAll", &p).unwrap()["features"], 1);
+        assert_eq!(unread(&s), before + 1, "{:?}", s.notices.iter().map(|n| &n.text).collect::<Vec<_>>());
+    }
+
+    // A field added while the read ran: it is read again, with that field kept.
+    let path = dir.join("fields.geojson");
+    std::fs::write(&path, points).unwrap();
+    let id = s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap();
+    let p = json!({"layer": id});
+    let read = crate::cmd::reads::read_ahead(&s, "layer.loadAll", &p).unwrap().run(&Control::new()).unwrap();
+    let mut extra = s.map().layer(id as u32).unwrap().dataset.fields[0].clone();
+    extra.name = "added".into();
+    s.map_mut().layer_mut(id as u32).unwrap().dataset.fields.push(extra);
+    read.placed(&mut s);
+    s.run("layer.loadAll", &p).unwrap();
+    assert!(s.map().layer(id as u32).unwrap().dataset.fields.iter().any(|f| f.name == "added"));
+
+    // A cancelled read gives nothing to add, and says so.
+    let path = dir.join("again.csv");
+    std::fs::write(&path, "name,x,y\nA,8,47\n").unwrap();
+    let ahead = crate::cmd::reads::read_ahead(&s, "layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let control = Control::new();
+    control.cancel();
+    assert!(ahead.run(&control).err().unwrap().contains("cancelled"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -27,7 +27,12 @@ token or signature does not hide the HTTP status or other explanation. The compl
 fragment are omitted, including values with unescaped spaces. For an unknown URL embedded in
 free text, a secret-named query or fragment still omits the rest of that text: those later
 words might be part of the credential, not an explanation. Copied history errors use the same
-conservative rule.
+conservative rule. Ambiguous slash-containing userinfo is omitted rather than guessed to be
+a host, port and path.
+
+Copied run parameters are sanitized as data, without blanket-omitting JSON/XML syntax.
+Public request parameters remain available for replay; credential fields and secret URL
+values extending past whitespace are still removed.
 
 Request and response bodies are not captured by network diagnostics.
 Background requests carry their originating session's weak capture token; failures are not

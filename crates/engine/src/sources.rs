@@ -320,10 +320,16 @@ pub fn message_with_address(address: &str, reason: &str) -> String {
     let raw_shown = rustgis_data::diagnostics::address_in_message(address);
     let shown = address_in_message(address);
     let message = if raw_shown.is_empty() || raw_shown == shown { message } else { message.replace(&raw_shown, &shown) };
-    // A source label can differ from the diagnostic label (its secret query was removed
-    // entirely). Reusing this helper must not prepend that same safe address on every hop.
+    // Reusing this helper must not prepend the same safe source label on every hop.
+    // A part failure may already name a different address; inspect only the sanitized text.
     let reason = message.strip_prefix(&shown).and_then(|tail| tail.strip_prefix(": "));
-    let message = match reason.filter(|reason| reason.strip_prefix(&shown).is_some_and(|tail| tail.is_empty() || tail.starts_with(": "))) {
+    let message = match reason.filter(|reason| {
+        reason.strip_prefix(&shown).is_some_and(|tail| tail.is_empty() || tail.starts_with(": "))
+            || reason.split_once(": ").is_some_and(|(label, _)| {
+                let label = label.strip_suffix("[query omitted]").unwrap_or(label);
+                label.contains("://") && !label.contains(char::is_whitespace)
+            })
+    }) {
         Some(reason) => reason,
         None => &message,
     };

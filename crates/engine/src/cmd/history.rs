@@ -116,7 +116,7 @@ pub(crate) fn redacted(v: &Value) -> Value {
     use crate::sources::looks_like_a_key;
     use rustgis_data::source::credentials::secret_key;
     match v {
-        Value::String(t) => Value::String(redacted_text(t)),
+        Value::String(t) => Value::String(redacted_parameter(t)),
         Value::Array(a) => Value::Array(a.iter().map(redacted).collect()),
         Value::Object(o) => {
             let web = |v: &Value| v.as_str().is_some_and(|t| t.trim_start().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("http")));
@@ -127,11 +127,27 @@ pub(crate) fn redacted(v: &Value) -> Value {
                     && (!k.eq_ignore_ascii_case("key") || v.as_str().is_some_and(looks_like_a_key) || beside_address(k))
             };
             Value::Object(
-                o.iter().map(|(k, v)| (redacted_text(k), if secret(k, v) { Value::String(String::new()) } else { redacted(v) })).collect(),
+                o.iter()
+                    .map(|(k, v)| (redacted_parameter(k), if secret(k, v) { Value::String(String::new()) } else { redacted(v) }))
+                    .collect(),
             )
         }
         other => other.clone(),
     }
+}
+
+/// Replay parameters are data, not diagnostic payloads: preserve innocent markup and public
+/// query parameters, while keeping the same conservative credential boundaries.
+fn redacted_parameter(t: &str) -> String {
+    let structured = t.trim_start().starts_with(['{', '[', '<']);
+    let text = if connection(t) || (!structured && !t.contains(char::is_whitespace)) {
+        crate::sources::redact(t)
+    } else if structured || t.contains("://") {
+        rustgis_data::diagnostics::redact_parameter(t)
+    } else {
+        t.to_string()
+    };
+    query_pairs_emptied(&private_keys_removed(&text))
 }
 
 /// `t` without its secrets. A connection is taken whole, though a libpq one (`PG:host=db
