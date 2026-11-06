@@ -1095,7 +1095,10 @@ impl Session {
         }
         if !self.url_requests.iter().any(|q| q == p.as_ref()) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
-                return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
+                return Err(sources::message_with_address(
+                    &url,
+                    &format!("{MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"),
+                ));
             }
             self.url_requests.push(p.into_owned());
         }

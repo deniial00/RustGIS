@@ -135,12 +135,17 @@ pub(crate) fn redacted(v: &Value) -> Value {
 }
 
 /// `t` without its secrets. A connection is taken whole, though a libpq one (`PG:host=db
-/// password=…`) has spaces in it: `redact` takes its password out. Other text with spaces may
-/// name addresses among its words; a single word may be one. Any text may still be a connection
-/// in a form `redact` doesn't read (libpq's words alone, GDAL's `MYSQL:db,user=…,password=…`,
-/// ODBC's `UID=…;PWD=…`): its secret-named values go too.
+/// password=…`) has spaces in it. A single-word address keeps its nonsecret request parameters
+/// for replay. In prose, an unknown URL's secret value may continue past whitespace: the strict
+/// diagnostic scanner must see it before any address splitter removes its identifying key.
 pub(crate) fn redacted_text(t: &str) -> String {
-    let r = if connection(t) || !t.contains(char::is_whitespace) { crate::sources::redact(t) } else { crate::sources::redact_text(t) };
+    let r = if connection(t) || !t.contains(char::is_whitespace) {
+        crate::sources::redact(t)
+    } else if t.contains("://") {
+        rustgis_data::diagnostics::redact(t)
+    } else {
+        t.to_string()
+    };
     // After `redact` too: a prefix it knows may come in a form it doesn't (GDAL's `MYSQL:`).
     query_pairs_emptied(&private_keys_removed(&r))
 }

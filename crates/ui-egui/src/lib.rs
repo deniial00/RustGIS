@@ -2877,7 +2877,7 @@ impl RustGisApp {
                     },
                     Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
                 );
-                self.session.notify(i18n::fmt("Opening {url}…", &[("url", url)]), false);
+                self.session.notify(i18n::fmt("Opening {url}…", &[("url", &rustgis_engine::sources::address_in_message(url))]), false);
                 let id = self.session.download_started();
                 if let Some((old, ..)) = self.ui.project_download.replace((id, url.to_string(), slot)) {
                     self.session.download_failed(old);
@@ -2973,8 +2973,8 @@ impl RustGisApp {
                         );
                     }
                     // An address read through a saved S3 connection is said as the address it wraps.
-                    let shown = rustgis_engine::data::s3_address::inner(url);
-                    self.session.notify(i18n::fmt("Reading {url}…", &[("url", shown)]), false);
+                    let shown = rustgis_engine::sources::address_in_message(url);
+                    self.session.notify(i18n::fmt("Reading {url}…", &[("url", &shown)]), false);
                     let mut probe = p.clone();
                     probe["url"] = json!(address);
                     if let Some(o) = probe.as_object_mut() {
@@ -3022,8 +3022,8 @@ impl RustGisApp {
                 if let Some(origin) = &origin {
                     q[connectiontree::ORIGIN] = json!(origin);
                 }
-                let shown = rustgis_engine::data::s3_address::inner(&url);
-                self.session.notify(i18n::fmt("Downloading {url}…", &[("url", shown)]), false);
+                let shown = rustgis_engine::sources::address_in_message(&url);
+                self.session.notify(i18n::fmt("Downloading {url}…", &[("url", &shown)]), false);
                 let id = self.session.download_started();
                 // A service's features: read page by page from the start, off the frame (an ArcGIS
                 // layer's description first).
@@ -4065,14 +4065,17 @@ impl RustGisApp {
             if !self.session.download_done(id) {
                 if r.is_ok() {
                     self.session.notify(
-                        i18n::fmt("{url}: downloaded after another project was opened, so it wasn't opened", &[("url", &url)]),
+                        i18n::fmt(
+                            "{url}: downloaded after another project was opened, so it wasn't opened",
+                            &[("url", &rustgis_engine::sources::address_in_message(&url))],
+                        ),
                         false,
                     );
                 }
                 return self.poll_data_downloads();
             }
             if let Err(e) = r.and_then(|bytes| self.open_project_bytes(project_file_name(&url), &bytes)) {
-                self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
+                self.session.notify(rustgis_engine::sources::message_with_address(&url, &e), true);
             }
         }
         self.poll_data_downloads();
@@ -4138,7 +4141,7 @@ impl RustGisApp {
                     p["whole"] = json!(true);
                     let _ = connectiontree::run_add_url(self, p, origin.as_deref());
                 }
-                Err(e) => self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true),
+                Err(e) => self.session.notify(rustgis_engine::sources::message_with_address(&url, &e), true),
             }
         }
         let mut landed = Vec::new();
@@ -4156,12 +4159,7 @@ impl RustGisApp {
                 Err(e) => {
                     self.session.download_failed(id);
                     rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &p);
-                    // Named without the address's keys, token or signature.
-                    let e = e.strip_prefix(url.as_str()).map(|r| r.trim_start_matches(": ").to_string()).unwrap_or(e);
-                    let why = rustgis_engine::sources::redact_text(&e);
-                    // An error that names its own address (a Shapefile's part) isn't named again.
-                    let named = why.split_once(": ").is_some_and(|(head, _)| head.contains("://") && !head.contains(' '));
-                    self.session.notify(if named { why } else { format!("{}: {why}", rustgis_engine::sources::redact(&url)) }, true);
+                    self.session.notify(rustgis_engine::sources::message_with_address(&url, &e), true);
                 }
             }
         }
@@ -4190,7 +4188,13 @@ impl RustGisApp {
     fn add_download(&mut self, landed: serviceui::Landed, current: bool) {
         let serviceui::Landed { id, url, params: mut p, origin } = landed;
         if !current {
-            self.session.notify(i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", &url)]), false);
+            self.session.notify(
+                i18n::fmt(
+                    "{url}: downloaded after its project was closed, so it wasn't added",
+                    &[("url", &rustgis_engine::sources::address_in_message(&url))],
+                ),
+                false,
+            );
             return;
         }
         p["id"] = json!(id);
@@ -4211,7 +4215,7 @@ impl RustGisApp {
             }
             Err(e) => {
                 rustgis_engine::cmd::geolibre::discard_pending(&mut self.session, &pending);
-                self.session.notify(if e.starts_with(&url) { e } else { format!("{url}: {e}") }, true);
+                self.session.notify(rustgis_engine::sources::message_with_address(&url, &e), true);
             }
         }
     }

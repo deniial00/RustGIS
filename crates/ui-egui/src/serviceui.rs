@@ -406,7 +406,13 @@ pub fn poll_pages(app: &mut RustGisApp, ctx: &egui::Context) {
     for read in std::mem::take(&mut app.ui.service_pages) {
         if !app.session.download_is_pending(read.landed.id) {
             let url = &read.landed.url;
-            app.session.notify(i18n::fmt("{url}: downloaded after its project was closed, so it wasn't added", &[("url", url)]), false);
+            app.session.notify(
+                i18n::fmt(
+                    "{url}: downloaded after its project was closed, so it wasn't added",
+                    &[("url", &rustgis_engine::sources::address_in_message(url))],
+                ),
+                false,
+            );
             continue;
         }
         let answer = read.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -455,7 +461,7 @@ fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Step) {
         Step::Failed(e) => {
             app.session.download_failed(landed.id);
             let url = &landed.url;
-            app.session.notify(if e.starts_with(url.as_str()) { e } else { format!("{url}: {e}") }, true);
+            app.session.notify(rustgis_engine::sources::message_with_address(url, &e), true);
         }
         Step::Fetch(pages) => {
             let next = next_request(app, &landed.params, &pages);
@@ -477,8 +483,9 @@ fn go_on(app: &mut RustGisApp, landed: Landed, left: usize, step: Step) {
 /// Says what was left unread of a service layer's features, by its name.
 fn noted(app: &mut RustGisApp, landed: &Landed, note: Option<String>) {
     if let Some(note) = note {
-        let name = landed.params.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or(&landed.url);
-        app.session.notify(format!("{name}: {note}"), false);
+        let name = landed.params.get("name").and_then(Value::as_str).filter(|n| !n.is_empty());
+        let shown = name.map(str::to_string).unwrap_or_else(|| rustgis_engine::sources::address_in_message(&landed.url));
+        app.session.notify(i18n::fmt("{name}: {note}", &[("name", &shown), ("note", &note)]), false);
     }
 }
 

@@ -1960,6 +1960,45 @@ fn data_from_a_web_address_lands_later() {
     assert!(h.state().ui.downloads.is_empty());
 }
 
+/// A failed header probe, ordinary download and project download retain their HTTP reason after
+/// notices and diagnostic history redact the message again (#1475).
+#[test]
+fn address_failures_keep_status_without_credentials() {
+    use ogc_server::{Route, Server};
+    let server = Server::new(
+        ["probe.tif", "remote.fgb", "download.geojson", "project.rgis"]
+            .into_iter()
+            .map(|name| Route { status: 503, ..Route::new(&format!("/{name}"), "") })
+            .collect(),
+    );
+    let mut h = harness();
+    h.step();
+    for (command, file, query) in [
+        ("ui.addUrl", "probe.tif", "sig=hidden-probe"),
+        ("ui.addUrl", "remote.fgb", "token=hidden-remote"),
+        ("ui.addUrl", "download.geojson", "key=hidden-download"),
+        ("ui.openUrl", "project.rgis", "%74oken=hidden-project"),
+    ] {
+        let url = format!("{}/{file}?{query}#hidden-fragment", server.base);
+        h.state_mut().session.notices.clear();
+        h.state_mut().run(command, json!({"url": url})).unwrap();
+        for _ in 0..200 {
+            h.step();
+            if h.state().session.notices.iter().any(|n| n.error) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let notices = &h.state().session.notices;
+        let failure = notices.iter().find(|n| n.error).unwrap_or_else(|| panic!("{file}: no failure notice"));
+        assert!(failure.text.contains(file) && failure.text.contains("503"), "{failure:?}");
+        assert!(notices.iter().all(|n| !n.text.contains("hidden")), "{notices:?}");
+        let report = h.state().session.diagnostics.report(rustgis_engine::data::diagnostics::Filter::All);
+        assert!(!report.contains("hidden"), "{report}");
+        assert!(report.lines().any(|line| line.contains(file) && line.contains("503")), "{report}");
+    }
+}
+
 /// Add Data From URL reads a cloud-optimised GeoTIFF in place from an address that names no file
 /// (an API such as Vantor's `…/geotiff?…`): its first bytes are probed off the frame, then the
 /// layer reads its tiles by range, never downloading it whole.
