@@ -84,6 +84,7 @@ struct Slot {
     used: u64,
     /// When the map last asked for it ([`get`]): a waiting tile not asked for lately is dropped.
     asked: Instant,
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -93,6 +94,22 @@ struct Cache {
     tick: u64,
     /// When the map last asked for any address.
     latest: Option<Instant>,
+}
+
+impl Cache {
+    fn forget_archive(&mut self, archive: &str) {
+        let mut dropped = 0;
+        self.slots.retain(|key, slot| {
+            if resource_of(key) != archive {
+                return true;
+            }
+            if let Entry::Ready(_, bytes) = &slot.entry {
+                dropped += bytes;
+            }
+            false
+        });
+        self.bytes = self.bytes.saturating_sub(dropped);
+    }
 }
 
 fn cache() -> &'static Mutex<Cache> {
@@ -106,6 +123,26 @@ fn lock() -> std::sync::MutexGuard<'static, Cache> {
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Source revisions are locked before any retained cache. Publication and reload share this
+/// lock; callbacks and I/O must always run after releasing it.
+fn archive_epochs() -> &'static Mutex<HashMap<String, u64>> {
+    static E: std::sync::LazyLock<Mutex<HashMap<String, u64>>> = std::sync::LazyLock::new(Mutex::default);
+    &E
+}
+
+pub(crate) fn archive_epoch(url: &str) -> u64 {
+    archive_epochs().lock().unwrap_or_else(|e| e.into_inner()).get(resource_of(url)).copied().unwrap_or(0)
+}
+
+pub(crate) fn if_archive_current<T>(url: &str, epoch: u64, f: impl FnOnce() -> T) -> Option<T> {
+    let epochs = archive_epochs().lock().unwrap_or_else(|e| e.into_inner());
+    if epochs.get(resource_of(url)).copied().unwrap_or(0) != epoch {
+        drop(epochs);
+        return None;
+    }
+    Some(f())
+}
 
 fn fetcher() -> &'static Mutex<Option<Arc<Fetcher>>> {
     static F: OnceLock<Mutex<Option<Arc<Fetcher>>>> = OnceLock::new();
@@ -206,6 +243,8 @@ fn request(url: &str, want: Want, omit: &'static [u16]) -> State {
     if let Some(base) = crate::warp::direct(url) {
         return request(base, want, omit);
     }
+    let epochs = archive_epochs().lock().unwrap_or_else(|e| e.into_inner());
+    let epoch = epochs.get(resource_of(url)).copied().unwrap_or(0);
     let now = Instant::now();
     let mut c = lock();
     c.tick += 1;
@@ -223,6 +262,7 @@ fn request(url: &str, want: Want, omit: &'static [u16]) -> State {
     }
     if crate::warp::is_warp(url) {
         drop(c);
+        drop(epochs);
         // Made once its pictures are here; asked again (as the map draws) until then.
         return match crate::warp::make(url) {
             crate::warp::Made::Waiting => State::Pending,
@@ -239,9 +279,10 @@ fn request(url: &str, want: Want, omit: &'static [u16]) -> State {
             }
         };
     }
-    c.slots.insert(url.to_string(), Slot { entry: Entry::Pending, used: tick, asked: now });
+    c.slots.insert(url.to_string(), Slot { entry: Entry::Pending, used: tick, asked: now, epoch });
     drop(c);
-    start(url.to_string(), want, omit);
+    drop(epochs);
+    start(url.to_string(), want, omit, epoch);
     State::Pending
 }
 
@@ -289,7 +330,7 @@ fn resource_of(key: &str) -> &str {
     let key = split_download_limit(key).0;
     let key = split_tail(key).0;
     let key = split_range(key).0;
-    if key.starts_with(crate::pmtiles::SCHEME) || key.starts_with(crate::cog::SCHEME) {
+    if key.starts_with(crate::pmtiles::SCHEME) || key.starts_with(crate::mbtiles::SCHEME) || key.starts_with(crate::cog::SCHEME) {
         return key.split_once('@').map_or(key, |(_, archive)| crate::cog::split(archive).0);
     }
     key
@@ -320,6 +361,22 @@ pub fn forget(url: &str) {
     crate::warp::forget();
     rustgis_data::source::remote::forget_file(url);
     GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Reloads just this archive, including pending reads, metadata, directories, handles and
+/// derived styles. Call only after uncached validation succeeds. Older answers are discarded.
+pub fn reload_archive(url: &str) {
+    let mut epochs = archive_epochs().lock().unwrap_or_else(|e| e.into_inner());
+    let epoch = epochs.entry(url.to_string()).or_default();
+    *epoch = epoch.wrapping_add(1);
+    lock().forget_archive(url);
+    let abandoned = crate::pmtiles::reload_archive(url);
+    crate::mbtiles::reload_archive(url);
+    crate::source::forget_archive(url);
+    drop(epochs);
+    // Dropping callbacks can complete tile answers and start queued reads: never under locks.
+    drop(abandoned);
+    notify();
 }
 
 /// Waits (up to `timeout`) for the fetches under way to finish. Native only: in the browser
@@ -375,7 +432,7 @@ pub fn wait_for_news_unless(since: u64, timeout: Duration, stop: impl Fn() -> bo
 }
 
 /// A waiting fetch: what to decode it as, whose diagnostics it goes to, and its expected statuses.
-type Job = (Want, Capture, &'static [u16]);
+type Job = (Want, Capture, &'static [u16], u64);
 
 fn queue() -> &'static Mutex<Queue<Job>> {
     static Q: OnceLock<Mutex<Queue<Job>>> = OnceLock::new();
@@ -383,7 +440,7 @@ fn queue() -> &'static Mutex<Queue<Job>> {
 }
 
 /// Asks for a tile: fetched now when its server has room, else it waits its turn.
-fn start(url: String, want: Want, omit: &'static [u16]) {
+fn start(url: String, want: Want, omit: &'static [u16], epoch: u64) {
     let capture = Capture::current();
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let mut swept = Vec::new();
@@ -391,7 +448,7 @@ fn start(url: String, want: Want, omit: &'static [u16]) {
         let mut q = queue().lock().unwrap_or_else(|e| e.into_inner());
         let mut c = lock();
         let latest = c.latest.unwrap_or_else(Instant::now);
-        let now = q.push(url, (want, capture, omit), |u| c.slots.get(u).map(|s| s.asked), latest, &mut swept);
+        let now = q.push(url, (want, capture, omit, epoch), |u| c.slots.get(u).map(|s| s.asked), latest, &mut swept);
         // Under the same lock as the choice: a tile asked for again meanwhile isn't forgotten.
         forget_dropped(&mut c, &swept);
         now
@@ -417,7 +474,7 @@ fn release(host: &str) {
 /// Called holding the cache's lock taken to choose them, so a tile can't be asked for between.
 fn forget_dropped(c: &mut Cache, dropped: &[Waiting<Job>]) {
     for w in dropped {
-        if matches!(c.slots.get(&w.url), Some(Slot { entry: Entry::Pending, .. })) {
+        if matches!(c.slots.get(&w.url), Some(Slot { entry: Entry::Pending, epoch, .. }) if *epoch == w.job.3) {
             c.slots.remove(&w.url);
         }
     }
@@ -450,9 +507,9 @@ fn launch(jobs: Vec<Waiting<Job>>) {
             }
             let _lower = Lower;
             while let Some(w) = pop() {
-                let (want, capture, omit) = w.job;
+                let (want, capture, omit, epoch) = w.job;
                 let _scope = capture.enter();
-                fetch_tile(w.url, w.host, want, omit);
+                fetch_tile(w.url, w.host, want, omit, epoch);
             }
         }
         // A tile queued after the last `pop` and before the flag went down is started here.
@@ -469,6 +526,7 @@ struct Answer {
     key: String,
     host: String,
     entry: Option<Entry>,
+    epoch: u64,
 }
 
 impl Answer {
@@ -480,23 +538,27 @@ impl Answer {
 
 impl Drop for Answer {
     fn drop(&mut self) {
-        match self.entry.take() {
+        let entry = self.entry.take();
+        if_archive_current(&self.key, self.epoch, || match entry {
             Some(entry) => store(&self.key, entry),
-            // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
+            // An old unanswered fetch must not remove a newer pending request.
             None => {
                 let mut c = lock();
                 if matches!(c.slots.get(&self.key), Some(Slot { entry: Entry::Pending, .. })) {
                     c.slots.remove(&self.key);
                 }
             }
-        }
+        });
         release(&self.host);
         finished();
     }
 }
 
-fn fetch_tile(url: String, host: String, want: Want, omit: &'static [u16]) {
-    let answer = Answer { key: url.clone(), host, entry: None };
+fn fetch_tile(url: String, host: String, want: Want, omit: &'static [u16], epoch: u64) {
+    let answer = Answer { key: url.clone(), host, entry: None, epoch };
+    if archive_epoch(&url) != epoch {
+        return;
+    }
     let done: Done = Box::new(move |bytes| {
         if matches!(&bytes, Err(e) if e == DROPPED) {
             return;
@@ -1063,17 +1125,22 @@ fn store(url: &str, entry: Entry) {
         return;
     }
     let mut c = lock();
+    store_in(&mut c, url, entry);
+}
+
+fn store_in(c: &mut Cache, url: &str, entry: Entry) {
     let added = if let Entry::Ready(_, n) = &entry { *n } else { 0 };
     // Dropped while it was fetched (cleared, or evicted): kept anyway, it was asked for.
     let tick = c.tick;
     let asked = c.slots.get(url).map_or_else(Instant::now, |s| s.asked);
-    let old = c.slots.insert(url.to_string(), Slot { entry, used: tick, asked });
+    let epoch = c.slots.get(url).map_or(0, |s| s.epoch);
+    let old = c.slots.insert(url.to_string(), Slot { entry, used: tick, asked, epoch });
     if let Some(Slot { entry: Entry::Ready(_, n), .. }) = old {
         c.bytes = c.bytes.saturating_sub(n);
     }
     c.bytes += added;
     if c.bytes > BUDGET {
-        evict(&mut c);
+        evict(c);
     }
 }
 
@@ -1841,6 +1908,75 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_reload_excludes_old_decodes_and_keeps_other_sources() {
+        let archive = "/cache-generation-regression.pmtiles";
+        let tile = format!("pmtiles:0/0/0@{archive}");
+        let other = "mbtiles:0/0/0@/cache-generation-other.mbtiles";
+        let old_epoch = archive_epoch(archive);
+        let mut c = Cache::default();
+        store_in(&mut c, &tile, Entry::Ready(Arc::new(Payload::Json(serde_json::json!("old"))), 64));
+        store_in(&mut c, other, Entry::Ready(Arc::new(Payload::Empty), 64));
+        let other_payload = match &c.slots[other].entry {
+            Entry::Ready(payload, _) => payload.clone(),
+            _ => panic!("ready tile"),
+        };
+        let pending = format!("pmtiles:1/0/0@{archive}");
+        c.slots.insert(pending.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now(), epoch: old_epoch });
+        reload_archive(archive);
+        c.forget_archive(archive);
+        assert!(!c.slots.contains_key(&tile) && !c.slots.contains_key(&pending));
+        assert_eq!(c.bytes, 64);
+        let fresh_epoch = archive_epoch(archive);
+        c.slots.insert(tile.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now(), epoch: fresh_epoch });
+        assert!(
+            if_archive_current(&tile, old_epoch, || {
+                store_in(&mut c, &tile, Entry::Ready(Arc::new(Payload::Json(serde_json::json!("stale"))), 64));
+            })
+            .is_none()
+        );
+        assert!(matches!(c.slots[&tile].entry, Entry::Pending));
+        if_archive_current(&tile, fresh_epoch, || {
+            store_in(&mut c, &tile, Entry::Ready(Arc::new(Payload::Json(serde_json::json!("fresh"))), 64));
+        });
+        assert!(matches!(&c.slots[&tile].entry, Entry::Ready(p, _) if matches!(p.as_ref(), Payload::Json(v) if v == "fresh")));
+        assert!(matches!(&c.slots[other].entry, Entry::Ready(p, _) if Arc::ptr_eq(p, &other_payload)));
+        assert_eq!(resource_of(other), "/cache-generation-other.mbtiles");
+    }
+
+    #[test]
+    fn delayed_archive_answers_cannot_replace_new_pixels_or_remove_new_pending_reads() {
+        for scheme in ["pmtiles", "mbtiles"] {
+            let archive = format!("/delayed-answer.{scheme}");
+            let key = format!("{scheme}:0/0/0@{archive}");
+            let old_epoch = archive_epoch(&archive);
+            let mut old_picture = Pixmap::new(1, 1).unwrap();
+            old_picture.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+            // Hold the production completion object after decoding, as an asynchronous decoder
+            // does. No worker timing or process-wide fetcher replacement is involved.
+            IN_FLIGHT.fetch_add(2, Ordering::Relaxed);
+            let late = Answer {
+                key: key.clone(),
+                host: "delayed-answer.test".into(),
+                epoch: old_epoch,
+                entry: Some(Entry::Ready(Arc::new(Payload::Image(old_picture)), 4)),
+            };
+            let unanswered = Answer { key: key.clone(), host: "delayed-answer.test".into(), epoch: old_epoch, entry: None };
+            reload_archive(&archive);
+            let current = archive_epoch(&archive);
+            lock().slots.insert(key.clone(), Slot { entry: Entry::Pending, used: 0, asked: Instant::now(), epoch: current });
+            drop(unanswered);
+            assert!(matches!(lock().slots.get(&key).map(|s| &s.entry), Some(Entry::Pending)));
+            let mut fresh_picture = Pixmap::new(1, 1).unwrap();
+            fresh_picture.fill(tiny_skia::Color::from_rgba8(0, 255, 0, 255));
+            let fresh = Arc::new(Payload::Image(fresh_picture));
+            store(&key, Entry::Ready(fresh.clone(), 4));
+            drop(late);
+            assert!(Arc::ptr_eq(&peek(&key).unwrap(), &fresh), "an old {scheme} decode replaced the new pixels");
+            reload_archive(&archive);
+        }
+    }
 
     fn network_records(history: &rustgis_data::diagnostics::History, url: &str) -> Vec<rustgis_data::diagnostics::Record> {
         history.records().into_iter().filter(|record| record.network.as_ref().is_some_and(|network| network.url == url)).collect()
