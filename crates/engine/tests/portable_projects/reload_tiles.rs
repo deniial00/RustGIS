@@ -287,3 +287,183 @@ fn archive_reload_rejects_remote_upload_and_invalid_selectors() {
         rejected(&mut s, p, expected);
     }
 }
+
+#[test]
+fn invalid_raster_and_unreadable_tile_pages_do_not_evict_retained_mbtiles() {
+    for damaged_page in [false, true] {
+        let f = Fixture::new(if damaged_page { "reload-tile-page" } else { "reload-png-signature" });
+        let path = f.file("linked.mbtiles");
+        write_archive(&path, [255, 0, 0, 255], "Retained credits");
+        let mut s = session();
+        s.run("map.addTiles", &json!({"url":path,"overlay":true})).unwrap();
+        let before = s.map().tiles[0].clone();
+        let pixels = decoded(&before);
+        let credits = style(&before);
+        rustgis_engine::data::mbtiles::close(&path);
+        let c = rusqlite::Connection::open(&path).unwrap();
+        if damaged_page {
+            let page_size = c.query_row("PRAGMA page_size", [], |r| r.get::<_, u32>(0)).unwrap() as usize;
+            let root = c.query_row("SELECT rootpage FROM sqlite_master WHERE name='tiles'", [], |r| r.get::<_, u32>(0)).unwrap() as usize;
+            drop(c);
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[(root - 1) * page_size] = 0;
+            std::fs::write(&path, bytes).unwrap();
+            // Metadata is readable; this is not another damaged-header test.
+            assert!(rustgis_engine::data::mbtiles::open_path(&path).is_ok());
+            rustgis_engine::data::mbtiles::close(&path);
+        } else {
+            c.execute("UPDATE tiles SET tile_data=?1", [b"\x89PNG\r\n\x1a\n".as_slice()]).unwrap();
+            drop(c);
+        }
+        rejected(&mut s, json!({"index":0}), "retry Reload Data");
+        assert!(Arc::ptr_eq(&decoded(&before), &pixels));
+        assert!(Arc::ptr_eq(&style(&before), &credits));
+        write_archive_after_truncation(&path, [0, 255, 0, 255], "Recovered credits");
+        s.run("map.reloadTiles", &json!({"index":0})).unwrap();
+        assert_color(&decoded(&before), [0, 255, 0, 255]);
+        rustgis_engine::data::mbtiles::close(&path);
+    }
+}
+
+fn write_leaf_archive(path: &Path, corrupt: bool) {
+    let archive = pmtiles::NewArchive {
+        tile_type: pmtiles::TileType::Png,
+        gzipped_tiles: false,
+        bounds: [-180.0, -85.0, 180.0, 85.0],
+        metadata: json!({"attribution":"Leaf credits"}),
+    };
+    let bytes = pmtiles::write(vec![(0, 0, 0, picture([0, 255, 0, 255]))], &archive).unwrap();
+    let number = |at| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+    let mut leaf = bytes[number(8)..number(8) + number(16)].to_vec();
+    if corrupt {
+        // One entry's final offset varint has no terminating byte.
+        *leaf.last_mut().unwrap() = 0x80;
+    }
+    assert!(leaf.len() < 128);
+    let root = [1, 0, 0, leaf.len() as u8, 1];
+    let meta = &bytes[number(24)..number(24) + number(32)];
+    let data = &bytes[number(56)..number(56) + number(64)];
+    let mut header = bytes[..127].to_vec();
+    let meta_at = 127 + root.len();
+    let leaf_at = meta_at + meta.len();
+    let data_at = leaf_at + leaf.len();
+    for (at, value) in
+        [(8, 127), (16, root.len()), (24, meta_at), (32, meta.len()), (40, leaf_at), (48, leaf.len()), (56, data_at), (64, data.len())]
+    {
+        header[at..at + 8].copy_from_slice(&(value as u64).to_le_bytes());
+    }
+    std::fs::write(path, [header.as_slice(), root.as_slice(), meta, leaf.as_slice(), data].concat()).unwrap();
+}
+
+#[test]
+fn malformed_leaf_reload_retains_pixels_and_can_retry_with_a_valid_leaf() {
+    let f = Fixture::new("reload-malformed-leaf");
+    let path = f.file("linked.pmtiles");
+    write_archive(&path, [255, 0, 0, 255], "Retained credits");
+    let mut s = session();
+    s.run("map.addTiles", &json!({"url":path,"overlay":true})).unwrap();
+    let before = s.map().tiles[0].clone();
+    let pixels = decoded(&before);
+    let credits = style(&before);
+    let camera = s.map().camera;
+    write_leaf_archive(&path, true);
+    rejected(&mut s, json!({"index":0}), "retry Reload Data");
+    assert!(Arc::ptr_eq(&decoded(&before), &pixels));
+    assert!(Arc::ptr_eq(&style(&before), &credits));
+    assert_eq!(s.map().camera, camera);
+    write_leaf_archive(&path, false);
+    s.run("map.reloadTiles", &json!({"index":0})).unwrap();
+    assert_color(&decoded(&before), [0, 255, 0, 255]);
+}
+
+#[test]
+fn untrusted_workflows_cannot_reload_but_user_authored_workflows_can() {
+    let f = Fixture::new("reload-workflow-trust");
+    let path = f.file("linked.pmtiles");
+    write_archive(&path, [255, 0, 0, 255], "Before");
+    let mut s = session();
+    s.run("map.addTiles", &json!({"url":path,"overlay":true})).unwrap();
+    let tile = s.map().tiles[0].clone();
+    let old_pixels = decoded(&tile);
+    let task = json!({"name":"Reload task","steps":[{"title":"Reload","command":"map.reloadTiles","params":{"index":0}}]});
+    let error = s.run("task.import", &json!({"text":task.to_string()})).unwrap_err();
+    assert!(error.contains("imported tasks"), "{error}");
+    let notebook = json!({"nbformat":4,"metadata":{"language_info":{"name":"rustgis"}},"cells":[
+        {"cell_type":"code","source":"map.reloadTiles {\"index\":0}"}
+    ]});
+    s.run("notebook.open", &json!({"text":notebook.to_string()})).unwrap();
+    let answer = s.run("notebook.run", &Value::Null).unwrap();
+    assert_eq!(answer["error"], 0);
+    assert!(s.project.notebooks.last().unwrap().cells[0].error);
+    assert!(Arc::ptr_eq(&decoded(&tile), &old_pixels));
+    write_archive(&path, [0, 255, 0, 255], "After");
+    s.run("task.new", &task).unwrap();
+    s.run("task.run", &json!({"task":"Reload task"})).unwrap();
+    assert_color(&decoded(&tile), [0, 255, 0, 255]);
+    s.run("notebook.new", &json!({"name":"User reload"})).unwrap();
+    s.run("notebook.addCell", &json!({"source":"map.reloadTiles {\"index\":0}"})).unwrap();
+    let answer = s.run("notebook.run", &Value::Null).unwrap();
+    assert!(answer.get("error").is_none(), "{answer}");
+}
+
+#[test]
+fn successful_reload_cancels_only_its_own_pending_archive_framing() {
+    let f = Fixture::new("reload-pending-view");
+    let path = f.file("linked.pmtiles");
+    let other = f.file("other.pmtiles");
+    for file in [&path, &other] {
+        let archive = pmtiles::NewArchive {
+            tile_type: pmtiles::TileType::Png,
+            gzipped_tiles: false,
+            bounds: [20.0, 30.0, 25.0, 35.0],
+            metadata: json!({}),
+        };
+        std::fs::write(file, pmtiles::write(vec![(0, 0, 0, picture([255, 0, 0, 255]))], &archive).unwrap()).unwrap();
+    }
+    let mut s = session();
+    s.run("map.addTiles", &json!({"url":path,"overlay":true})).unwrap();
+    s.run("map.addTiles", &json!({"url":other,"overlay":true})).unwrap();
+    s.style_view = None;
+    s.run("map.goToXY", &json!({"lon":-40,"lat":-20,"scale":50_000_000})).unwrap();
+    let target = s.map().tiles.iter().position(|t| t.url == path.to_str().unwrap()).unwrap();
+    let tile = s.map().tiles[target].clone();
+    let camera = s.map().camera;
+    cache::reload_archive(&tile.url);
+    s.style_view = Some((tile.clone(), camera, s.map().instance_id()));
+    s.run("map.reloadTiles", &json!({"index":target})).unwrap();
+    assert!(s.style_view.is_none(), "late target metadata must no longer frame the view");
+    let _ = style(&tile);
+    assert!(!s.follow_style_view());
+    assert_eq!(s.map().camera, camera);
+    let other_tile = s.map().tiles.iter().find(|t| t.url != tile.url).unwrap().clone();
+    cache::reload_archive(&other_tile.url);
+    s.style_view = Some((other_tile.clone(), camera, s.map().instance_id()));
+    s.run("map.reloadTiles", &json!({"index":target})).unwrap();
+    assert!(s.style_view.as_ref().is_some_and(|(pending, _, _)| pending.url == other_tile.url));
+    let _ = style(&other_tile);
+    assert!(s.follow_style_view(), "another archive's requested framing still works");
+    assert_ne!(s.map().camera, camera);
+}
+
+#[test]
+fn prepared_archive_validation_does_not_evict_or_overwrite_changed_settings() {
+    let f = Fixture::new("reload-read-ahead");
+    let path = f.file("linked.pmtiles");
+    write_archive(&path, [255, 0, 0, 255], "Before");
+    let mut s = session();
+    s.run("map.addTiles", &json!({"url":path,"overlay":true})).unwrap();
+    let tile = s.map().tiles[0].clone();
+    let old_pixels = decoded(&tile);
+    write_archive(&path, [0, 255, 0, 255], "After");
+    let control = rustgis_engine::analysis::control::Control::stoppable();
+    let read = rustgis_engine::cmd::reads::read_ahead(&s, "map.reloadTiles", &json!({"index":0})).unwrap().run(&control).unwrap();
+    assert!(Arc::ptr_eq(&decoded(&tile), &old_pixels), "validation alone must not invalidate");
+    s.run("map.setTiles", &json!({"index":0,"opacity":0.4})).unwrap();
+    read.placed(&mut s);
+    rejected(&mut s, json!({"index":0}), "settings changed");
+    assert_eq!(s.map().tiles[0].opacity, 0.4);
+    assert!(Arc::ptr_eq(&decoded(&tile), &old_pixels));
+    s.run("map.reloadTiles", &json!({"index":0})).unwrap();
+    assert_eq!(s.map().tiles[0].opacity, 0.4);
+    assert_color(&decoded(&tile), [0, 255, 0, 255]);
+}

@@ -222,6 +222,12 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
   A style's root `center`, `zoom`, `bearing` and `pitch` say where it opens: `map.addTiles` with
   `"view": true` takes the map there once the style has loaded.
 
+Present PMTiles metadata must be complete, decodable and a JSON object; malformed metadata or a
+stored metadata section over **16 MiB** refuses ordinary loading, repair and reload rather than
+silently losing credits or source-layer information. This is a metadata limit, not a limit on the
+archive's total size; absent metadata remains supported. MBTiles metadata names and values must
+be text: unreadable or NULL metadata cells also produce an error rather than being silently skipped.
+
 HTTPS tiles use [platform certificate trust](data.md#https-certificates) on desktop and the
 command line, including private CAs trusted by the operating system. The web app uses the browser.
 
@@ -268,12 +274,24 @@ The layer keeps its name, visibility, opacity, blend, drawing order, source-laye
 style and other presentation settings; the map's view stays where it is. Undo cannot restore
 file contents that another program has overwritten.
 
+On the desktop, reload and repair validate on a background worker; the status bar shows the work
+and **Cancel**. Only one read runs at a time. If its project, map, archive or presentation changes
+before it lands, the result is left unapplied: retry on the intended target.
+
 Reload first checks that the file can be read. If it is missing, unreadable or invalid, a notice
 explains the failure and the existing layer and retained cached data are left unchanged.
 Finish writing or restore the file, then choose **Reload Data** again. If the file has moved,
 choose **Repair Data Source…** instead and select its new location. Repair also checks the
 replacement before changing the source; cancelling or choosing an unreadable or invalid archive
 leaves the existing source and layer unchanged, so you can retry with a valid file.
+
+Validation reads one size-bounded raster sample from a fresh MBTiles connection and decodes it
+before dropping retained caches. PMTiles validation checks all reachable index directories, not
+every tile payload. It allows at most **64 MiB stored and 64 MiB decoded index bytes**, **1,048,576
+index entries**, **4,096 unique directories** (including the root), and **four leaf levels**;
+each stored directory read is limited to **16 MiB**. An invalid index or an exceeded validation
+budget is an explicit error without eviction, even if an unusually large index is otherwise valid.
+
 Neither action is available for local archives in the web app, or for remote tile services.
 On Windows, an open MBTiles file may not be replaceable while RustGIS holds it open: reload
 does not bypass that operating-system restriction. Close RustGIS before replacing the file,

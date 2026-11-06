@@ -29,6 +29,10 @@ const MAX_ENTRIES: usize = 1 << 20;
 const MAX_DEPTH: usize = 4;
 /// Leaf directories kept.
 const MAX_LEAVES: usize = 256;
+/// Fresh validation bounds the entire reachable index, including the root.
+#[cfg(not(target_arch = "wasm32"))]
+const INDEX_BUDGET: IndexBudget =
+    IndexBudget { stored: (MAX_BYTES * 4) as u64, decoded: (MAX_BYTES * 4) as u64, entries: MAX_ENTRIES, directories: MAX_LEAVES * 16 };
 /// A failed archive is tried again after this long.
 const RETRY: Duration = Duration::from_secs(60);
 
@@ -114,7 +118,12 @@ impl Compression {
         };
         match self {
             Compression::None => Ok(b),
-            Compression::Gzip => gunzip(&b),
+            Compression::Gzip => {
+                if !b.starts_with(&[0x1f, 0x8b]) {
+                    return Err("gzip: invalid header".into());
+                }
+                gunzip(&b)
+            }
             Compression::Brotli => bounded(&mut brotli_decompressor::Decompressor::new(b.as_slice(), 4096), "Brotli"),
             Compression::Zstd => unzstd(&b, limit),
         }
@@ -753,10 +762,16 @@ fn metadata(info: &mut Info, bytes: Vec<u8>, expected: u64) -> Result<(), String
     Ok(())
 }
 
-/// Reads the current local file without consulting or changing retained caches. All ranges
-/// are bounded and freshly opened; failed validation leaves the displayed archive intact.
+/// Reads the current local file without consulting or changing retained caches. All reachable
+/// directories are validated within fixed aggregate budgets; tile payloads remain lazy.
+/// Ranges are bounded and freshly opened; failure leaves the displayed archive intact.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
+    read_info_local_bounded(archive, INDEX_BUDGET)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_info_local_bounded(archive: &str, mut budget: IndexBudget) -> Result<Arc<Info>, String> {
     check_local(archive)?;
     let head = read_file(archive, 0, HEAD)?;
     let path = archive.strip_prefix("file://").unwrap_or(archive);
@@ -764,7 +779,7 @@ pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
     if head.len() < 127 {
         return Err("a truncated PMTiles header".into());
     }
-    let (mut info, at, len) = parse_head(&head)?;
+    let (mut info, at, len, root_decoded) = parse_head_detail(&head)?;
     for (offset, length) in [(8, 16), (24, 32), (40, 48), (56, 64)] {
         let start = u64_at(&head, offset).ok_or("a truncated PMTiles header")?;
         let size = u64_at(&head, length).ok_or("a truncated PMTiles header")?;
@@ -775,12 +790,105 @@ pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
     if len != 0 {
         metadata(&mut info, read_file(archive, at, len)?, len)?;
     }
+    budget.take(u64_at(&head, 16).ok_or("a truncated PMTiles header")?, root_decoded, info.root.len())?;
+    validate_directories(archive, &info, &info.root, 0, &mut budget, &mut HashMap::new())?;
     Ok(Arc::new(info))
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
     Err(format!("{archive}: the web app cannot reload local PMTiles paths"))
+}
+
+/// Remaining aggregate work. The decoder also independently caps any one directory at 64 MiB;
+/// an over-budget decode is discarded before parsing or following its references.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct IndexBudget {
+    stored: u64,
+    decoded: u64,
+    entries: usize,
+    directories: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl IndexBudget {
+    fn take(&mut self, stored: u64, decoded: u64, entries: usize) -> Result<(), String> {
+        let error = "PMTiles index exceeds validation budget";
+        self.stored = self.stored.checked_sub(stored).ok_or(error)?;
+        self.decoded = self.decoded.checked_sub(decoded).ok_or(error)?;
+        self.entries = self.entries.checked_sub(entries).ok_or(error)?;
+        self.directories = self.directories.checked_sub(1).ok_or(error)?;
+        Ok(())
+    }
+}
+
+/// Completed ranges remember their subtree height, so sharing a directory cannot hide a path
+/// exceeding MAX_DEPTH. An unfinished range encountered again is a cycle.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_directories(
+    archive: &str,
+    info: &Info,
+    dir: &[Entry],
+    depth: usize,
+    budget: &mut IndexBudget,
+    seen: &mut HashMap<(u64, u64), Option<usize>>,
+) -> Result<usize, String> {
+    let mut height = 0;
+    for e in dir {
+        let end = e.offset.checked_add(e.length).ok_or("a PMTiles entry range overflows")?;
+        if e.run_length > 0 {
+            e.tile_id.checked_add(e.run_length).ok_or("tile ids overflow")?;
+            if end > info.data_length || info.data_offset.checked_add(end).is_none() {
+                return Err("a tile outside the archive".into());
+            }
+            if e.length > MAX_BYTES as u64 {
+                return Err(format!("{} bytes is too large to read from an archive", e.length));
+            }
+            continue;
+        }
+        if depth >= MAX_DEPTH {
+            return Err("PMTiles directories nested too deep".into());
+        }
+        if end > info.leaf_length {
+            return Err("a leaf directory outside the archive".into());
+        }
+        let at = info.leaf_offset.checked_add(e.offset).ok_or("a leaf directory range overflows")?;
+        info.leaf_offset.checked_add(end).ok_or("a leaf directory range overflows")?;
+        if e.length > MAX_BYTES as u64 {
+            return Err(format!("{} bytes is too large to read from an archive", e.length));
+        }
+        let key = (at, e.length);
+        let child_height = if let Some(done) = seen.get(&key) {
+            done.ok_or("cyclic PMTiles directories")?
+        } else {
+            // Refuse oversized ranges and too many directories before issuing any I/O.
+            if budget.directories == 0 || e.length > budget.stored {
+                return Err("PMTiles index exceeds validation budget".into());
+            }
+            seen.insert(key, None);
+            let bytes = read_file(archive, at, e.length)?;
+            if bytes.len() as u64 != e.length {
+                return Err("a truncated PMTiles leaf directory".into());
+            }
+            let bytes = info.internal.decode(bytes)?;
+            if bytes.len() as u64 > budget.decoded {
+                return Err("PMTiles index exceeds validation budget".into());
+            }
+            let child = parse_dir_bounded(&bytes, budget.entries)?;
+            budget.take(e.length, bytes.len() as u64, child.len())?;
+            drop(bytes);
+            let child_height = validate_directories(archive, info, &child, depth + 1, budget, seen)?;
+            seen.insert(key, Some(child_height));
+            child_height
+        };
+        let subtree = child_height + 1;
+        if depth + subtree > MAX_DEPTH {
+            return Err("PMTiles directories nested too deep".into());
+        }
+        height = height.max(subtree);
+    }
+    Ok(height)
 }
 
 fn u64_at(b: &[u8], i: usize) -> Option<u64> {
@@ -793,6 +901,10 @@ fn i32_at(b: &[u8], i: usize) -> Option<f64> {
 
 /// The header and root directory, and where the metadata is.
 fn parse_head(b: &[u8]) -> Result<(Info, u64, u64), String> {
+    parse_head_detail(b).map(|(info, at, len, _)| (info, at, len))
+}
+
+fn parse_head_detail(b: &[u8]) -> Result<(Info, u64, u64, u64), String> {
     if b.get(..7) != Some(b"PMTiles".as_slice()) {
         return Err("not a PMTiles archive".into());
     }
@@ -849,16 +961,23 @@ fn parse_head(b: &[u8]) -> Result<(Info, u64, u64), String> {
     if meta_len > MAX_BYTES as u64 || meta_at.checked_add(meta_len).is_none() {
         return Err("PMTiles metadata is too large or has an invalid range".into());
     }
-    Ok((info, meta_at, meta_len))
+    Ok((info, meta_at, meta_len, raw.len() as u64))
 }
 
 /// A directory: delta-coded tile ids, then run lengths, lengths and offsets, all varints.
 fn parse_dir(b: &[u8]) -> Result<Vec<Entry>, String> {
+    parse_dir_bounded(b, MAX_ENTRIES)
+}
+
+fn parse_dir_bounded(b: &[u8], entry_budget: usize) -> Result<Vec<Entry>, String> {
     let mut r = Varints { b, at: 0 };
     let n = usize::try_from(r.next()?).map_err(|_| "a directory too large")?;
     // Each entry takes at least four bytes.
     if n > MAX_ENTRIES || n.saturating_mul(4) > b.len() {
         return Err("a directory with more entries than it can hold".into());
+    }
+    if n > entry_budget {
+        return Err("PMTiles index exceeds validation budget".into());
     }
     let mut entries = vec![Entry { tile_id: 0, offset: 0, length: 0, run_length: 0 }; n];
     let mut last = 0u64;
@@ -878,7 +997,7 @@ fn parse_dir(b: &[u8]) -> Result<Vec<Entry>, String> {
         let e = entries.get_mut(i).ok_or("a short directory")?;
         e.offset = match (v, prev) {
             // Right after the previous entry.
-            (0, Some(p)) => p.offset.saturating_add(p.length),
+            (0, Some(p)) => p.offset.checked_add(p.length).ok_or("a directory offset overflows")?,
             (v, _) => v.saturating_sub(1),
         };
     }
@@ -896,6 +1015,9 @@ impl Varints<'_> {
         for shift in (0..64).step_by(7) {
             let byte = *self.b.get(self.at).ok_or("a truncated directory")?;
             self.at += 1;
+            if shift == 63 && byte > 1 {
+                return Err("a varint too long".into());
+            }
             v |= u64::from(byte & 0x7f) << shift;
             if byte & 0x80 == 0 {
                 return Ok(v);
@@ -967,6 +1089,167 @@ pub(crate) mod tests {
         std::fs::write(&path, truncated_metadata).unwrap();
         assert!(read_info_local(source).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn indexed_archive(root: &[Entry], leaves: Vec<u8>) -> Vec<u8> {
+        let mut head = archive(&[(0, 0, 0, vec![1, 2, 3])], 1, false, "{}")[..127].to_vec();
+        let root = write_dir(root);
+        let meta_at = 127 + root.len() as u64;
+        let leaf_at = meta_at + 2;
+        let data_at = leaf_at + leaves.len() as u64;
+        for (at, value) in [(16, root.len() as u64), (24, meta_at), (40, leaf_at), (48, leaves.len() as u64), (56, data_at)] {
+            head[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        [head, root, b"{}".to_vec(), leaves, vec![1, 2, 3]].concat()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fresh_local_validation_checks_every_leaf_and_deduplicates_shared_ranges() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-leaves-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        let mut bad = archive(&[(0, 0, 0, vec![1, 2, 3])], 1, true, "{}");
+        bad[138] = 0x80;
+        std::fs::write(&path, bad).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "a truncated directory");
+
+        let first = write_dir(&[Entry { tile_id: 0, offset: 0, length: 3, run_length: 1 }]);
+        let second = write_dir(&[Entry { tile_id: 1, offset: 0, length: 3, run_length: 1 }]);
+        let root = [
+            Entry { tile_id: 0, offset: 0, length: first.len() as u64, run_length: 0 },
+            Entry { tile_id: 1, offset: first.len() as u64, length: second.len() as u64, run_length: 0 },
+            Entry { tile_id: 2, offset: 0, length: first.len() as u64, run_length: 0 },
+        ];
+        let leaves = [first.clone(), second].concat();
+        let valid = indexed_archive(&root, leaves.clone());
+        std::fs::write(&path, &valid).unwrap();
+        assert!(read_info_local(source).is_ok());
+        // Exactly enough for the root and two unique leaves; the repeated range costs no work.
+        let bytes = (write_dir(&root).len() + leaves.len()) as u64;
+        let exact = IndexBudget { stored: bytes, decoded: bytes, entries: 5, directories: 3 };
+        assert!(read_info_local_bounded(source, exact).is_ok());
+        for budget in [
+            IndexBudget { stored: bytes - 1, ..exact },
+            IndexBudget { decoded: bytes - 1, ..exact },
+            IndexBudget { entries: 4, ..exact },
+            IndexBudget { directories: 2, ..exact },
+        ] {
+            assert_eq!(read_info_local_bounded(source, budget).unwrap_err(), "PMTiles index exceeds validation budget");
+        }
+
+        let mut later_bad = valid;
+        let leaf_at = u64_at(&later_bad, 40).unwrap() as usize;
+        later_bad[leaf_at + leaves.len() - 1] = 0x80;
+        std::fs::write(&path, later_bad).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "a truncated directory");
+        for entry in [
+            Entry { tile_id: 0, offset: u64::MAX - 1, length: 2, run_length: 0 },
+            Entry { tile_id: 0, offset: 0, length: leaves.len() as u64 + 1, run_length: 0 },
+        ] {
+            std::fs::write(&path, indexed_archive(&[entry], leaves.clone())).unwrap();
+            let error = read_info_local(source).unwrap_err();
+            assert!(error.contains("overflows") || error == "a leaf directory outside the archive", "{error}");
+        }
+        // Oversized leaf reads fail before opening a file, without a huge fixture.
+        let (mut info, _, _) = parse_head(&archive(&[(0, 0, 0, vec![1])], 1, false, "{}")).unwrap();
+        info.leaf_length = MAX_BYTES as u64 + 1;
+        let entry = Entry { tile_id: 0, offset: 0, length: info.leaf_length, run_length: 0 };
+        let mut budget = INDEX_BUDGET;
+        assert_eq!(
+            validate_directories("/nonexistent.pmtiles", &info, &[entry], 0, &mut budget, &mut HashMap::new()).unwrap_err(),
+            format!("{} bytes is too large to read from an archive", entry.length)
+        );
+        // A declared compression on lazy tile payloads is not decoded during validation.
+        let mut lazy = archive(&[(0, 0, 0, vec![1, 2, 3])], 1, true, "{}");
+        lazy[98] = 2;
+        std::fs::write(&path, lazy).unwrap();
+        assert!(read_info_local(source).is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fresh_local_validation_rejects_cycles_and_excess_depth_even_when_shared() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-depth-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        let pointer = |offset| Entry { tile_id: 0, offset, length: 5, run_length: 0 };
+        let tile = Entry { tile_id: 0, offset: 0, length: 3, run_length: 1 };
+        std::fs::write(&path, indexed_archive(&[pointer(0)], write_dir(&[pointer(0)]))).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "cyclic PMTiles directories");
+        let mutual: Vec<u8> = [pointer(5), pointer(0)].iter().flat_map(|entry| write_dir(&[*entry])).collect();
+        std::fs::write(&path, indexed_archive(&[pointer(0)], mutual)).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "cyclic PMTiles directories");
+        for count in [MAX_DEPTH, MAX_DEPTH + 1] {
+            let leaves: Vec<u8> =
+                (0..count).flat_map(|i| write_dir(&[if i + 1 == count { tile } else { pointer((i as u64 + 1) * 5) }])).collect();
+            std::fs::write(&path, indexed_archive(&[pointer(0)], leaves)).unwrap();
+            if count == MAX_DEPTH {
+                assert!(read_info_local(source).is_ok());
+            } else {
+                assert_eq!(read_info_local(source).unwrap_err(), "PMTiles directories nested too deep");
+            }
+        }
+        // Validate a shared subtree shallowly first, then reach it by an over-deep path.
+        let leaves: Vec<u8> =
+            [pointer(5), tile, pointer(15), pointer(20), pointer(0)].iter().flat_map(|entry| write_dir(&[*entry])).collect();
+        let root = [pointer(0), Entry { tile_id: 1, ..pointer(10) }];
+        std::fs::write(&path, indexed_archive(&root, leaves)).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "PMTiles directories nested too deep");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ordinary_loaders_reject_present_invalid_metadata_with_specific_errors() {
+        let dir = std::env::temp_dir().join(format!("rustgis-pmtiles-metadata-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cases = Vec::new();
+        for (text, error) in [
+            ("{", "PMTiles metadata:"),
+            ("null", "PMTiles metadata must be a JSON object"),
+            ("[]", "PMTiles metadata must be a JSON object"),
+            ("42", "PMTiles metadata must be a JSON object"),
+        ] {
+            cases.push((archive(&[(0, 0, 0, vec![1])], 1, false, text), error));
+        }
+        let mut truncated = archive(&[(0, 0, 0, vec![1])], 1, false, "{}");
+        truncated[32..40].copy_from_slice(&100u64.to_le_bytes());
+        cases.push((truncated, "truncated PMTiles metadata"));
+        for (code, error) in [(2, "gzip: invalid header"), (3, "Brotli:"), (4, "Zstandard:")] {
+            let mut invalid = archive_with(&[(0, 0, 0, vec![1])], 1, false, "{}", code);
+            let at = u64_at(&invalid, 24).unwrap() as usize;
+            invalid[at] = 0xff;
+            invalid[32..40].copy_from_slice(&1u64.to_le_bytes());
+            cases.push((invalid, error));
+        }
+        let mut oversized = archive(&[(0, 0, 0, vec![1])], 1, false, "{}");
+        oversized[32..40].copy_from_slice(&(MAX_BYTES as u64 + 1).to_le_bytes());
+        // Store the whole oversized (otherwise valid JSON) section, not merely a header
+        // claiming an invalid range. The ordinary loader must reject it before reading it.
+        let metadata_at = u64_at(&oversized, 24).unwrap() as usize;
+        let metadata_end = metadata_at + MAX_BYTES + 1;
+        oversized.truncate(metadata_at + 2);
+        oversized.resize(metadata_end, b' ');
+        oversized.push(1);
+        oversized[56..64].copy_from_slice(&(metadata_end as u64).to_le_bytes());
+        cases.push((oversized, "PMTiles metadata is too large or has an invalid range"));
+        for (i, (bytes, expected)) in cases.into_iter().enumerate() {
+            // Separate paths force both entry points through their ordinary loader, not a
+            // failure memoized by the preceding assertion.
+            for loader in ["info", "get"] {
+                let path = dir.join(format!("{i}-{loader}.pmtiles"));
+                std::fs::write(&path, &bytes).unwrap();
+                let source = path.to_str().unwrap();
+                let error = if loader == "info" {
+                    info_blocking(source, std::time::Duration::from_secs(10)).unwrap_err()
+                } else {
+                    get(&format!("pmtiles:0/0/0@{source}")).unwrap_err()
+                };
+                assert!(error.starts_with(expected), "case {i}, {loader}: {error}");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1158,6 +1441,8 @@ pub(crate) mod tests {
             let p = dir.join(format!("t{leaf}{code}.pmtiles"));
             std::fs::write(&p, archive_with(&tiles, 1, leaf, r#"{"vector_layers":[{"id":"roads"}],"attribution":"Test"}"#, code)).unwrap();
             let a = p.display().to_string();
+            #[cfg(not(target_arch = "wasm32"))]
+            assert_eq!(read_info_local(&a).unwrap().attribution(), "Test");
             let mut i = info(&a).unwrap();
             for _ in 0..200 {
                 if i.is_some() {

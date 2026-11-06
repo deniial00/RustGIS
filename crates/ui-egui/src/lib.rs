@@ -2083,6 +2083,22 @@ impl RustGisApp {
 
     /// Runs a command by id: `ui.*` here, everything else in the engine.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.reads_off_frame {
+            let archive = match id {
+                "map.reloadTiles" => Some("map.reloadTiles"),
+                "map.repairTiles" => Some("map.repairTiles"),
+                _ => None,
+            };
+            if let Some(command) = archive {
+                return readjob::run(self, command, params);
+            }
+        }
+        self.run_now(id, params)
+    }
+
+    /// Executes a command after any native read-ahead has completed.
+    fn run_now(&mut self, id: &str, params: Value) -> Result<Value, String> {
         let _diagnostics = self.session.diagnostics.enter();
         if !matches!(id, "ui.menu" | "ui.ribbon" | "ui.language" | "ui.worldview") {
             self.ui.ribbon_peek = false;

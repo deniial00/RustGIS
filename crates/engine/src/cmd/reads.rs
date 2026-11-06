@@ -65,8 +65,19 @@ pub fn read_ahead(s: &Session, command: &str, p: &Value) -> Option<ReadAhead> {
         "layer.loadAll" => super::layer::load_all_ahead(s, p),
         #[cfg(not(target_arch = "wasm32"))]
         "model.run" => Some(super::workflows::model_ahead(s, p)),
+        #[cfg(not(target_arch = "wasm32"))]
+        "map.reloadTiles" | "map.repairTiles" => Some(super::repair::archive_ahead(s, command, p)),
         _ => None,
     }
+}
+
+/// Captures the archive selected now, so a queued UI read cannot retarget an index or name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn archive_target(s: &Session, p: &Value) -> Option<(usize, rustgis_map::TileLayer)> {
+    let i = super::tiles::find(s, p).ok()??;
+    let tile = s.map().tiles.get(i)?;
+    tile.archive_file()?;
+    Some((i, tile.clone()))
 }
 
 /// `work` as a read for the command to take under `key`.

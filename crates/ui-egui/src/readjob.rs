@@ -35,6 +35,8 @@ struct Asked {
     opened: u64,
     map: u64,
     layer: Option<u64>,
+    /// The exact archive and its presentation when asked, not a reusable list index.
+    archive: Option<(usize, rustgis_engine::map::TileLayer)>,
     /// Given what the command answered when it runs, or why it didn't (cancelled, or left).
     then: Option<Then>,
 }
@@ -67,7 +69,7 @@ pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Valu
 /// it never ran.
 pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Option<Then>) -> Result<Value, String> {
     if !app.reads_off_frame {
-        let r = app.run(command, p);
+        let r = app.run_now(command, p);
         return answered(app, then, r);
     }
     let layer = (command == "layer.loadAll")
@@ -80,8 +82,14 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
     {
         return Ok(json!({"reading": instance}));
     }
+    let archive = matches!(command, "map.reloadTiles" | "map.repairTiles").then(|| reads::archive_target(&app.session, &p)).flatten();
+    let mut p = p;
+    if let Some((i, _)) = &archive {
+        p["index"] = json!(i);
+    }
     let what = match &layer {
         Some((_, name)) => name.clone(),
+        None if archive.is_some() => archive.as_ref().map(|(_, tile)| tile.name.clone()).unwrap_or_default(),
         // A model by its name (one drawn but not yet named has none: see `called`).
         None if command == "model.run" => p.get("name").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string(),
         None => p.get("path").and_then(Value::as_str).map(|path| file_name(path).to_string()).unwrap_or_default(),
@@ -93,6 +101,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
         opened: app.session.opened,
         map: app.session.map().instance_id(),
         layer: layer.map(|(instance, _)| instance),
+        archive,
         then,
     };
     if busy(app) {
@@ -145,6 +154,7 @@ enum Gone {
     Project,
     Map,
     Layer,
+    Archive,
 }
 
 impl std::fmt::Display for Gone {
@@ -154,6 +164,7 @@ impl std::fmt::Display for Gone {
             Gone::Project => tl_raw!("another project was opened"),
             Gone::Map => tl_raw!("the map it was asked for isn't open"),
             Gone::Layer => tl_raw!("its layer was removed"),
+            Gone::Archive => tl_raw!("its tile archive changed or was removed"),
         })
     }
 }
@@ -166,6 +177,11 @@ fn placed(app: &RustGisApp, asked: &Asked) -> Result<Value, Gone> {
     }
     if app.session.map().instance_id() != asked.map {
         return Err(Gone::Map);
+    }
+    if let Some((i, original)) = &asked.archive
+        && app.session.map().tiles.get(*i) != Some(original)
+    {
+        return Err(Gone::Archive);
     }
     let Some(instance) = asked.layer else { return Ok(asked.params.clone()) };
     let l = app.session.map().layers.iter().find(|l| l.instance_id() == instance).ok_or(Gone::Layer)?;
@@ -180,7 +196,13 @@ fn start(app: &mut RustGisApp, asked: Asked, p: Value) -> Result<Value, String> 
     // Picked on this thread, so a bug in the picking must not take the app down: it reads here.
     let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reads::read_ahead(&app.session, asked.command, &p)));
     let Ok(Some(ahead)) = picked else {
-        let r = app.run(asked.command, p);
+        if matches!(asked.command, "map.reloadTiles" | "map.repairTiles") {
+            let why = tl!("The archive could not be prepared for background validation. Retry the command.").to_string();
+            app.session.notify(why.clone(), true);
+            not_run(app, asked.then, why.clone());
+            return Err(why);
+        }
+        let r = app.run_now(asked.command, p);
         return answered(app, asked.then, r);
     };
     let name = ahead.name;
@@ -196,8 +218,17 @@ fn start(app: &mut RustGisApp, asked: Asked, p: Value) -> Result<Value, String> 
         *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
     });
     if let Err(e) = spawned {
+        if matches!(asked.command, "map.reloadTiles" | "map.repairTiles") {
+            let why = crate::i18n::fmt(
+                "The archive validation worker could not start ({error}). Retry the command.",
+                &[("error", &e.to_string())],
+            );
+            app.session.notify(why.clone(), true);
+            not_run(app, asked.then, why.clone());
+            return Err(why);
+        }
         log::warn!("{name} reads here: its thread didn't start: {e}");
-        let r = app.run(asked.command, p);
+        let r = app.run_now(asked.command, p);
         return answered(app, asked.then, r);
     }
     app.reads.job = Some(ReadJob { asked, gone: None, name, control, slot });
@@ -250,7 +281,15 @@ pub fn land(app: &mut RustGisApp) -> bool {
                         Ok(read) => {
                             read.placed(&mut app.session);
                             // A failure is said by the command.
-                            let r = app.run(job.asked.command, p);
+                            let r = app.run_now(job.asked.command, p);
+                            if job.asked.command == "map.repairTiles"
+                                && let Ok(answer) = &r
+                                && let Some(index) = answer.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok())
+                                && let Some(tile) = app.session.map().tiles.get(index)
+                            {
+                                let text = crate::i18n::fmt("Repaired {name}", &[("name", &tile.name)]);
+                                app.session.notify(text, false);
+                            }
                             let _ = answered(app, job.asked.then, r);
                             app.session.drop_read();
                             app.map.invalidate();
@@ -265,7 +304,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
                                 ),
                                 false,
                             );
-                            let r = app.run(job.asked.command, p);
+                            let r = app.run_now(job.asked.command, p);
                             let _ = answered(app, job.asked.then, r);
                             app.map.invalidate();
                         }
@@ -296,7 +335,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
     for (what, why, then) in &left {
         not_run(app, *then, crate::i18n::fmt("{what} was left: {why}", &[("what", called(what)), ("why", &why.to_string())]));
     }
-    for why in [Gone::Project, Gone::Map, Gone::Layer] {
+    for why in [Gone::Project, Gone::Map, Gone::Layer, Gone::Archive] {
         let of: Vec<&String> = left.iter().filter(|(_, w, _)| *w == why).map(|(what, ..)| what).collect();
         let reason = why.to_string();
         match of.as_slice() {
@@ -364,6 +403,7 @@ pub fn status(app: &RustGisApp, ui: &mut Ui, t: &Tokens) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Lands every read under way and waiting, failing past `secs`.
     fn landed(app: &mut RustGisApp, secs: u64) {
@@ -462,5 +502,87 @@ mod tests {
         assert!(app.session.notices.iter().any(|n| n.text == notice), "{:?}", app.session.notices.last());
         assert!(app.session.project.maps[0].layer(id).unwrap().is_streamed());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn archive(path: &std::path::Path, credit: &str) {
+        use rustgis_engine::render::rustgis_tiles::{mvt, pmtiles};
+        let metadata = pmtiles::NewArchive {
+            tile_type: pmtiles::TileType::Mvt,
+            gzipped_tiles: false,
+            bounds: [-180.0, -85.0, 180.0, 85.0],
+            metadata: json!({"attribution":credit}),
+        };
+        let bytes = pmtiles::write(vec![(0, 0, 0, mvt::encode(&mvt::Tile { layers: Vec::new() }))], &metadata).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn archive_reload_lands_once_and_stale_or_cancelled_reads_keep_retained_metadata() {
+        use rustgis_engine::render::rustgis_tiles::pmtiles;
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let dir = std::env::temp_dir().join(format!("rustgis-read-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.pmtiles");
+        let url = path.to_str().unwrap();
+        archive(&path, "Before");
+        app.run("map.addTiles", json!({"url":url,"overlay":true})).unwrap();
+        let retained = pmtiles::info_blocking(url, Duration::from_secs(10)).unwrap();
+        let tile = app.session.map().tiles[0].clone();
+        let camera = app.session.map().camera;
+        archive(&path, "After");
+        app.reads_off_frame = true;
+        let depth = app.session.undo_depth();
+        assert_eq!(app.run("map.reloadTiles", json!({"index":0})).unwrap()["started"], "Reload Data");
+        assert!(Arc::ptr_eq(&pmtiles::info_blocking(url, Duration::from_secs(10)).unwrap(), &retained));
+        assert_eq!(app.session.undo_depth(), depth, "validation has not installed anything");
+        landed(&mut app, 60);
+        let current = pmtiles::info_blocking(url, Duration::from_secs(10)).unwrap();
+        assert_eq!(current.attribution(), "After");
+        assert_eq!(app.session.map().tiles[0], tile);
+        assert_eq!(app.session.map().camera, camera);
+        assert_eq!(app.session.undo_depth(), depth + 1);
+
+        archive(&path, "Must not land");
+        app.run("map.reloadTiles", json!({"index":0})).unwrap();
+        app.run("map.setTiles", json!({"index":0,"opacity":0.4})).unwrap();
+        landed(&mut app, 60);
+        assert_eq!(app.session.map().tiles[0].opacity, 0.4);
+        assert!(Arc::ptr_eq(&pmtiles::info_blocking(url, Duration::from_secs(10)).unwrap(), &current));
+        assert!(app.session.notices.iter().any(|n| n.text.contains("tile archive changed")));
+
+        app.run("map.reloadTiles", json!({"index":0})).unwrap();
+        app.reads.cancel_for_tests();
+        landed(&mut app, 60);
+        assert!(Arc::ptr_eq(&pmtiles::info_blocking(url, Duration::from_secs(10)).unwrap(), &current));
+        app.run("map.reloadTiles", json!({"index":0})).unwrap();
+        app.run("map.new", json!({"name":"Different map"})).unwrap();
+        landed(&mut app, 60);
+        assert!(app.session.map().tiles.is_empty());
+        assert!(Arc::ptr_eq(&pmtiles::info_blocking(url, Duration::from_secs(10)).unwrap(), &current));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn archive_repair_does_not_report_success_before_validation_lands() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let dir = std::env::temp_dir().join(format!("rustgis-read-archive-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.pmtiles");
+        let replacement = dir.join("replacement.pmtiles");
+        archive(&original, "Original");
+        archive(&replacement, "Replacement");
+        app.run("map.addTiles", json!({"url":original.to_str().unwrap(),"name":"Linked","overlay":true})).unwrap();
+        app.reads_off_frame = true;
+        let mark = app.session.notice_mark();
+        assert_eq!(
+            app.run("map.repairTiles", json!({"index":0,"path":replacement.to_str().unwrap()})).unwrap()["started"],
+            "Repair Data Source"
+        );
+        assert_eq!(app.session.map().tiles[0].url, original.to_str().unwrap());
+        assert!(!app.session.notices_since(mark).iter().any(|n| n.text.contains("Repaired")));
+        landed(&mut app, 60);
+        assert_eq!(app.session.map().tiles[0].url, replacement.to_str().unwrap());
+        assert!(app.session.notices_since(mark).iter().any(|n| n.text == "Repaired Linked"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

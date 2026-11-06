@@ -364,17 +364,37 @@ mod file {
         with(path, |c| read_info(c, path))
     }
 
-    /// Validates a new connection without borrowing or populating the retained pool.
-    pub fn read_info_path(path: &Path) -> Result<Info, String> {
+    /// Reads metadata and one bounded raster sample on a fresh connection, retaining nothing.
+    /// Vector archives get only a tile-page readability probe; an empty archive has no sample.
+    pub fn read_info_path(path: &Path) -> Result<(Info, Option<Vec<u8>>), String> {
         let c = open(path)?;
         let info = read_info(&c, path)?;
-        // Even complete metadata must not hide a damaged first tile page. This bounded read
-        // checks the table/view is usable without scanning or decoding the tile set.
-        let _: Option<Option<Vec<u8>>> = c
-            .query_row("SELECT substr(tile_data, 1, 16) FROM tiles LIMIT 1", [], |row| row.get(0))
-            .optional()
-            .map_err(|e| format!("{}: not a readable MBTiles file ({e})", path.display()))?;
-        Ok(info)
+        let sql = |e: rusqlite::Error| format!("{}: not a readable MBTiles file ({e})", path.display());
+        // Even complete metadata must not hide a damaged first tile page. Vector payloads are
+        // not decoded here; the tiles layer decodes the raster sample before accepting a reload.
+        let sample = if info.format.is_vector() {
+            let _: Option<Option<Vec<u8>>> =
+                c.query_row("SELECT substr(tile_data, 1, 16) FROM tiles LIMIT 1", [], |row| row.get(0)).optional().map_err(sql)?;
+            None
+        } else {
+            // Check the size before materializing a blob, as the normal tile reader does.
+            let tile: Option<(i64, Option<Vec<u8>>)> = c
+                .query_row(
+                    "SELECT length(tile_data), CASE WHEN length(tile_data) <= ?1 THEN tile_data END FROM tiles LIMIT 1",
+                    [MAX_TILE_BYTES as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(sql)?;
+            match tile {
+                Some((len, _)) if len > MAX_TILE_BYTES as i64 => {
+                    return Err(format!("{}: raster sample of {len} bytes exceeds the {MAX_TILE_BYTES}-byte tile limit", path.display()));
+                }
+                Some((_, bytes)) => bytes,
+                None => None,
+            }
+        };
+        Ok((info, sample))
     }
 
     fn read_info(c: &Connection, path: &Path) -> Result<Info, String> {
@@ -444,6 +464,86 @@ mod file {
     #[cfg(test)]
     mod reload_tests {
         use super::*;
+
+        #[test]
+        fn ordinary_open_refuses_null_and_non_text_metadata_rows() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-metadata-types-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE metadata(name,value);
+                 CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);
+                 INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','0');",
+            )
+            .unwrap();
+            assert_eq!(open_path(&path).unwrap().format, super::super::Format::Png);
+            for row in ["(NULL,'unused')", "('unused',NULL)", "(7,'unused')", "('unused',7)", "(x'01','unused')", "('unused',x'01')"] {
+                c.execute_batch(&format!("INSERT INTO metadata VALUES {row}")).unwrap();
+                let error = open_path(&path).unwrap_err();
+                assert!(error.contains(&path.display().to_string()), "{error}");
+                assert!(error.contains("not a readable MBTiles file"), "{error}");
+                c.execute("DELETE FROM metadata WHERE rowid = (SELECT max(rowid) FROM metadata)", []).unwrap();
+                assert!(open_path(&path).is_ok(), "valid text rows must remain usable after {row}");
+            }
+            close(&path);
+            drop(c);
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn candidate_raster_sample_is_bounded_and_unpooled() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-raster-sample-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE metadata(name TEXT,value TEXT);
+                 CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);
+                 INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','0');",
+            )
+            .unwrap();
+            assert!(read_info_path(&path).unwrap().1.is_none(), "an empty archive remains valid");
+            let invalid_png = b"\x89PNG\r\n\x1a\n";
+            c.execute("INSERT INTO tiles VALUES(0,0,0,?1)", [invalid_png.as_slice()]).unwrap();
+            let (info, sample) = read_info_path(&path).unwrap();
+            assert_eq!(info.format, super::super::Format::Png);
+            assert_eq!(sample.as_deref(), Some(invalid_png.as_slice()), "the tiles layer must see more than a discarded signature probe");
+            c.execute("UPDATE tiles SET tile_data=zeroblob(?1)", [MAX_TILE_BYTES as i64 + 1]).unwrap();
+            let error = read_info_path(&path).unwrap_err();
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(error.contains("exceeds") && error.contains(&MAX_TILE_BYTES.to_string()), "{error}");
+            c.execute_batch("UPDATE metadata SET value='pbf' WHERE name='format'; UPDATE tiles SET tile_data=x'01';").unwrap();
+            assert!(read_info_path(&path).unwrap().1.is_none(), "vector payloads get a readability probe, not image validation");
+            assert!(!pool().lock().unwrap().connections.contains_key(&path), "candidate validation must not populate the retained pool");
+            drop(c);
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn candidate_probe_reads_tile_pages_even_with_complete_metadata() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-damaged-tile-page-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE metadata(name TEXT,value TEXT);
+                 CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);
+                 INSERT INTO metadata VALUES('format','pbf'),('minzoom','0'),('maxzoom','0');
+                 INSERT INTO tiles VALUES(0,0,0,x'01');",
+            )
+            .unwrap();
+            let page = c.query_row("SELECT rootpage FROM sqlite_master WHERE name='tiles'", [], |r| r.get::<_, u32>(0)).unwrap() as usize;
+            let size = c.query_row("PRAGMA page_size", [], |r| r.get::<_, u32>(0)).unwrap() as usize;
+            drop(c);
+            assert!(read_info_path(&path).is_ok());
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[(page - 1) * size] = 0;
+            std::fs::write(&path, bytes).unwrap();
+            assert!(open_path(&path).is_ok(), "complete metadata alone does not step the damaged tile table");
+            let error = read_info_path(&path).unwrap_err();
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(error.contains("not a readable MBTiles file"), "{error}");
+            close(&path);
+            std::fs::remove_file(path).unwrap();
+        }
 
         #[test]
         fn closing_one_file_rejects_its_old_connection_but_keeps_another_file() {

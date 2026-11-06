@@ -127,13 +127,14 @@ fn repair_tiles(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let prepared = super::reads::take::<Result<ReadArchive, String>>(s, "map.repairTiles");
         let i = super::tiles::find(s, p)?.ok_or("name, index or id is required")?;
         let t = s.map().tiles.get(i).ok_or("the tile layer no longer exists")?;
         if t.archive_file().is_none() {
             return Err(format!("{}: only a tile archive read from a file (PMTiles or MBTiles) can be repaired", t.name));
         }
         let full = replacement(p)?;
-        let new = archive_candidate(t, &full)?;
+        let new = archive_candidate_after_read(t, &full, s.map().instance_id(), prepared)?;
         rustgis_render::rustgis_tiles::cache::reload_archive(&t.url);
         // The replacement path may already have been drawn by another layer.
         if t.url != full {
@@ -167,6 +168,48 @@ fn archive_candidate(t: &rustgis_map::TileLayer, path: &str) -> Result<rustgis_m
     Ok(new)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct ReadArchive {
+    map: u64,
+    original: rustgis_map::TileLayer,
+    path: String,
+    result: Result<rustgis_map::TileLayer, String>,
+}
+
+/// Fresh validation for the desktop's single read worker; nothing is installed or invalidated.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn archive_ahead(s: &Session, command: &str, p: &Value) -> super::reads::ReadAhead {
+    let request = (|| {
+        let i = super::tiles::find(s, p)?.ok_or("name, index or id is required")?;
+        let t = s.map().tiles.get(i).ok_or("the tile layer no longer exists")?;
+        let linked = t.archive_file().ok_or("only a linked local PMTiles or MBTiles archive can be reloaded or repaired")?;
+        let path = if command == "map.repairTiles" { replacement(p)? } else { linked.to_string() };
+        Ok::<_, String>((s.map().instance_id(), t.clone(), path))
+    })();
+    let name = if command == "map.repairTiles" { "Repair Data Source" } else { "Reload Data" };
+    super::reads::ahead(name, command.to_string(), move || {
+        request.map(|(map, original, path)| {
+            let result = archive_candidate(&original, &path);
+            ReadArchive { map, original, path, result }
+        })
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn archive_candidate_after_read(
+    t: &rustgis_map::TileLayer,
+    path: &str,
+    map: u64,
+    prepared: Option<Result<ReadArchive, String>>,
+) -> Result<rustgis_map::TileLayer, String> {
+    let Some(prepared) = prepared else { return archive_candidate(t, path) };
+    let prepared = prepared?;
+    if prepared.map != map || prepared.original != *t || prepared.path != path {
+        return Err("the archive or its settings changed while it was read; retry the command".into());
+    }
+    prepared.result
+}
+
 fn reload_tiles(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
@@ -175,6 +218,7 @@ fn reload_tiles(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let prepared = super::reads::take::<Result<ReadArchive, String>>(s, "map.reloadTiles");
         let i = super::tiles::find(s, p)?.ok_or("name, index or id is required")?;
         let t = s.map().tiles.get(i).ok_or("the tile layer no longer exists")?;
         let path = t.archive_file().ok_or_else(|| {
@@ -183,13 +227,23 @@ fn reload_tiles(s: &mut Session, p: &Value) -> CmdResult {
                 t.name
             )
         })?.to_string();
-        let new = archive_candidate(t, &path).map_err(|e| {
+        let new = archive_candidate_after_read(t, &path, s.map().instance_id(), prepared).map_err(|e| {
             format!("{} ({path}): {e}; correct the file and retry Reload Data, or use Repair Data Source if it moved", t.name)
         })?;
+        let cancel_view = s.style_view.as_ref().is_some_and(|(pending, _, map)| {
+            *map == s.map().instance_id()
+                && pending.kind == t.kind
+                && pending.url == t.url
+                && pending.bounds == t.bounds
+                && pending.id == t.id
+        });
         rustgis_render::rustgis_tiles::cache::reload_archive(&path);
         let slot = s.map_mut().tiles.get_mut(i).ok_or("the tile layer no longer exists")?;
         *slot = new;
         let message = format!("Reloaded {} from {path}; undo cannot restore overwritten file contents", slot.name);
+        if cancel_view {
+            s.style_view = None;
+        }
         s.notify(message, false);
         Ok(json!({"index": i, "path": path}))
     }

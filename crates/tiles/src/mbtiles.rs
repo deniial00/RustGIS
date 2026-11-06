@@ -118,7 +118,7 @@ fn info_epoch(archive: &str) -> (u64, u64) {
     (EPOCH.load(Ordering::SeqCst), crate::cache::archive_epoch(archive))
 }
 
-/// Reads the current file using a fresh, unpooled connection and retains nothing.
+/// Reads the current file and decodes one raster sample, without using or changing any cache.
 pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
     check(archive)?;
     if is_upload(archive) {
@@ -127,12 +127,23 @@ pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let path = std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive));
-        rustgis_data::mbtiles::read_info_path(path).map(Arc::new)
+        let (info, sample) = rustgis_data::mbtiles::read_info_path(path)?;
+        if let Some(sample) = sample {
+            validate_raster_sample(archive, &sample)?;
+        }
+        Ok(Arc::new(info))
     }
     #[cfg(target_arch = "wasm32")]
     {
         Err(format!("{archive}: the web app cannot reload local MBTiles paths"))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_raster_sample(archive: &str, sample: &[u8]) -> Result<(), String> {
+    crate::cache::decode_image(sample)
+        .map(|_| ())
+        .map_err(|e| format!("{archive}: cannot decode the MBTiles raster sample ({e}); repair or replace the archive before reloading"))
 }
 
 /// An archive's metadata.
@@ -337,6 +348,22 @@ mod tests {
         crate::cache::reload_archive(archive);
         remember_info(archive, &Err("obsolete failure after retry".into()), current);
         assert!(cached_info(archive).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn raster_samples_require_a_decodable_bounded_image() {
+        let archive = "/invalid-raster-sample.mbtiles";
+        for sample in [b"\x89PNG\r\n\x1a\n".as_slice(), b"not a picture", b""] {
+            let error = validate_raster_sample(archive, sample).unwrap_err();
+            assert!(error.contains(archive), "{error}");
+            assert!(error.contains("cannot decode the MBTiles raster sample"), "{error}");
+            assert!(error.contains("repair or replace"), "{error}");
+        }
+        let valid = tiny_skia::Pixmap::new(2, 2).unwrap().encode_png().unwrap();
+        assert!(validate_raster_sample(archive, &valid).is_ok());
+        let oversized = tiny_skia::Pixmap::new(4097, 1).unwrap().encode_png().unwrap();
+        assert!(validate_raster_sample(archive, &oversized).is_err());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
