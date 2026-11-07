@@ -673,6 +673,8 @@ saving. The test uses only the entered login, not a saved connection's login at 
 For an `http://` address, tick the confirmation before sending the login unencrypted. After a test
 starts, RustGIS clears the password or key and the confirmation from the form; enter them again
 if you want to save a session login. The test does not save the connection or retain its login.
+Test status masks echoed login credentials, and the command log keeps response sizes rather than
+response bodies.
 For an existing service connection, save changes to its address or login definition before testing.
 
 **From Service…** (including **Catalogue search (CSW)**), **Database…**, **STAC Search…** and

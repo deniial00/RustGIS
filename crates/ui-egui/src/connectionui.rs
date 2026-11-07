@@ -400,11 +400,17 @@ pub fn start_test(app: &mut RustGisApp) {
     let v = match result {
         Ok(v) => v,
         Err(e) => {
+            if temporary {
+                clear_secrets(&mut app.ui.connection);
+            }
             app.dialogs.error = Some(translated(&e));
             return;
         }
     };
     let Some(url) = v["fetch"].as_str() else {
+        if temporary {
+            clear_secrets(&mut app.ui.connection);
+        }
         app.dialogs.error = Some(tl!("Nothing to test").into());
         return;
     };
@@ -604,7 +610,7 @@ fn poll_requests(app: &mut RustGisApp) {
 pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     poll_requests(app);
     if !matches!(app.dialogs.open, Some("newConnection" | "editConnection")) {
-        if app.ui.connection.test.take().is_some() {
+        if app.ui.connection.test.take().is_some() && app.dialogs.open.is_none() {
             app.dialogs.info = None;
             app.dialogs.error = None;
         }
@@ -637,11 +643,11 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             q["answer"] = json!(String::from_utf8_lossy(&bytes));
             let kind = q["kind"].as_str().unwrap_or("").to_owned();
             match app.run("connection.test", q) {
-                Ok(v) => app.dialogs.info = Some(summary(&kind, &v["result"])),
-                Err(e) => app.dialogs.error = Some(e),
+                Ok(v) => app.dialogs.info = Some(rustgis_engine::render::rustgis_tiles::logins::scrub(&summary(&kind, &v["result"]))),
+                Err(e) => app.dialogs.error = Some(rustgis_engine::render::rustgis_tiles::logins::scrub(&e)),
             }
         }
-        Err(e) => app.dialogs.error = Some(e),
+        Err(e) => app.dialogs.error = Some(rustgis_engine::render::rustgis_tiles::logins::scrub(&e)),
     }
 }
 
@@ -1331,6 +1337,41 @@ fn open_chosen(app: &mut RustGisApp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_unsaved_service_probe_clears_credentials() {
+        let mut app = RustGisApp::with_sample();
+        for auth in ["basic", "header"] {
+            open_new(&mut app, "wmts").unwrap();
+            let st = &mut app.ui.connection;
+            st.address = String::new();
+            st.auth = auth.into();
+            st.user = "reader".into();
+            st.key_name = "X-Key".into();
+            st.password = "probe-failure-password".into();
+            st.api_key = "probe-failure-key".into();
+            st.allow_insecure = true;
+            start_test(&mut app);
+            assert!(app.dialogs.error.is_some());
+            assert!(app.ui.connection.test.is_none());
+            assert!(app.ui.connection.password.is_empty());
+            assert!(app.ui.connection.api_key.is_empty());
+            assert!(!app.ui.connection.allow_insecure);
+        }
+    }
+
+    #[test]
+    fn abandoned_probe_preserves_replacement_dialog_status() {
+        let mut app = RustGisApp::with_sample();
+        open_new(&mut app, "wmts").unwrap();
+        let context = TestContext { opened: app.session.opened, form: definition(&app.ui.connection), _login: None };
+        app.ui.connection.test = Some((json!({}), Slot::default(), context));
+        app.dialogs.open = Some("addDelimited");
+        app.dialogs.error = Some("replacement file read failed".into());
+        poll(&mut app, &egui::Context::default());
+        assert!(app.ui.connection.test.is_none());
+        assert_eq!(app.dialogs.error.as_deref(), Some("replacement file read failed"));
+    }
 
     #[test]
     fn unsaved_service_test_requires_valid_typed_credentials_not_a_saved_login() {

@@ -129,6 +129,15 @@ fn activate_with_random(
         && !payload.is_empty()
     {
         add_redactions(&mut redactions, payload);
+        // Basic responses can echo the decoded password as well as the wire header. Keep
+        // both patterns bound to this login's lifetime, including percent-encoded echoes.
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(payload)
+            && let Ok(decoded) = std::str::from_utf8(&decoded)
+            && let Some((_, password)) = decoded.split_once(':')
+            && !password.is_empty()
+        {
+            add_redactions(&mut redactions, password);
+        }
     }
     let mut entries = entries();
     // A token is the only thing that scopes a bound address to its login, so it is random. A
@@ -521,10 +530,13 @@ mod tests {
 
     #[test]
     fn scrubs_header_and_basic_payload() {
-        let value = basic("scrub-user", "scrub-password");
+        let password = "scrub-password/+:";
+        let value = basic("scrub-user", password);
         let binding = activate("https://scrub-login.example", "scrub", Method::Header("Authorization".into()), &value, false).unwrap();
         let payload = value.strip_prefix("Basic ").unwrap();
         assert_eq!(scrub(&format!("{value} {payload} {}", percent_encode(&value))), "[redacted] [redacted] [redacted]");
+        assert_eq!(scrub(password), "[redacted]");
+        assert_eq!(scrub(&percent_encode(password).to_ascii_lowercase()), "[redacted]");
         let url = bind(&binding, "https://scrub-login.example/tile").unwrap();
         assert!(!scrub(&format!("failed: {url}")).contains(rustgis_data::login_address::PREFIX));
         assert_eq!(format!("{:?}", apply(&url).unwrap().unwrap()), "Applied(<redacted>)");

@@ -44,10 +44,10 @@ pub(crate) fn is_logged(s: &Session, id: &str, params: &Value) -> bool {
     mutates || crate::cmd::items::names_place(params, crate::cmd::plugins::PLACE_KEYS, 0)
 }
 
-/// `params` as the log keeps them: a document given as text (a map, a project, a capabilities
-/// answer, GeoJSON) as its size only, since one may hold secrets no redaction finds in it (an S3
-/// source's token inside a map's JSON); the rest clipped (so a long script costs little), then
-/// without secrets (as History's Copy as code takes them out). A secret cut short is still taken
+/// `params` as the log keeps them: response bodies (`answer`) and documents given as text
+/// (maps, projects, capabilities, GeoJSON) as their sizes only, since they may hold secrets no
+/// field-name redaction finds; the rest clipped (so a long script costs little), then without
+/// secrets (as History's Copy as code takes them out). A secret cut short is still taken
 /// out: what is left of it follows its name. Within [`LOG_PARAMS_BYTES`] of JSON in three tries,
 /// each giving up more: texts at that bound and lists at their first [`LOG_LIST_ITEMS`]; then
 /// texts at 512 characters; then the first keys with their short values only.
@@ -291,7 +291,17 @@ fn clip(v: &Value, chars: usize, items: usize, depth: usize) -> Value {
             // goes.
             let mut out = serde_json::Map::new();
             for (k, x) in o {
-                let value = || if k.chars().nth(200).is_some() { Value::String("…".into()) } else { clip(x, chars, items, depth + 1) };
+                let value = || {
+                    if k.chars().nth(200).is_some() {
+                        Value::String("…".into())
+                    } else if k == "answer"
+                        && let Some(text) = x.as_str()
+                    {
+                        Value::String(format!("(a response of {} characters)", text.chars().count()))
+                    } else {
+                        clip(x, chars, items, depth + 1)
+                    }
+                };
                 out.entry(k.chars().take(200).collect::<String>()).or_insert_with(value);
             }
             Value::Object(out)

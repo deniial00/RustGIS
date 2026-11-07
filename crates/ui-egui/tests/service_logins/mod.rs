@@ -184,6 +184,13 @@ fn a_typed_address_secret_blocks_testing_before_the_engine_refuses() {
 
 /// One delayed response lets the UI edit or cancel while authenticated I/O is in flight.
 fn probe_server() -> (String, std::sync::mpsc::Receiver<String>, std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    probe_server_with_answer(None)
+}
+
+fn probe_server_with_answer(
+    answer: Option<&str>,
+) -> (String, std::sync::mpsc::Receiver<String>, std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let answer = answer.map(str::to_owned);
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -195,7 +202,10 @@ fn probe_server() -> (String, std::sync::mpsc::Receiver<String>, std::sync::mpsc
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    break stream;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -218,6 +228,12 @@ fn probe_server() -> (String, std::sync::mpsc::Receiver<String>, std::sync::mpsc
 <TileMatrixSet><ows:Identifier>gm</ows:Identifier><ows:SupportedCRS>EPSG:3857</ows:SupportedCRS>
 <TileMatrix><ows:Identifier>0</ows:Identifier><ScaleDenominator>559082264.0287178</ScaleDenominator><TopLeftCorner>-20037508.34278925 20037508.34278925</TopLeftCorner><TileWidth>256</TileWidth><TileHeight>256</TileHeight></TileMatrix>
 </TileMatrixSet></Contents></Capabilities>"#;
+        let title = format!(
+            "<ows:ServiceIdentification><ows:Title>Fixture web-widget-secret-sentinel {}</ows:Title></ows:ServiceIdentification><Contents>",
+            rustgis_engine::render::rustgis_tiles::logins::basic("reader", "web-widget-secret-sentinel")
+        );
+        let body = body.replace("<Contents>", &title);
+        let body = answer.unwrap_or(body);
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     });
     (address, requests, release, server)
@@ -275,6 +291,8 @@ fn unsaved_wmts_test_uses_typed_header_or_basic_without_touching_saved_login() {
         assert_eq!(h.state().dialogs.open, Some("newConnection"));
         assert_eq!(h.state().dialogs.error, None);
         assert!(h.state().dialogs.info.as_deref().unwrap().contains("1 layers"));
+        assert!(h.state().dialogs.info.as_deref().unwrap().contains("[redacted]"));
+        assert!(!h.state().dialogs.info.as_deref().unwrap().contains(&expected));
         assert!(h.state().ui.connection.id.is_none());
         assert_eq!(h.state().session.connections.connections, vec![saved.clone()]);
         assert_eq!(web::known_secret(&h.state().session, &saved).unwrap().expose(), "existing-saved-login");
@@ -285,6 +303,28 @@ fn unsaved_wmts_test_uses_typed_header_or_basic_without_touching_saved_login() {
             assert!(entry.params.get("apiKey").is_none());
             assert!(!entry.params.to_string().contains("web-widget-secret-sentinel"));
         }
+        assert_redacted(&h);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn short_service_answers_do_not_retain_echoed_credentials_in_history() {
+    for answer in ["web-widget-secret-sentinel", "<Exception>web-widget-secret-sentinel</Exception>"] {
+        let (address, requests, release, server) = probe_server_with_answer(Some(answer));
+        let mut h = session_ui();
+        header_form(&mut h, &address);
+        h.get_by_label("Send the login over unencrypted http://").click();
+        settle(&mut h);
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        h.step();
+        requests.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        release.send(()).unwrap();
+        finish_probe(&mut h);
+        assert!(h.state().dialogs.error.is_some());
+        let entry = h.state().session.log.entries().filter(|e| e.command == "connection.test").last().unwrap();
+        assert!(entry.params.get("answer").is_some(), "the response parsing command must actually be recorded");
+        assert!(!entry.params.to_string().contains("web-widget-secret-sentinel"), "the response must not retain the credential");
         assert_redacted(&h);
         server.join().unwrap();
     }
