@@ -177,6 +177,31 @@ pub fn clear_fetcher() {
     *fetcher().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Tests that fetch through the cache take turns. It has one fetcher for the whole process, so a
+/// test that replaces it ([`set_fetcher`]) would answer another's fetches. It also starts fetches
+/// on whichever thread is starting them already, so one test's fetch may run on another's thread,
+/// later. Tests that end a login take turns too, as that empties the cache ([`clear`]), and so do
+/// tests that wait for or plant what the cache holds (an archive read, a style resolved), which
+/// that would drop. The turn puts the native fetcher back when it ends.
+#[cfg(test)]
+pub(crate) fn turn() -> Turn {
+    static TURN: Mutex<()> = Mutex::new(());
+    Turn { _held: TURN.lock().unwrap_or_else(|e| e.into_inner()) }
+}
+
+/// A test's turn at the cache ([`turn`]).
+#[cfg(test)]
+pub(crate) struct Turn {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for Turn {
+    fn drop(&mut self) {
+        clear_fetcher();
+    }
+}
+
 /// Replaces how tile pictures (PNG, JPEG, WebP) are decoded: the browser's own decoder works
 /// off the page's thread, where decoding them here held up every frame tiles arrived in. `done`
 /// must be called once, with the picture as [`RAW`] pixels, or with the bytes given back.
@@ -1911,6 +1936,7 @@ mod tests {
 
     #[test]
     fn archive_reload_excludes_old_decodes_and_keeps_other_sources() {
+        let _turn = crate::cache::turn();
         let archive = "/cache-generation-regression.pmtiles";
         let tile = format!("pmtiles:0/0/0@{archive}");
         let other = "mbtiles:0/0/0@/cache-generation-other.mbtiles";
@@ -1947,6 +1973,7 @@ mod tests {
 
     #[test]
     fn delayed_archive_answers_cannot_replace_new_pixels_or_remove_new_pending_reads() {
+        let _turn = crate::cache::turn();
         for scheme in ["pmtiles", "mbtiles"] {
             let archive = format!("/delayed-answer.{scheme}");
             let key = format!("{scheme}:0/0/0@{archive}");
@@ -2532,6 +2559,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn logins_headers_follow_same_origin_redirects() {
+        let _turn = crate::cache::turn();
         use crate::logins::{self, Method};
         let (base, asked) = serve_recorded(
             [
@@ -2554,6 +2582,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn logins_redirects_never_pick_up_another_origins_login() {
+        let _turn = crate::cache::turn();
         use crate::logins::{self, Method};
         let (other, asked) = serve_recorded(vec![b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntile".to_vec()]);
         let base = serve(vec![format!("HTTP/1.1 302 Found\r\nLocation: {other}/tile\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")]);
@@ -2573,6 +2602,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn logins_diagnostics_never_record_the_binding_or_the_secret() {
+        let _turn = crate::cache::turn();
         use crate::failure::Reason;
         use crate::logins::{self, Method};
         use rustgis_data::diagnostics::{Filter, History};
@@ -2619,6 +2649,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn delayed_head_refusal_after_cross_origin_redirect_is_status_only() {
+        let _turn = crate::cache::turn();
         use crate::logins::{self, Method};
         use rustgis_data::diagnostics::{Capture, Filter, History};
         use std::io::{Read, Write};
@@ -2682,6 +2713,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn logins_head_and_post_carry_the_login() {
+        let _turn = crate::cache::turn();
         use crate::logins::{self, Method};
         let answer = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
         let (base, asked) = serve_recorded(vec![answer.clone(), answer]);
@@ -2700,6 +2732,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn live_connection_bindings_separate_requests_and_cache_entries() {
+        let _turn = crate::cache::turn();
         use crate::logins::{self, Method};
         let answer = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec();
         let (base, asked) = serve_recorded(vec![answer.clone(), answer.clone(), answer]);
@@ -2731,6 +2764,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn logout_during_pending_download_discards_old_authenticated_body() {
+        let _turn = crate::cache::turn();
         use crate::logins::{self, Method};
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2770,6 +2804,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn derived_style_tilejson_sprite_and_feature_requests_carry_the_binding() {
+        let _turn = crate::cache::turn();
         use crate::{
             logins::{self, Method},
             source,
@@ -3041,23 +3076,7 @@ mod tests {
     fn fetches_through_the_fetcher_once() {
         use std::sync::mpsc;
 
-        // The fetcher and cache are process-global. Other tests legitimately clear caches on
-        // logout; this fixture must neither lose its answers nor intercept their requests.
-        if std::env::var("RUSTGIS_CACHE_FETCHER_SCENARIO").as_deref() != Ok("once") {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "cache::tests::fetches_through_the_fetcher_once", "--test-threads=1", "--nocapture"])
-                .env("RUSTGIS_CACHE_FETCHER_SCENARIO", "once")
-                .output()
-                .unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let ran_one = stdout.lines().any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"));
-            assert!(
-                output.status.success() && ran_one,
-                "isolated fetcher scenario failed or did not run exactly one test:\n{stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
+        let _turn = crate::cache::turn();
 
         fn receive(rx: &mpsc::Receiver<()>) {
             rx.recv_timeout(Duration::from_secs(10)).expect("the test fetcher answered or admitted the request");

@@ -1038,6 +1038,7 @@ pub(crate) mod tests {
 
     #[test]
     fn reloaded_archive_rejects_old_metadata_and_leaf_answers() {
+        let _turn = crate::cache::turn();
         let source = "/pmtiles-stale-completion-regression.pmtiles";
         let old_epoch = crate::cache::archive_epoch(source);
         let bytes = archive(&[(0, 0, 0, vec![1])], 1, true, "{}");
@@ -1202,6 +1203,7 @@ pub(crate) mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn ordinary_loaders_reject_present_invalid_metadata_with_specific_errors() {
+        let _turn = crate::cache::turn();
         let dir = std::env::temp_dir().join(format!("rustgis-pmtiles-metadata-errors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cases = Vec::new();
@@ -1473,6 +1475,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_raster_archive_resolves_and_decodes_and_truncations_fail_cleanly() {
+        let _turn = crate::cache::turn();
         let dir = std::env::temp_dir().join(format!("rustgis-pmtiles-raster-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut png = Vec::new();

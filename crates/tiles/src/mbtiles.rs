@@ -332,6 +332,7 @@ mod tests {
 
     #[test]
     fn cleared_metadata_rejects_an_older_completion() {
+        let _turn = crate::cache::turn();
         let epoch = info_epoch("/old-completion.mbtiles");
         forget();
         remember_info("/old-completion.mbtiles", &Err("obsolete read".into()), epoch);

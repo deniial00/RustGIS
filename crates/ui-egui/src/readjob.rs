@@ -1,6 +1,6 @@
-//! Add Data's whole-file reads, Load All Features and a model's tools on the desktop run on a
-//! thread of their own (#1291 step 3), so a large raster, GeoJSON or table, a streamed layer
-//! loaded whole, or a long model doesn't hold the window: the status bar shows the run under way,
+//! Add Data's whole-file reads, Load All Features, local archive validation and model/script
+//! tools on the desktop run on a thread of their own (#1291 step 3), so large reads and tools
+//! don't hold the window: the status bar shows the run under way,
 //! how far it has come and Cancel, and [`land`] then runs the command, which takes what was made
 //! ([`reads`]) and adds it as it does when it runs here. They go one at a time, in the order
 //! asked for: files dropped together wait for the one before, and so does a file added while one
@@ -57,10 +57,10 @@ struct ReadJob {
     slot: crate::Slot<Result<reads::Read, String>>,
 }
 
-/// Runs `command` (`layer.addData`, `layer.loadAll` or `model.run`) with `p`: its read on a
+/// Runs Add Data, Load All, archive reload/repair or model/script tools with `p`: its read on a
 /// thread of its own when the desktop app makes it so ([`reads::read_ahead`]), after any under
-/// way; here and now otherwise, as the command does. While one is under way or waiting it answers
-/// that, not what the command adds, which comes as it lands.
+/// way; here and now otherwise. While one is under way or waiting it answers that, not what the
+/// command installs, which comes as it lands.
 pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Value, String> {
     run_then(app, command, p, None)
 }
@@ -133,9 +133,21 @@ fn not_run(app: &mut RustGisApp, then: Option<Then>, why: String) {
     }
 }
 
-/// What a command asked for is called in a notice: an unnamed model by the command's name.
-fn called(what: &str) -> &str {
-    if what.is_empty() { tl_raw!("Run Model") } else { what }
+/// `asked` left for `why`: its `then` told now, and kept in `left` for the notice.
+fn leave(app: &mut RustGisApp, left: &mut Vec<(String, Gone)>, asked: &Asked, why: Gone) {
+    let what = called(asked.command, &asked.what).to_string();
+    not_run(app, asked.then, crate::i18n::fmt("{what} was left: {why}", &[("what", &what), ("why", &why.to_string())]));
+    left.push((what, why));
+}
+
+/// What a command asked for is called in a notice: a script, or an unnamed model, by the
+/// command's name.
+fn called<'a>(command: &str, what: &'a str) -> &'a str {
+    match (what.is_empty(), command) {
+        (false, _) => what,
+        (true, "script.run") => tl_raw!("Run Script"),
+        (true, _) => tl_raw!("Run Model"),
+    }
 }
 
 /// A path's last part, as a notice names the file.
@@ -241,7 +253,9 @@ pub fn land(app: &mut RustGisApp) -> bool {
     if !busy(app) {
         return false;
     }
-    let mut left: Vec<(String, Gone, Option<Then>)> = Vec::new();
+    // Those left, for the notices below; each one's `then` is told as it is left, so callers
+    // hear in the order asked, before a later one starts.
+    let mut left: Vec<(String, Gone)> = Vec::new();
     // What it was for is gone: it is cancelled, and said with the rest below once it stops.
     let gone = app.reads.job.as_ref().filter(|j| j.gone.is_none()).and_then(|j| placed(app, &j.asked).err());
     if let (Some(why), Some(job)) = (gone, app.reads.job.as_mut()) {
@@ -253,7 +267,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
         let Some(done) = done else { return true };
         let Some(job) = app.reads.job.take() else { return false };
         match (job.gone, placed(app, &job.asked)) {
-            (Some(why), _) | (None, Err(why)) => left.push((job.asked.what, why, job.asked.then)),
+            (Some(why), _) | (None, Err(why)) => leave(app, &mut left, &job.asked, why),
             (None, Ok(p)) => {
                 if job.control.is_cancelled() {
                     // Cancelled (once it had read too): it adds nothing, and nor does what waits.
@@ -294,9 +308,9 @@ pub fn land(app: &mut RustGisApp) -> bool {
                             app.session.drop_read();
                             app.map.invalidate();
                         }
-                        // A bug in a model's run on a copy of the session: it runs here, as it would
-                        // have.
-                        Err(e) if job.asked.command == "model.run" => {
+                        // A bug in a model's or script's run on a copy of the session: it runs here,
+                        // as it would have.
+                        Err(e) if matches!(job.asked.command, "model.run" | "script.run") => {
                             app.session.notify(
                                 crate::i18n::fmt(
                                     "{tool} couldn't work in the background ({e}): it ran here",
@@ -328,23 +342,20 @@ pub fn land(app: &mut RustGisApp) -> bool {
                 let _ = start(app, asked, p);
                 app.map.invalidate();
             }
-            Err(why) => left.push((asked.what, why, asked.then)),
+            Err(why) => leave(app, &mut left, &asked, why),
         }
     }
     // Those left, one notice for each reason, with a count, naming the first.
-    for (what, why, then) in &left {
-        not_run(app, *then, crate::i18n::fmt("{what} was left: {why}", &[("what", called(what)), ("why", &why.to_string())]));
-    }
     for why in [Gone::Project, Gone::Map, Gone::Layer, Gone::Archive] {
-        let of: Vec<&String> = left.iter().filter(|(_, w, _)| *w == why).map(|(what, ..)| what).collect();
+        let of: Vec<&String> = left.iter().filter(|(_, w)| *w == why).map(|(what, _)| what).collect();
         let reason = why.to_string();
         match of.as_slice() {
             [] => {}
-            [what] => app.session.notify(crate::i18n::fmt("{what} was left: {why}", &[("what", called(what)), ("why", &reason)]), false),
+            [what] => app.session.notify(crate::i18n::fmt("{what} was left: {why}", &[("what", what), ("why", &reason)]), false),
             [first, ..] => app.session.notify(
                 crate::i18n::fmt(
                     "{n} files or layers were left, the first {what}: {why}",
-                    &[("n", &of.len().to_string()), ("what", called(first)), ("why", &reason)],
+                    &[("n", &of.len().to_string()), ("what", first), ("why", &reason)],
                 ),
                 false,
             ),
@@ -518,6 +529,7 @@ mod tests {
 
     #[test]
     fn archive_reload_lands_once_and_stale_or_cancelled_reads_keep_retained_metadata() {
+        let _turn = crate::fetching::turn();
         use rustgis_engine::render::rustgis_tiles::pmtiles;
         let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
         let dir = std::env::temp_dir().join(format!("rustgis-read-archive-{}", std::process::id()));
@@ -564,6 +576,7 @@ mod tests {
 
     #[test]
     fn archive_repair_does_not_report_success_before_validation_lands() {
+        let _turn = crate::fetching::turn();
         let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
         let dir = std::env::temp_dir().join(format!("rustgis-read-archive-repair-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
