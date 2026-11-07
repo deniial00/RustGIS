@@ -858,6 +858,13 @@ origin keeps the login, and a redirect to another origin is followed without it,
 another connection's login either. In the web app a request carrying a login isn't redirected at
 all, since the browser can't take the login off on the way: a service that redirects (to
 `https://` or to another path) fails there, so save the connection with the address it ends at.
+Service documents cannot supply a login binding. While resolving their links, RustGIS inherits
+only the login used to read the document, and only at that same origin. A runtime wrapper in a
+document link contributes its ordinary URL, never its login.
+Relative links, including parent paths, resolve against the document's address without rewriting
+template placeholders or query values, including proxy parameters containing `https://` URLs.
+KVP requests replace capabilities operation parameters, keeping unrelated parameters such as
+MapServer's `map=`.
 If a service supplies a same-origin link too long to carry its login, the request is refused
 instead of being fetched anonymously. Addresses that cannot be rebound to a login are left
 unchanged and reported.
@@ -1043,7 +1050,9 @@ descriptions GDAL and rasterio write inside a GeoTIFF (its `GDAL_METADATA` tag) 
 too, a sidecar's taking precedence.
 Exporting a raster opened from an overview writes that overview; the results of adding and of
 exporting it (`layer.addData`, `share.exportRaster`) give the full size as `overviewOf`, so scripts
-and the MCP server see it too.
+and the MCP server see it too. A GeoTIFF read in place that is added before its overview is in
+(the desktop app, the browser) answers `"reading": true`, sized by its header when that is in, and
+with `null` for its size and bands until then.
 `share.exportRaster` writes an untiled GeoTIFF; with `"cog": true` it writes a cloud-optimised one:
 512-pixel tiles compressed with Deflate, overviews (each half the size of the last, down to one
 tile), and every directory ahead of the tiles, so a reader fetches the header once and then only the
@@ -1221,13 +1230,19 @@ routes, areas, observations…) to draw into. Add Folder connects a folder to th
 also lists the project's layouts, styles and tasks. A task's steps each run a command; New Task
 From History turns the geoprocessing history into a task you can replay.
 
-Saved projects, map and layer files, and packages keep no password, key, token or signature in
-layer web addresses. The open project keeps them for this session. RustGIS remembers the 32 most
-recent distinct saved snapshots whose addresses needed stripping. Opening a plain `.rgis` file
-whose bytes exactly match one of those snapshots restores its secrets; saving more distinct
-snapshots evicts the oldest. Changed files, packages, imports and files saved by another process
-never restore secrets. After a snapshot is evicted or RustGIS closes, add those layers again with
-their credentials.
+Saved projects, templates, map and layer files, and packages remove recognized credentials from
+supported addresses and recognized executable parameters. The open project keeps its credentials. Removal
+notices describe what a shared workflow or video will need again; an unchecked-content notice
+means opaque content was kept and needs your review. Unrecognized credentials can remain in
+addresses without a notice, so review addresses and preserved content before sharing.
+
+RustGIS remembers up to 32 distinct saved snapshots for explicit project reopening, with at most
+1 MiB of restoration data per snapshot and 8 MiB in total. A snapshot must match, and only its
+recorded, unchanged fields can regain credentials. Larger restoration records are not remembered;
+a notice says so. Imports, packages and peer exchanges do not use this memory. After eviction or
+closing RustGIS, sign in again or add the protected sources with their credentials. Feature data
+and user text remain data, so review them before sharing.
+
 A layer added from a saved web-service connection records the connection's id (`"connection"`
 in the `.rgis` file; never its login), so the project needs no token in its addresses. See
 [Web-service logins](#web-service-logins) for what happens when it opens where that connection or
