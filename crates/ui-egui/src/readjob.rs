@@ -1,6 +1,6 @@
-//! Add Data's whole-file reads, Load All Features and a model's tools on the desktop run on a
-//! thread of their own (#1291 step 3), so a large raster, GeoJSON or table, a streamed layer
-//! loaded whole, or a long model doesn't hold the window: the status bar shows the run under way,
+//! Add Data's whole-file reads, layer reload, Load All Features and a model's tools on the desktop
+//! run on a thread of their own (#1291 step 3), so a large raster, GeoJSON or table, a streamed
+//! layer loaded whole, or a long model doesn't hold the window: the status bar shows the run under way,
 //! how far it has come and Cancel, and [`land`] then runs the command, which takes what was made
 //! ([`reads`]) and adds it as it does when it runs here. They go one at a time, in the order
 //! asked for: files dropped together wait for the one before, and so does a file added while one
@@ -25,8 +25,8 @@ pub struct Reads {
     waiting: VecDeque<Asked>,
 }
 
-/// A command asked for, with where it was asked: the project and map then open and, for Load All,
-/// the layer. Another project or map open by the time it runs, or the layer gone, leaves it.
+/// A command asked for, with where it was asked: the project, map and layer then open.
+/// A reload also retains its source, so a queued request cannot target a repaired path.
 struct Asked {
     command: &'static str,
     params: Value,
@@ -35,6 +35,7 @@ struct Asked {
     opened: u64,
     map: u64,
     layer: Option<u64>,
+    reload: Option<crate::reloaddata::Form>,
     /// Given what the command answered when it runs, or why it didn't (cancelled, or left).
     then: Option<Then>,
 }
@@ -55,7 +56,7 @@ struct ReadJob {
     slot: crate::Slot<Result<reads::Read, String>>,
 }
 
-/// Runs `command` (`layer.addData`, `layer.loadAll`, `model.run` or `script.run`) with `p`: its
+/// Runs `command` (`layer.addData`, `layer.loadAll`, `layer.reloadData`, `model.run` or `script.run`) with `p`: its
 /// read on a thread of its own when the desktop app makes it so ([`reads::read_ahead`]), after
 /// any under way; here and now otherwise, as the command does. While one is under way or waiting
 /// it answers that, not what the command adds, which comes as it lands.
@@ -70,13 +71,15 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
         let r = app.run(command, p);
         return answered(app, then, r);
     }
-    let layer = (command == "layer.loadAll")
+    let layer = matches!(command, "layer.loadAll" | "layer.reloadData")
         .then(|| app.session.layer_id(&p).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
         .flatten();
     // Load All asked again for a layer it is reading already.
-    if let Some((instance, _)) = &layer
+    if command == "layer.loadAll"
+        && let Some((instance, _)) = &layer
         // (One whose map or project went never loads it: a new request waits behind it.)
-        && app.reads.job.iter().filter(|j| j.gone.is_none()).map(|j| &j.asked).chain(&app.reads.waiting).any(|a| a.layer == Some(*instance))
+        && app.reads.job.iter().filter(|j| j.gone.is_none()).map(|j| &j.asked).chain(&app.reads.waiting)
+            .any(|a| a.command == command && a.layer == Some(*instance))
     {
         return Ok(json!({"reading": instance}));
     }
@@ -86,6 +89,17 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
         None if command == "model.run" => p.get("name").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string(),
         None => p.get("path").and_then(Value::as_str).map(|path| file_name(path).to_string()).unwrap_or_default(),
     };
+    let reload = if command == "layer.reloadData" {
+        match app.session.layer_id(&p).and_then(|id| crate::reloaddata::Form::new(&app.session, id)) {
+            Ok(form) => Some(form),
+            Err(why) => {
+                not_run(app, then, why.clone());
+                return Err(why);
+            }
+        }
+    } else {
+        None
+    };
     let asked = Asked {
         command,
         params: p,
@@ -93,6 +107,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
         opened: app.session.opened,
         map: app.session.map().instance_id(),
         layer: layer.map(|(instance, _)| instance),
+        reload,
         then,
     };
     if busy(app) {
@@ -157,6 +172,7 @@ enum Gone {
     Project,
     Map,
     Layer,
+    Source,
 }
 
 impl std::fmt::Display for Gone {
@@ -166,6 +182,7 @@ impl std::fmt::Display for Gone {
             Gone::Project => tl_raw!("another project was opened"),
             Gone::Map => tl_raw!("the map it was asked for isn't open"),
             Gone::Layer => tl_raw!("its layer was removed"),
+            Gone::Source => tl_raw!("its data source changed"),
         })
     }
 }
@@ -181,6 +198,9 @@ fn placed(app: &RustGisApp, asked: &Asked) -> Result<Value, Gone> {
     }
     let Some(instance) = asked.layer else { return Ok(asked.params.clone()) };
     let l = app.session.map().layers.iter().find(|l| l.instance_id() == instance).ok_or(Gone::Layer)?;
+    if asked.reload.as_ref().is_some_and(|reload| !reload.is_current(&app.session)) {
+        return Err(Gone::Source);
+    }
     let mut p = asked.params.clone();
     p["layer"] = json!(l.id);
     Ok(p)
@@ -307,7 +327,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
         }
     }
     // Those left, one notice for each reason, with a count, naming the first.
-    for why in [Gone::Project, Gone::Map, Gone::Layer] {
+    for why in [Gone::Project, Gone::Map, Gone::Layer, Gone::Source] {
         let of: Vec<&String> = left.iter().filter(|(_, w)| *w == why).map(|(what, _)| what).collect();
         let reason = why.to_string();
         match of.as_slice() {
@@ -473,5 +493,86 @@ mod tests {
         assert!(app.session.notices.iter().any(|n| n.text == notice), "{:?}", app.session.notices.last());
         assert!(app.session.project.maps[0].layer(id).unwrap().is_streamed());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn reload_fixture() -> (tempfile::TempDir, RustGisApp, u32, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("streamed.geojson");
+        publish_point(&path, 1.0);
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.reads_off_frame = true;
+        let id = app.run("layer.addData", json!({"path": path, "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+        (dir, app, id, path)
+    }
+
+    fn publish_point(path: &std::path::Path, x: f64) {
+        std::fs::write(
+            path,
+            json!({
+                "type": "FeatureCollection", "features": [{
+                    "type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [x, 47]}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn source_x(app: &RustGisApp, id: u32) -> f64 {
+        app.session.map().layer(id).unwrap().source.as_ref().unwrap().info().unwrap().extent.center().x
+    }
+
+    #[test]
+    fn reload_lands_once_and_cancel_retains_the_current_layer() {
+        let (_dir, mut app, id, path) = reload_fixture();
+        publish_point(&path, 9.0);
+        let before = app.session.undo_label().map(str::to_string);
+        assert!(app.run("ui.reloadData", json!({"layer": id})).unwrap().get("started").is_some());
+        assert_eq!(source_x(&app, id), 1.0, "the worker cannot install into the live session");
+        assert_eq!(app.session.undo_label(), before.as_deref());
+        landed(&mut app, 60);
+        assert_eq!(source_x(&app, id), 9.0);
+        let fresh = app.session.map().layer(id).unwrap().load_all_counted().unwrap().0;
+        assert_eq!(fresh.features[0].geometry, Some(rustgis_engine::data::Geometry::Point(rustgis_engine::data::Coord::new(9.0, 47.0))));
+        app.run("edit.undo", Value::Null).unwrap();
+        assert_eq!(source_x(&app, id), 1.0, "one undo restores the retained configuration");
+
+        app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        app.reads.job.as_ref().unwrap().control.cancel();
+        landed(&mut app, 60);
+        assert_eq!(source_x(&app, id), 1.0);
+        assert_eq!(app.session.undo_label(), before.as_deref());
+    }
+
+    #[test]
+    fn queued_and_running_reload_cannot_target_a_repaired_source() {
+        let (dir, mut app, id, path) = reload_fixture();
+        publish_point(&path, 9.0);
+        app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        assert_eq!(app.run("ui.reloadData", json!({"layer": id})).unwrap()["waiting"], 1);
+        let replacement = dir.path().join("replacement.geojson");
+        publish_point(&replacement, 5.0);
+        app.run("layer.repairSource", json!({"layer": id, "path": replacement})).unwrap();
+        let before = app.session.undo_label().map(str::to_string);
+        landed(&mut app, 60);
+        assert_eq!(source_x(&app, id), 5.0);
+        let fresh = app.session.map().layer(id).unwrap().load_all_counted().unwrap().0;
+        assert_eq!(fresh.features[0].geometry, Some(rustgis_engine::data::Geometry::Point(rustgis_engine::data::Coord::new(5.0, 47.0))));
+        assert_eq!(app.session.undo_label(), before.as_deref());
+    }
+
+    #[test]
+    fn load_all_after_reload_is_not_coalesced_with_the_reload() {
+        let (_dir, mut app, id, path) = reload_fixture();
+        publish_point(&path, 9.0);
+        app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        assert_eq!(run(&mut app, "layer.loadAll", json!({"layer": id})).unwrap()["waiting"], 1);
+        landed(&mut app, 60);
+        let layer = app.session.map().layer(id).unwrap();
+        assert!(!layer.is_streamed());
+        assert_eq!(
+            layer.dataset.features[0].geometry,
+            Some(rustgis_engine::data::Geometry::Point(rustgis_engine::data::Coord::new(9.0, 47.0)))
+        );
     }
 }

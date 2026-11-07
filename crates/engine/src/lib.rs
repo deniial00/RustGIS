@@ -825,8 +825,7 @@ fn edited_streamed(before: &Project, after: &Project) -> Option<String> {
         for la in ma.layers.iter().filter(|l| l.is_streamed()) {
             let Some(lb) = mb.layers.iter().find(|l| l.id == la.id && l.is_streamed()) else { continue };
             let reads = |l: &rustgis_map::Layer| l.source.as_ref().map(|s| s.reads);
-            let same_source = la.source.as_ref().zip(lb.source.as_ref()).is_some_and(|(a, b)| a.same_opening(b));
-            if same_source && reads(la) == reads(lb) && (la.dataset.features != lb.dataset.features || schema(la) != schema(lb)) {
+            if reads(la) == reads(lb) && (la.dataset.features != lb.dataset.features || schema(la) != schema(lb)) {
                 return Some(la.name.clone());
             }
         }
@@ -886,7 +885,8 @@ fn fresh_source_ids(before: &Project, after: &mut Project) {
 /// layer holds only the window in view, so its other features aren't gone. It compares ids, so an
 /// id a single command both removes and hands out stays locked: only restoring from an archive can.
 /// A command that removes a layer removes its locks and line anchors too, or each frame would read
-/// them for nothing.
+/// them for nothing. It compares layer ids too: a layer id the map hands out again (after `u32::MAX`,
+/// or once a failed add rewinds the counter) keeps the old layer's entries.
 fn forget_label_state_of_removed_features(before: &Project, after: &mut Project) {
     for (i, m) in after.maps.iter_mut().enumerate() {
         let was = before.maps.get(i).filter(|o| o.name == m.name);

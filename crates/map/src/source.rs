@@ -589,6 +589,9 @@ impl SourceLayer {
                 declared_empty = fresh.empty;
                 conversion_zm_dropped = fresh.zm_dropped;
                 new.path = Some(fresh.path.display().to_string());
+                let handle = rustgis_data::source::fgb::FgbSource::open_owned_path(&fresh.path, layer, fresh.workspace)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                new.handle = Some(Arc::new(handle));
                 new.gdal = Some(GdalOrigin { path: path.into(), layer: layer.into(), ..g.clone() });
             }
         } else if let Some(d) = &self.duckdb {
@@ -605,14 +608,18 @@ impl SourceLayer {
                 let database = duckdb::Database::File(path.into());
                 let name = d.table.as_deref().ok_or_else(|| format!("{path}: the DuckDB layer has no table"))?;
                 let table = duckdb::find_table_of(&database, name).map_err(|e| format!("{path}: {e}"))?;
-                let out = duckdb::convert_table_fresh(std::path::Path::new(path), &table, d.family, d.crs.as_deref())
+                let fresh = duckdb::convert_table_fresh(std::path::Path::new(path), &table, d.family, d.crs.as_deref())
                     .map_err(|e| format!("{path}: {e}"))?;
+                let out = fresh.output;
                 if out.skipped > 0 {
                     conversion_notes.push(format!("DuckDB: {} rows without a geometry were left out", out.skipped));
                 }
                 let part = out.parts.first().ok_or_else(|| format!("{path}: the table returns no {}", d.family.label()))?;
                 declared_empty = part.count == 0;
                 new.path = Some(part.path.display().to_string());
+                let handle = rustgis_data::source::parquet::ParquetSource::open_owned_path(&part.path, name, fresh.workspace)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                new.handle = Some(Arc::new(handle));
                 conversion_zm_dropped = false;
                 new.duckdb = Some(d);
             }
@@ -635,7 +642,9 @@ impl SourceLayer {
                 }
             }
         }
-        new.open().map_err(|e| format!("{path}: {e}"))?;
+        if new.handle.is_none() {
+            new.open().map_err(|e| format!("{path}: {e}"))?;
+        }
         // Opening a header alone doesn't establish that its payload is readable. Probe the
         // candidate, never the live source, before the caller commits the replacement.
         let handle = new.handle.as_deref().ok_or_else(|| format!("{path}: the replacement source didn't open"))?;

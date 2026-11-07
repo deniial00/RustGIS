@@ -64,6 +64,8 @@ pub fn read_ahead(s: &Session, command: &str, p: &Value) -> Option<ReadAhead> {
         "layer.addData" => super::layer::add_data_ahead(p),
         "layer.loadAll" => super::layer::load_all_ahead(s, p),
         #[cfg(not(target_arch = "wasm32"))]
+        "layer.reloadData" => super::repair::reload_ahead(s, p),
+        #[cfg(not(target_arch = "wasm32"))]
         "model.run" => Some(super::workflows::ahead_on_copy(s, "model.run", p)),
         #[cfg(not(target_arch = "wasm32"))]
         "script.run" => super::workflows::script_ahead(s, p),

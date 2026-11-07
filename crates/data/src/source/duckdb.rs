@@ -822,15 +822,30 @@ pub fn convert_table_of(database: &Database, table: &Table, crs: Option<&str>) -
     }
 }
 
+/// A manual replacement's output and private files, retained by its concrete reader.
+#[derive(Debug)]
+pub struct FreshOutput {
+    pub output: Output,
+    pub workspace: std::sync::Arc<tempfile::TempDir>,
+}
+
 /// Re-reads only a selected table/family, bypassing file-signature caches. The result has its own
 /// path, so retained handles and snapshots continue to read their previous conversion.
-pub fn convert_table_fresh(database: &Path, table: &Table, family: Family, crs: Option<&str>) -> Result<Output> {
+pub fn convert_table_fresh(database: &Path, table: &Table, family: Family, crs: Option<&str>) -> Result<FreshOutput> {
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for DuckDB results".into()))?;
     convert_table_fresh_in(&dir, database, table, family, crs)
 }
 
-fn convert_table_fresh_in(dir: &Path, database: &Path, table: &Table, family: Family, crs: Option<&str>) -> Result<Output> {
-    run_selected_in(dir, &Query { sql: &table.sql(), database: Some(&Database::File(database.to_path_buf())), crs }, true, Some(family))
+fn convert_table_fresh_in(dir: &Path, database: &Path, table: &Table, family: Family, crs: Option<&str>) -> Result<FreshOutput> {
+    std::fs::create_dir_all(dir)?;
+    let workspace = std::sync::Arc::new(tempfile::Builder::new().prefix("reload-").tempdir_in(dir)?);
+    let output = run_selected_in(
+        workspace.path(),
+        &Query { sql: &table.sql(), database: Some(&Database::File(database.to_path_buf())), crs },
+        true,
+        Some(family),
+    )?;
+    Ok(FreshOutput { output, workspace })
 }
 
 fn convert_table_in(dir: &Path, database: &Path, table: &Table, crs: Option<&str>) -> Result<Output> {
@@ -1150,9 +1165,17 @@ mod tests {
             UNION ALL SELECT 4, 'd', NULL, NULL;";
         let out = run_in(&cache, &Query { sql, ..Query::default() }, false).unwrap();
         assert_eq!(out.skipped, 1);
-        let parts: Vec<(Family, u64)> = out.parts.iter().map(|p| (p.family, p.count)).collect();
-        assert_eq!(parts, vec![(Family::Points, 2), (Family::Lines, 1)]);
-        let pts = open(&out.parts[0].path);
+        assert_eq!(out.parts.len(), 2);
+        let points = out.parts.iter().find(|p| p.family == Family::Points).unwrap();
+        let lines = out.parts.iter().find(|p| p.family == Family::Lines).unwrap();
+        assert_eq!(points.count, 2);
+        assert_eq!(lines.count, 1);
+        let line_source = open(&lines.path);
+        let line_batch = line_source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+        assert_eq!(line_batch.features.len(), 1);
+        assert_eq!(line_batch.features[0].geometry.as_ref().unwrap().kind(), crate::GeometryType::Polyline);
+        assert_eq!(line_batch.features[0].geometry.as_ref().unwrap().extent(), rustgis_geom::Extent::new(0.0, 0.0, 1.0, 1.0));
+        let pts = open(&points.path);
         let info = pts.info();
         assert_eq!(info.count, Some(2));
         assert!(info.indexed, "the bbox covering is found");
@@ -1160,6 +1183,10 @@ mod tests {
         assert_eq!(info.fields[2].ty, crate::FieldType::Text);
         let b = pts.read(&crate::source::Request { extent: Some(rustgis_geom::Extent::new(10.5, 20.5, 12.0, 22.0)), limit: 10 }).unwrap();
         assert_eq!(b.features.len(), 1, "the extent query reads the covering");
+        assert_eq!(b.features[0].geometry.as_ref().unwrap().extent(), rustgis_geom::Extent::new(11.0, 21.0, 11.0, 21.0));
+        let all_points = pts.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+        assert_eq!(all_points.features.len(), 2);
+        assert!(all_points.features.iter().all(|f| f.geometry.as_ref().unwrap().kind() == crate::GeometryType::Point));
         // No temporary files are left.
         let names: Vec<String> =
             std::fs::read_dir(&cache).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -1208,6 +1235,13 @@ mod tests {
         assert_eq!(a.parts.iter().map(|p| p.count).collect::<Vec<_>>(), vec![1000]);
         // The second time is a cache hit, read back from the key file.
         assert_eq!(convert_table_in(&cache, &db, &tables[0], None).unwrap(), a);
+        // A rejected selected-family conversion has written temporary Parquets already; its
+        // private workspace must disappear even though ordinary cached results remain reusable.
+        assert!(convert_table_fresh_in(&cache, &db, &tables[0], Family::Lines, None).is_err());
+        assert!(
+            std::fs::read_dir(&cache).unwrap().flatten().all(|entry| !entry.file_name().to_string_lossy().starts_with("reload-")),
+            "failed fresh conversions must not retain workspaces"
+        );
         // Changes still in the write-ahead log are a different file.
         let mut wal = db.clone().into_os_string();
         wal.push(".wal");

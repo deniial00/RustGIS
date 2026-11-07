@@ -284,7 +284,7 @@ pub const MAX_ZARR_STEPS: usize = crate::time::MAX_STEPS;
 
 /// A Zarr variable that follows the time slider: the store (a folder or a web address), the
 /// variable, the other dimensions' fixed steps, and its time dimension's steps as dates.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ZarrTime {
     /// The store's folder or web address.
@@ -307,8 +307,30 @@ pub struct ZarrTime {
     #[serde(skip)]
     pub shown: Option<usize>,
     /// Process-local read generation: explicit reload must not reuse old slices or pending reads.
-    #[serde(skip)]
+    #[serde(skip, default = "next_read_generation")]
     pub read_generation: u64,
+}
+
+/// A process-local identity for a fresh Zarr opening or independent analysis invocation.
+pub fn next_read_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Default for ZarrTime {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            variable: String::new(),
+            index: Vec::new(),
+            dim: String::new(),
+            offset: 0,
+            dates: Vec::new(),
+            crs: None,
+            shown: None,
+            read_generation: next_read_generation(),
+        }
+    }
 }
 
 fn is_zero(v: &u64) -> bool {

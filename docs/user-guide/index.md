@@ -249,19 +249,33 @@ For an editable GeoPackage with pending inserts, updates or deletions, reload fi
 their counts. **Cancel** keeps the edits; **Discard Edits and Reload** explicitly abandons
 them and rereads the selected table, without writing to the file. A successful reload updates
 the baseline used to detect conflicts when subsequently saving edits.
+Close an already-open dialog before opening the discard confirmation; Reload Data does not
+discard another dialog's unfinished input.
+
+The desktop UI prepares the read or conversion in the background, with running status and
+Cancel in the status bar. Cancel installs nothing. If the source is repaired or the target is replaced,
+or GeoPackage edits change after confirmation while the read is running, the result is refused
+rather than applied to the changed target; review the current state and retry.
 
 Reload checks a fresh candidate before replacing the layer. Incompatible geometry, missing
-fields or invalidated configured expressions, missing tables/subdatasets and insufficient
-raster bands or palettes are rejected. An unreadable or missing source leaves the existing
-configuration and retained in-memory data in place; correct the file and retry, or use
-**Repair Data Source…** if it moved. A streamed source may itself already be affected by an
-external overwrite: its retained handle is not a complete last-good copy.
+fields, incompatible numeric fields used by presentation settings, invalidated configured
+expressions, missing tables/subdatasets and insufficient raster bands or palettes are rejected.
+Saved labeling configuration is checked even when labels are disabled. A time-following Zarr
+replacement whose dates cannot be reached by any step of the current slider is rejected: adjust
+the slider and retry; reload does not silently change the shared slider for other layers.
+An unreadable or missing source leaves the existing configuration and retained in-memory data
+in place; correct the file and retry, or use **Repair Data Source…** if it moved.
+For streamed sources these opening and compatibility checks are not a full-file integrity scan.
+A streamed source may itself already be affected by an external overwrite: its retained handle
+is not a complete last-good copy.
 
-Selections, saved feature-specific label moves and label locks/callout anchors are reset
-because feature IDs may now identify different data. A notice counts reset saved label
-moves and reports loader losses. Successful reload is one undo step; failure adds none.
-Undo restores in-memory edits and configuration, including saved label moves, but cannot
-recover overwritten files or promise historical streamed features or pixels.
+Replacing vector features resets selections and saved feature-specific label moves because
+feature IDs may now identify different data. It also clears map-wide label locks and line
+anchors: keeping a partial lock could hide the replacement's labels. Notices count reset saved
+moves, locked placements and anchors, including placements belonging to other layers, and
+report loader losses. Successful reload is one undo step; failure adds none.
+Undo restores in-memory edits and configuration, including saved label moves and locks, but
+cannot recover overwritten files or promise historical streamed features or pixels.
 
 CLI, Python, MCP and the Assistant use `layer.reloadData` with
 `{"layer":"Cities","discardEdits":false}`. Both parameters are optional: the active layer is

@@ -1,5 +1,5 @@
 //! Manual local-layer reload: capture the target before asking to discard edits.
-use crate::{RustGisApp, dialogs::Dialogs, theme::Tokens};
+use crate::{RustGisApp, theme::Tokens};
 use rustgis_engine::{Session, map::Layer};
 use serde_json::{Value, json};
 
@@ -26,10 +26,12 @@ pub struct Form {
     table: Option<String>,
     gpkg: bool,
     error: Option<String>,
+    /// Display cache only; dispatch always recounts before requesting a mutation.
+    counted: Option<(u64, [usize; 3])>,
 }
 
 impl Form {
-    fn new(s: &Session, id: u32) -> Result<Self, String> {
+    pub(crate) fn new(s: &Session, id: u32) -> Result<Self, String> {
         let layer = s.map().layer(id).ok_or_else(|| tl!("Layer not found").to_string())?;
         let (path, table, gpkg) = source(layer)
             .ok_or_else(|| tl!("Select a layer linked to a local file or folder, or an editable GeoPackage layer.").to_string())?;
@@ -42,6 +44,7 @@ impl Form {
             table: table.map(String::from),
             gpkg,
             error: None,
+            counted: None,
         })
     }
 
@@ -57,6 +60,10 @@ impl Form {
         Err(tl!("The project, map, layer or data source changed. Reopen Reload Data for the intended layer.").into())
     }
 
+    pub(crate) fn is_current(&self, s: &Session) -> bool {
+        self.target(s).is_ok()
+    }
+
     fn pending<'a>(&self, s: &'a Session) -> Result<(&'a str, [usize; 3]), String> {
         let layer = self.target(s)?;
         let counts = layer.gpkg.as_ref().map_or([0; 3], |edit| {
@@ -64,6 +71,17 @@ impl Form {
             [changes.inserts.len(), changes.updates.len(), changes.deletes.len()]
         });
         Ok((layer.name.as_str(), counts))
+    }
+
+    fn shown_pending<'a>(&mut self, s: &'a Session) -> Result<(&'a str, [usize; 3]), String> {
+        if let Some((revision, counts)) = self.counted
+            && revision == s.revision
+        {
+            return Ok((self.target(s)?.name.as_str(), counts));
+        }
+        let (name, counts) = self.pending(s)?;
+        self.counted = Some((s.revision, counts));
+        Ok((name, counts))
     }
 
     /// Validate identity and recount immediately before invoking the engine mutation.
@@ -76,24 +94,23 @@ impl Form {
         if discard {
             params["discardEdits"] = json!(true);
         }
-        app.run("layer.reloadData", params)
+        crate::readjob::run(app, "layer.reloadData", params)
     }
 }
 
 pub(crate) fn request(app: &mut RustGisApp, params: &Value) -> Result<Value, String> {
-    let result = (|| {
-        let form = Form::new(&app.session, app.session.layer_id(params)?)?;
-        let (_, counts) = form.pending(&app.session)?;
-        if counts == [0; 3] {
-            return form.dispatch(app, false);
-        }
-        app.dialogs = Dialogs { open: Some("reloadData"), reload: Some(form), ..Default::default() };
-        Ok(Value::Null)
-    })();
-    if let Err(error) = &result {
-        app.session.notify(error.clone(), true);
+    let mut form = Form::new(&app.session, app.session.layer_id(params)?)?;
+    let (_, counts) = form.pending(&app.session)?;
+    if counts == [0; 3] {
+        return form.dispatch(app, false);
     }
-    result
+    if app.dialogs.open.is_some() {
+        return Err(tl!("Close the current dialog before reloading a layer with pending edits.").into());
+    }
+    form.counted = Some((app.session.revision, counts));
+    app.dialogs.open = Some("reloadData");
+    app.dialogs.reload = Some(form);
+    Ok(Value::Null)
 }
 
 pub(crate) fn show(app: &mut RustGisApp, ctx: &egui::Context) {
@@ -101,7 +118,7 @@ pub(crate) fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         app.dialogs.open = None;
         return;
     };
-    let pending = form.pending(&app.session);
+    let pending = form.shown_pending(&app.session);
     let t = Tokens::get(ctx);
     let mut cancel = false;
     let mut discard = false;

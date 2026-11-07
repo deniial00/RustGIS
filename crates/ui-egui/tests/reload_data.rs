@@ -1,7 +1,10 @@
 //! Exercise Reload Data through the real confirmation, not source-code/wiring assertions.
 #![cfg(not(target_arch = "wasm32"))]
 use egui::{accesskit::Role, vec2};
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use rustgis_engine::{
     Project, Session,
     data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value, raster::Crs, source::gpkg},
@@ -152,4 +155,51 @@ fn data_ribbon_opens_the_same_dirty_confirmation_at_1366_width() {
     h.run_steps(3);
     assert_eq!(h.state().dialogs.open, None);
     assert_eq!(value(&h, id), Value::Text("pending".into()));
+}
+
+#[test]
+fn failed_reload_and_pre_dispatch_rejection_each_post_one_error() {
+    let (dir, mut h, id) = fixture();
+    h.state_mut().run("gpkg.discardEdits", json!({"layer": id})).unwrap();
+    let before = h.state().session.undo_label().map(str::to_string);
+    std::fs::write(dir.path().join("places.gpkg"), b"not a GeoPackage").unwrap();
+    let mark = h.state().session.notice_mark();
+    assert!(h.state_mut().run("ui.reloadData", json!({"layer": id})).is_err());
+    assert_eq!(h.state().session.notices_since(mark).iter().filter(|notice| notice.error).count(), 1);
+    assert_eq!(value(&h, id), Value::Text("original".into()));
+    assert_eq!(h.state().session.undo_label(), before.as_deref());
+
+    let mark = h.state().session.notice_mark();
+    assert!(h.state_mut().run("ui.reloadData", json!({"layer": 9999})).is_err());
+    assert_eq!(h.state().session.notices_since(mark).iter().filter(|notice| notice.error).count(), 1);
+    assert_eq!(h.state().session.undo_label(), before.as_deref());
+}
+
+#[test]
+fn dirty_reload_preserves_an_open_dialog_and_its_unsubmitted_input() {
+    let (_dir, mut h, id) = fixture();
+    h.state_mut().run("ui.dialog", json!({"name": "addDatabase"})).unwrap();
+    h.state_mut().dialogs.text = "unsubmitted connection input".into();
+    h.state_mut().dialogs.a = "unsubmitted table choice".into();
+    assert!(h.state_mut().run("ui.reloadData", json!({"layer": id})).is_err());
+    assert_eq!(h.state().dialogs.open, Some("addDatabase"));
+    assert_eq!(h.state().dialogs.text, "unsubmitted connection input");
+    assert_eq!(h.state().dialogs.a, "unsubmitted table choice");
+    assert_eq!(value(&h, id), Value::Text("pending".into()));
+}
+
+#[test]
+fn unsupported_snapshot_reload_stays_visible_but_disabled_in_command_search() {
+    let (_dir, mut h, _) = fixture();
+    h.state_mut().run("layer.template", json!({"template": "points", "name": "Snapshot"})).unwrap();
+    let id = h.state().session.map().layer_by_name("Snapshot").unwrap().id;
+    let before = h.state().session.undo_label().map(str::to_string);
+    h.state_mut().ui.command_search = Some("layer.reloadData".into());
+    h.run_steps(3);
+    assert!(h.get_by_label_contains("Reload Data").accesskit_node().is_disabled());
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(h.state().ui.command_search.is_some());
+    assert_eq!(h.state().session.active_layer, Some(id));
+    assert_eq!(h.state().session.undo_label(), before.as_deref());
 }

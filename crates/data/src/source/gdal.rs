@@ -93,9 +93,10 @@ fn list(src: &Path) -> Result<Vec<LayerInfo>> {
     }
     let json: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| DataError::Format(format!("GDAL: unreadable ogrinfo output ({e}); GDAL 3.7 or later is needed")))?;
-    let layers = json.get("layers").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+    let layers = json.get("layers").and_then(|l| l.as_array());
     Ok(layers
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(|l| {
             let name = l.get("name")?.as_str()?.to_string();
             let geom = l.get("geometryFields").and_then(|g| g.as_array()).and_then(|g| g.first())?;
@@ -105,13 +106,12 @@ fn list(src: &Path) -> Result<Vec<LayerInfo>> {
             let has_srs = geom.get("coordinateSystem").is_some_and(|c| !c.is_null());
             Some(LayerInfo { name, family, count: l.get("featureCount").and_then(|c| c.as_i64()), has_srs, has_zm })
         })
-        .take(MAX_LAYERS)
         .collect())
 }
 
 /// The vector layers of a dataset.
 pub fn layers(src: &Path) -> Result<Vec<String>> {
-    Ok(list(src)?.into_iter().map(|l| l.name).collect())
+    Ok(list(src)?.into_iter().take(MAX_LAYERS).map(|l| l.name).collect())
 }
 
 /// Converts the dataset's layers (or just `layer`) to FlatGeobufs, reusing earlier conversions of
@@ -135,8 +135,10 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
     }
     let all = list(src)?;
     let chosen: Vec<LayerInfo> = match layer {
-        Some(l) => all.into_iter().filter(|x| x.name.eq_ignore_ascii_case(l)).collect(),
-        None => all.into_iter().filter(|x| x.count != Some(0)).collect(),
+        Some(l) => {
+            all.iter().find(|x| x.name == l).or_else(|| all.iter().find(|x| x.name.eq_ignore_ascii_case(l))).cloned().into_iter().collect()
+        }
+        None => all.into_iter().take(MAX_LAYERS).filter(|x| x.count != Some(0)).collect(),
     };
     if chosen.is_empty() {
         return Err(DataError::Format(match layer {
@@ -192,10 +194,14 @@ pub fn convert_one(src: &Path, layer: &str, family: Option<Family>, crs: Option<
     // listing tells. Its name is matched as `convert` matches it, ignoring case (the exact
     // spelling first), and converted under the listed spelling, so the two share a conversion.
     let all = list(src)?;
-    let info = all.iter().find(|l| l.name == layer).or_else(|| all.iter().find(|l| l.name.eq_ignore_ascii_case(layer)));
-    let has_srs = info.is_none_or(|l| l.has_srs);
-    let kind = info.and_then(|l| l.family);
-    let layer = info.map_or(layer, |l| l.name.as_str());
+    let info = all
+        .iter()
+        .find(|l| l.name == layer)
+        .or_else(|| all.iter().find(|l| l.name.eq_ignore_ascii_case(layer)))
+        .ok_or_else(|| DataError::Format(format!("no layer '{layer}'")))?;
+    let has_srs = info.has_srs;
+    let kind = info.family;
+    let layer = info.name.as_str();
     Ok(convert_one_in(&dir, src, layer, ConversionRequest { family, kind, crs, has_srs, fresh: false })?.map(|c| c.path))
 }
 
@@ -207,6 +213,8 @@ pub struct FreshConverted {
     /// A successful read confirmed that this declared layer contains no features.
     pub empty: bool,
     pub zm_dropped: bool,
+    /// Private conversion files, retained by the concrete reader after opening.
+    pub workspace: std::sync::Arc<tempfile::TempDir>,
 }
 
 #[derive(Debug)]
@@ -226,6 +234,8 @@ pub fn convert_one_fresh(src: &Path, layer: &str, family: Option<Family>, crs: O
 }
 
 fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<FreshConverted> {
+    std::fs::create_dir_all(dir)?;
+    let workspace = std::sync::Arc::new(tempfile::Builder::new().prefix("reload-").tempdir_in(dir)?);
     let all = list(src)?;
     let info = all
         .iter()
@@ -237,9 +247,13 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
     {
         return Err(DataError::Format(format!("layer '{layer}' declares {}, not {}", actual.label(), wanted.label())));
     }
-    let mut converted =
-        convert_one_in(dir, src, &info.name, ConversionRequest { family, kind: info.family, crs, has_srs: info.has_srs, fresh: true })?
-            .ok_or_else(|| DataError::Format(format!("layer '{layer}' has no compatible declared geometry")))?;
+    let mut converted = convert_one_in(
+        workspace.path(),
+        src,
+        &info.name,
+        ConversionRequest { family, kind: info.family, crs, has_srs: info.has_srs, fresh: true },
+    )?
+    .ok_or_else(|| DataError::Format(format!("layer '{layer}' has no compatible declared geometry")))?;
     if converted.unprojected {
         converted.notes.push(format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"));
     }
@@ -249,7 +263,13 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
             "GDAL: '{layer}' declares Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
         ));
     }
-    Ok(FreshConverted { path: converted.path, notes: converted.notes, empty: converted.empty, zm_dropped: info.has_zm && !converted.empty })
+    Ok(FreshConverted {
+        path: converted.path,
+        notes: converted.notes,
+        empty: converted.empty,
+        zm_dropped: info.has_zm && !converted.empty,
+        workspace,
+    })
 }
 
 struct ConversionRequest<'a> {
@@ -285,17 +305,11 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     let nlt = family.or(kind).map_or("PROMOTE_TO_MULTI", Family::ogr_type);
     // The type is part of the key: conversions made before surfaces were kept are made again.
     let key = format!("{}\n{layer}\n{:?}\n{:?}\n{nlt}\n{len}\n{modified}", full.display(), family.map(Family::label), crs);
-    // Manual replacements get a distinct final name too: old snapshots may still read the old
-    // file, even when the source's size and timestamp haven't changed.
+    // Fresh replacements have their own private directory, so retained readers never share a
+    // file with a later conversion, even when its source's signature hasn't changed.
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nonce = if fresh {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        format!("\n{now}\n{}\n{n}", std::process::id())
-    } else {
-        String::new()
-    };
-    let tag = format!("{:016x}", fnv1a(format!("{key}{nonce}").as_bytes()));
+    let tag = format!("{:016x}", fnv1a(key.as_bytes()));
     let out = dir.join(format!("{tag}.fgb"));
     let empty = dir.join(format!("{tag}.empty"));
     let keyfile = dir.join(format!("{tag}.key"));
@@ -381,11 +395,12 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     let _ = std::fs::remove_file(&empty);
     std::fs::write(&keyfile, if unprojected { format!("{key}{UNPROJECTED}") } else { key.clone() })?;
     let notes = if fresh {
-        String::from_utf8_lossy(&res.stderr)
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| format!("GDAL: {}", line.trim()))
-            .collect()
+        let mut counts = std::collections::BTreeMap::<String, u64>::new();
+        for line in String::from_utf8_lossy(&res.stderr).lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let count = counts.entry(line.to_string()).or_default();
+            *count = count.saturating_add(1);
+        }
+        counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect()
     } else {
         Vec::new()
     };
@@ -557,5 +572,41 @@ mod tests {
             assert_eq!(batch.features[0].geometry.as_ref().unwrap().extent().center().x, if lossy { 2.0 } else { 8.0 });
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_csv_diagnostics_count_repeated_overflows_without_claiming_feature_loss() {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("points.csv");
+        let cache = dir.path().join("cache");
+        std::fs::write(path.with_extension("csvt"), "\"WKT\",\"Integer\"\n").unwrap();
+        for (value, lossy) in [("2147483648", true), ("7", false)] {
+            std::fs::write(&path, format!("WKT,rank\n\"POINT(2 48)\",{value}\n\"POINT(3 48)\",{value}\n\"POINT(4 48)\",{value}\n"))
+                .unwrap();
+            let fresh = convert_one_fresh_in(&cache, &path, "points", Some(Family::Points), Some("EPSG:4326")).unwrap();
+            let overflow: Vec<_> = fresh.notes.iter().filter(|n| n.to_ascii_lowercase().contains("integer overflow")).collect();
+            if lossy {
+                assert_eq!(overflow.len(), 1, "{:?}", fresh.notes);
+                assert!(overflow[0].ends_with("(3 occurrence(s))"), "{overflow:?}");
+            } else {
+                assert!(fresh.notes.is_empty(), "{:?}", fresh.notes);
+            }
+            let source = crate::source::open_path(&fresh.path, None).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            assert_eq!(batch.features.len(), 3);
+            assert_eq!(batch.skipped, 0, "diagnostic occurrences are not skipped-feature counts");
+            assert!(batch.features.iter().all(|f| f.geometry.as_ref().unwrap().kind() == GeometryType::Point));
+            let rank = source.info().fields.iter().position(|f| f.name == "rank").unwrap();
+            assert!(batch.features.iter().all(|f| f.attrs[rank] == crate::Value::Int(if lossy { i64::from(i32::MAX) } else { 7 })));
+            drop(source);
+            let workspace = fresh.workspace.path().to_path_buf();
+            drop(fresh);
+            assert!(!workspace.exists(), "unretained conversions must be removed");
+        }
+        assert!(convert_one_fresh_in(&cache, &path, "absent", None, Some("EPSG:4326")).is_err());
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0, "failed conversions must not retain workspaces");
     }
 }

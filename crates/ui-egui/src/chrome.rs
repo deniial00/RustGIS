@@ -975,9 +975,6 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             }
         }
         for c in &app.session.registry.commands {
-            if c.id == "layer.reloadData" && why_disabled(app, c.id).is_some() {
-                continue;
-            }
             if command_available(c.id, cfg!(target_arch = "wasm32")) && command_matches(c, &ql) {
                 hits.push((c.id.to_string(), tl!(c.label).to_string(), crate::i18n::location(c.location)));
             }

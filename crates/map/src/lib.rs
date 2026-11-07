@@ -371,11 +371,12 @@ impl Layer {
 
     /// Installs a fresh source, retaining styling but clearing feature-specific state whose ids
     /// may identify different features. Returns the number of saved label moves reset for a notice.
-    pub fn replace_source(&mut self, src: source::SourceLayer) -> usize {
+    pub fn replace_source(&mut self, mut src: source::SourceLayer) -> usize {
         self.selection.clear();
         let moved = self.labels.in_order().map(|class| class.moved.len()).sum();
         self.labels.default.moved.clear();
         self.labels.classes.iter_mut().for_each(|class| class.moved.clear());
+        src.reads = self.source.as_ref().map_or(0, |old| old.reads);
         if let Some(info) = src.info() {
             self.dataset.geometry_type = info.geometry_type;
             self.dataset.fields = info.fields.clone();
@@ -610,6 +611,7 @@ impl Layer {
         let Some(copy) = self.open_source()? else { return Ok((self.dataset.clone(), 0)) };
         let (mut ds, report) = copy.read_all()?;
         ds.name = self.dataset.name.clone();
+        ds.zm_dropped |= self.dataset.zm_dropped;
         // (A project that lists no fields keeps the source's, as `sync_source` gives it.)
         if !self.dataset.fields.is_empty() {
             ds.fields = self.dataset.fields.clone();

@@ -844,7 +844,7 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
     ["script.", "notebook.", "model.", "project.", "task.", "share.", "offline.", "cache.", "locator."].iter().any(|p| id.starts_with(p))
         || ["import", "export", "open", "save", "add", "package", "upload", "download"].iter().any(|w| verb.starts_with(w))
         // Its inputs may be bare file names, which don't look like paths.
-        || id == "raster.mosaic"
+        || matches!(id.as_str(), "raster.mosaic" | "layer.reloaddata")
         || (id == "gp.run" && params.get("tool").and_then(Value::as_str).and_then(super::gp::tool_id)
             .and_then(rustgis_analysis::tool).is_some_and(super::gp::writes_files))
         || reaches(params)

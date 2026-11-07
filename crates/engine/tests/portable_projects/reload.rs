@@ -20,7 +20,7 @@ fn points(fields: &[&str], x: Option<f64>) -> Dataset {
 
 // Atomically publish a complete replacement rather than exposing a partially written source.
 fn replace_points(path: &Path, ds: &Dataset) {
-    let next = path.with_file_name("replacement.fgb");
+    let next = path.with_file_name("replacement").with_extension(path.extension().unwrap());
     io::write_path(ds, &next).unwrap();
     std::fs::rename(next, path).unwrap();
 }
@@ -143,7 +143,16 @@ fn compatible_empty_fgb_is_a_successful_reload() {
 
 #[test]
 fn required_style_label_symbol_and_filter_fields_are_checked_before_reload_and_retry_works() {
-    for binding in ["renderer", "label", "label expression", "symbol expression", "filter expression"] {
+    for binding in [
+        "renderer",
+        "label",
+        "label expression",
+        "disabled label",
+        "disabled label expression",
+        "hidden class",
+        "symbol expression",
+        "filter expression",
+    ] {
         let f = Fixture::new("reload-fields");
         let path = f.file("points.fgb");
         io::write_path(&points(&["required"], Some(2.0)), &path).unwrap();
@@ -164,6 +173,20 @@ fn required_style_label_symbol_and_filter_fields_are_checked_before_reload_and_r
                     l.labels.enabled = true;
                     l.labels.default.by.text = Some("required + 1".into());
                 }
+                "disabled label" => {
+                    l.labels.enabled = false;
+                    l.labels.default.field = "required".into();
+                }
+                "disabled label expression" => {
+                    l.labels.enabled = false;
+                    l.labels.default.by.text = Some("required + 1".into());
+                }
+                "hidden class" => {
+                    let mut class = rustgis_engine::map::LabelClass::default_for(&l.dataset);
+                    class.visible = false;
+                    class.field = "required".into();
+                    l.labels.classes.push(class);
+                }
                 "symbol expression" => l.symbol_by.size = Some("required * 2".into()),
                 "filter expression" => l.definition_query = Some("required > 0".into()),
                 _ => unreachable!(),
@@ -178,6 +201,116 @@ fn required_style_label_symbol_and_filter_fields_are_checked_before_reload_and_r
         replace_points(&path, &points(&["required"], Some(8.0)));
         s.run("layer.reloadData", &json!({"layer": id})).unwrap();
         assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0));
+    }
+}
+
+#[test]
+fn numeric_reload_bindings_reject_text_but_accept_numeric_interchange_and_empty_data() {
+    let polygons = |x| {
+        let mut ds = points(&["rank"], Some(x));
+        ds.geometry_type = GeometryType::Polygon;
+        ds.features[0].geometry = Some(Geometry::Polygon(vec![vec![vec![
+            Coord::new(x, 48.0),
+            Coord::new(x + 0.1, 48.0),
+            Coord::new(x + 0.1, 48.1),
+            Coord::new(x, 48.0),
+        ]]]));
+        ds
+    };
+    for binding in ["graduated", "proportional", "rotation", "extrusion", "diagram", "categorical"] {
+        let data = |x| if binding == "extrusion" { polygons(x) } else { points(&["rank"], Some(x)) };
+        let f = Fixture::new("reload-numeric");
+        let path = f.file("points.gpkg");
+        io::write_path(&data(2.0), &path).unwrap();
+        let mut s = session();
+        let id = add_stream(&mut s, &path, None);
+        s.map_mut().layer_mut(id).unwrap().sync_source(&rustgis_engine::geom::Extent::new(-180.0, -80.0, 180.0, 80.0), true);
+        s.map_mut().layer_mut(id).unwrap().labels.default.field.clear();
+        match binding {
+            "graduated" | "proportional" | "categorical" => {
+                let kind = if binding == "categorical" { "unique" } else { binding };
+                s.run("layer.symbology", &json!({"layer": id, "type": kind, "field": "rank"})).unwrap();
+            }
+            "rotation" => {
+                s.map_mut().layer_mut(id).unwrap().marker_rotation = Some(serde_json::from_value(json!({"field": "rank"})).unwrap());
+            }
+            "extrusion" => {
+                s.map_mut().layer_mut(id).unwrap().extrusion = Some(serde_json::from_value(json!({"field": "rank"})).unwrap());
+            }
+            "diagram" => {
+                s.run("layer.diagram", &json!({"layer": id, "kind": "pie", "fields": ["rank"], "size": 12})).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let mut text = data(8.0);
+        text.fields[0].ty = FieldType::Text;
+        text.features[0].attrs[0] = Value::Text("category".into());
+        replace_points(&path, &text);
+        if binding == "categorical" {
+            s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+            assert_eq!(loaded(&s, id).value(0, 0), &Value::Text("category".into()));
+        } else {
+            reject_reload(&mut s, id, "numeric");
+        }
+        let mut doubles = data(9.0);
+        doubles.fields[0].ty = FieldType::Double;
+        doubles.features[0].attrs[0] = Value::Float(7.5);
+        replace_points(&path, &doubles);
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        assert_eq!(loaded(&s, id).value(0, 0).as_f64(), Some(7.5));
+        replace_points(&path, &Dataset::new("Points", doubles.geometry_type, doubles.fields));
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        assert!(loaded(&s, id).features.is_empty(), "{binding}");
+    }
+}
+
+#[test]
+fn already_broken_saved_label_configuration_does_not_prevent_reload() {
+    let f = Fixture::new("reload-broken-label");
+    let path = f.file("points.fgb");
+    io::write_path(&points(&["rank"], Some(2.0)), &path).unwrap();
+    let mut s = session();
+    let id = add_stream(&mut s, &path, None);
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.labels.enabled = false;
+    l.labels.default.field = "already_missing".into();
+    l.labels.default.by.text = Some("also_missing + 1".into());
+    replace_points(&path, &points(&["rank"], Some(8.0)));
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0));
+}
+
+#[test]
+fn reload_discloses_whole_map_label_lock_and_anchor_resets_without_target_moves() {
+    for (locks, anchors) in [(true, false), (false, true), (true, true), (false, false)] {
+        let f = Fixture::new("reload-map-lock");
+        let path = f.file("points.fgb");
+        io::write_path(&points(&[], Some(2.0)), &path).unwrap();
+        let mut s = session();
+        let id = add_stream(&mut s, &path, None);
+        let other = s.map_mut().add_dataset(points(&[], Some(9.0)));
+        let key = (other, 1, 0, 0);
+        if locks {
+            s.map_mut().label_lock = Some(vec![(key, rustgis_engine::map::LockedPlace { place: 0, callout: None })]);
+        }
+        if anchors {
+            s.map_mut().label_lock_line_anchors.insert(key, Coord::new(9.0, 48.0));
+        }
+        let map = s.map().name.clone();
+        let layer = s.map().layer(id).unwrap().name.clone();
+        let mark = s.notice_mark();
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        assert!(s.map().label_lock.is_none() && s.map().label_lock_line_anchors.is_empty());
+        let notes: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("across the map")).collect();
+        assert_eq!(notes.len(), usize::from(locks || anchors));
+        if let Some(note) = notes.first() {
+            assert!(note.text.contains(&map) && note.text.contains(&layer), "{}", note.text);
+            assert!(note.text.contains(&format!("{} locked label", usize::from(locks))));
+            assert!(note.text.contains(&format!("{} line anchor", usize::from(anchors))));
+        }
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.map().label_lock.as_ref().map_or(0, Vec::len), usize::from(locks));
+        assert_eq!(s.map().label_lock_line_anchors.len(), usize::from(anchors));
     }
 }
 
@@ -373,33 +506,107 @@ fn reload_reconverts_original_gdal_folder_and_accepts_its_declared_empty_table()
     let f = Fixture::new("reload-gdal-folder");
     let folder = f.file("survey.gdb");
     let input = f.file("survey.geojson");
-    let publish = |x: Option<f64>| {
-        io::write_path(&points(&["rank"], x), &input).unwrap();
-        let output = std::process::Command::new(gdal::program("ogr2ogr").unwrap())
-            .args(["-f", "OpenFileGDB", "-overwrite", "-nln", "survey", "-nlt", "POINT"])
-            .arg(&folder)
-            .arg(&input)
-            .output()
-            .unwrap();
+    let publish = |name: &str, x: Option<f64>, z: bool| {
+        let value = x.unwrap_or(0.0);
+        let coordinates = if z { format!("[{value},48,100]") } else { format!("[{value},48]") };
+        let features =
+            format!(r#"{{"type":"Feature","properties":{{"rank":7}},"geometry":{{"type":"Point","coordinates":{coordinates}}}}}"#);
+        std::fs::write(&input, format!(r#"{{"type":"FeatureCollection","name":"survey","features":[{features}]}}"#)).unwrap();
+        let mut command = std::process::Command::new(gdal::program("ogr2ogr").unwrap());
+        command.args(["-f", "OpenFileGDB", "-overwrite", "-nln", name, "-nlt", if z { "POINTZ" } else { "POINT" }]);
+        if x.is_none() {
+            command.args(["-where", "1=0"]);
+        }
+        if folder.exists() {
+            command.arg("-update");
+        }
+        let output = command.arg(&folder).arg(&input).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     };
-    publish(Some(2.0));
-    let original = gdal::convert_one(&folder, "survey", None, None).unwrap().unwrap();
+    for i in 0..64 {
+        publish(&format!("sibling_{i:02}"), Some(1.0), false);
+    }
+    publish("survey", Some(2.0), false);
+    let listed = gdal::layers(&folder).unwrap();
+    assert_eq!(listed.len(), 64, "the chooser's listing cap is unchanged");
+    assert!(!listed.iter().any(|name| name == "survey"), "the selected target must lie beyond the listing cap");
+    let original = gdal::convert_one(&folder, "SuRvEy", None, None).unwrap().unwrap();
+    assert!(gdal::convert_one(&folder, "truly_absent", None, None).is_err());
     let handle = rustgis_engine::data::source::open_path(&original, None).unwrap();
     let mut source = SourceLayer::from_path(original.to_str().unwrap(), None, handle);
-    source.gdal = Some(GdalOrigin { path: folder.to_str().unwrap().into(), layer: "survey".into(), family: None, crs: None });
+    source.gdal = Some(GdalOrigin { path: folder.to_str().unwrap().into(), layer: "SuRvEy".into(), family: None, crs: None });
     let mut s = session();
     let id = s.map_mut().add_streamed("Folder survey", source);
-    publish(Some(8.0));
+    publish("survey", Some(8.0), false);
     s.run("layer.reloadData", &json!({"layer": id})).unwrap();
     assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0));
     assert_ne!(s.map().layer(id).unwrap().source.as_ref().unwrap().path.as_deref(), original.to_str());
     assert_eq!(s.map().layer(id).unwrap().linked_file(), folder.to_str());
     assert_eq!(s.map().layers.len(), 1);
-    publish(None);
+    let source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    let retained = source.clone();
+    let escaped = source.visit_source().unwrap();
+    let fresh_path = std::path::PathBuf::from(source.path.as_ref().unwrap());
+    let fresh_workspace = fresh_path.parent().unwrap().to_path_buf();
+    let candidate = source.relinked(folder.to_str().unwrap(), None).unwrap();
+    let candidate_path = std::path::PathBuf::from(candidate.path.as_ref().unwrap());
+    let candidate_workspace = candidate_path.parent().unwrap().to_path_buf();
+    assert!(candidate_path.exists());
+    drop(candidate);
+    assert!(!candidate_workspace.exists(), "an uninstalled candidate has no owner");
+    assert!(source.relinked(folder.to_str().unwrap(), Some("truly_absent")).is_err());
+    publish("survey", None, false);
     s.run("layer.reloadData", &json!({"layer": id})).unwrap();
     assert!(loaded(&s, id).features.is_empty());
     assert_eq!(s.map().layer(id).unwrap().dataset.geometry_type, GeometryType::Point);
+    let empty_source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    assert_eq!(empty_source.info().unwrap().count, Some(0));
+    let empty_path = std::path::PathBuf::from(empty_source.path.as_ref().unwrap());
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0), "undo must retain its actual converted reader");
+    s.run("edit.redo", &json!({})).unwrap();
+    assert!(loaded(&s, id).features.is_empty());
+    assert!(fresh_path.exists() && empty_path.exists());
+
+    for (x, z) in [(12.0, true), (14.0, false)] {
+        publish("survey", Some(x), z);
+        let mark = s.notice_mark();
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        assert_eq!(s.notices_since(mark).iter().any(|n| n.text.contains("Z or M coordinates")), z);
+        s.run("layer.loadAll", &json!({"layer": id})).unwrap();
+        assert!(s.map().layer(id).unwrap().source.is_none());
+        assert_eq!(s.map().layer(id).unwrap().dataset.zm_dropped, z);
+        let output = f.file(if z { "xyz-export.geojson" } else { "xy-export.geojson" });
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": id, "path": output})).unwrap();
+        assert_eq!(
+            s.notices_since(mark).iter().filter(|n| n.text.contains("its geometry has no Z or M values")).count(),
+            usize::from(z),
+            "{:?}",
+            s.notices_since(mark)
+        );
+        assert_eq!(first_point(&io::read_path(&output).unwrap().0), Coord::new(x, 48.0));
+        s.run("edit.undo", &json!({})).unwrap();
+        assert!(s.map().layer(id).unwrap().source.is_some());
+    }
+    drop(s);
+    assert!(!empty_path.exists(), "the final active/undo owner releases its private conversion");
+    assert!(fresh_path.exists(), "a cloned SourceLayer and escaping export reader pin their file");
+    drop(retained);
+    assert!(fresh_path.exists(), "the escaping concrete reader owns its conversion independently of SourceLayer");
+    let mut exported = Vec::new();
+    let report = escaped
+        .visit_chunks(None, 4096, &mut |features| {
+            exported.extend(features);
+            Ok(())
+        })
+        .unwrap();
+    assert!(report.complete);
+    assert_eq!(exported.len(), 1);
+    assert_eq!(exported[0].geometry.as_ref().unwrap().extent().center(), Coord::new(8.0, 48.0));
+    drop(escaped);
+    assert!(!fresh_workspace.exists(), "the last concrete reader releases all private artifacts");
+    assert!(original.exists(), "ordinary reusable conversions keep their cache policy");
 }
 
 #[test]
@@ -430,9 +637,49 @@ fn reload_reconverts_duckdb_table_and_keeps_only_its_original_geometry_branch() 
     assert_eq!(first_point(&fresh), Coord::new(8.0, 48.0));
     assert_eq!(fresh.features.len(), 1);
     assert_eq!(s.map().layers.len(), 1);
+    let source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    let retained = source.clone();
+    let escaped = source.visit_source().unwrap();
+    let fresh_path = std::path::PathBuf::from(source.path.as_ref().unwrap());
+    let fresh_workspace = fresh_path.parent().unwrap().to_path_buf();
+    assert_eq!(s.map().layer(id).unwrap().linked_file(), path.to_str());
+    let candidate = source.relinked(path.to_str().unwrap(), None).unwrap();
+    let candidate_path = std::path::PathBuf::from(candidate.path.as_ref().unwrap());
+    let candidate_workspace = candidate_path.parent().unwrap().to_path_buf();
+    drop(candidate);
+    assert!(!candidate_workspace.exists(), "an uninstalled candidate must release every Parquet and sidecar");
+    let output = f.file("fresh-export.geojson");
+    s.run("share.exportLayer", &json!({"layer": id, "path": output})).unwrap();
+    assert_eq!(first_point(&io::read_path(&output).unwrap().0), Coord::new(8.0, 48.0));
     sql("DELETE FROM survey");
     s.run("layer.reloadData", &json!({"layer": id})).unwrap();
     assert!(loaded(&s, id).features.is_empty());
+    let empty_source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    assert_eq!(empty_source.info().unwrap().count, Some(0));
+    assert_eq!(empty_source.info().unwrap().geometry_type, GeometryType::Point);
+    let empty_path = std::path::PathBuf::from(empty_source.path.as_ref().unwrap());
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0));
+    s.run("edit.redo", &json!({})).unwrap();
+    assert!(loaded(&s, id).features.is_empty());
+    assert!(fresh_path.exists() && empty_path.exists());
     sql("DROP TABLE survey");
     reject_reload(&mut s, id, "survey");
+    drop(s);
+    assert!(!empty_path.exists());
+    assert!(fresh_path.exists());
+    drop(retained);
+    assert!(fresh_path.exists(), "the escaping concrete reader must survive the layer and undo stack");
+    let mut exported = Vec::new();
+    let report = escaped
+        .visit_chunks(None, 4096, &mut |features| {
+            exported.extend(features);
+            Ok(())
+        })
+        .unwrap();
+    assert!(report.complete);
+    assert_eq!(exported.len(), 1);
+    assert_eq!(exported[0].geometry.as_ref().unwrap().extent().center(), Coord::new(8.0, 48.0));
+    drop(escaped);
+    assert!(!fresh_workspace.exists(), "close Parquet readers before removing their workspace on Windows too");
 }
