@@ -100,6 +100,12 @@ pub fn available() -> bool {
     program("ogr2ogr").is_some() && program("ogrinfo").is_some()
 }
 
+/// Whether GDAL is installed and new enough (3.8 or later) to list and convert: an older one is
+/// refused by every conversion.
+pub fn usable() -> bool {
+    available() && program("ogrinfo").is_some_and(|p| check_version(&p).is_ok())
+}
+
 fn missing() -> DataError {
     DataError::Unsupported(
         "this format needs GDAL: install it (ogr2ogr and ogrinfo on the PATH, or RUSTGIS_GDAL_BIN naming their folder) and add the file again"
@@ -541,12 +547,6 @@ mod tests {
         assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
     }
 
-    /// Whether GDAL is installed and new enough to convert (3.8 or later), for the tests that
-    /// convert; with an older one they're refused, which the renamed-VRT test checks.
-    fn usable() -> bool {
-        available() && program("ogrinfo").is_some_and(|p| check_version(&p).is_ok())
-    }
-
     /// A VRT renamed `.tab` isn't opened as a VRT, so the file it names isn't read.
     #[test]
     fn a_renamed_vrt_isnt_read_when_gdal_is_installed() {
@@ -671,7 +671,7 @@ mod tests {
     }
     #[test]
     fn fresh_conversion_reports_dropped_dimensions_but_not_for_clean_xy_data() {
-        if !available() {
+        if !usable() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-fresh-dimensions-{}", std::process::id()));
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn fresh_csv_diagnostics_count_repeated_overflows_without_claiming_feature_loss() {
-        if !available() {
+        if !usable() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();

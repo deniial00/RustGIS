@@ -560,7 +560,7 @@ fn reload_reconverts_original_gdal_folder_and_accepts_its_declared_empty_table()
         data::source::gdal,
         map::source::{GdalOrigin, SourceLayer},
     };
-    if !gdal::available() {
+    if !gdal::usable() {
         return;
     }
     let f = Fixture::new("reload-gdal-folder");
@@ -824,7 +824,7 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
         data::source::{Family, gdal},
         map::source::{GdalOrigin, SourceLayer},
     };
-    if !gdal::available() {
+    if !gdal::usable() {
         return;
     }
     let f = Fixture::new("restore-gdal-signature");
