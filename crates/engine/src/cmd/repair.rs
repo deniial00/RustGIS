@@ -270,6 +270,10 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
             }
             let name = l.name.clone();
             super::raster::read_notices(s, &name, &mut new);
+            // A reloaded Zarr store: reads begun before it are not joined by its new requests.
+            if let Some(zt) = &new.time_zarr {
+                s.zarr_reads.forget_shared(Some(&zt.store));
+            }
             let l = s.map_mut().layer_mut(id).ok_or("the layer no longer exists")?;
             l.raster = Some(*new);
             l.selection.clear();

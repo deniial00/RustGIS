@@ -638,7 +638,15 @@ impl Layer {
         let Some(copy) = self.open_source()? else { return Ok(None) };
         let Some(src) = copy.visit_source() else { return Ok(None) };
         let info = src.info();
-        let mut ds = Dataset::new(self.dataset.name.clone(), info.geometry_type, info.fields.clone());
+        // (A reload that read no rows leaves the reader without a type: the layer's declared one
+        // stands, as in `load_all_counted`.)
+        let geometry_type =
+            if info.geometry_type == rustgis_data::GeometryType::None && self.dataset.geometry_type != rustgis_data::GeometryType::None {
+                self.dataset.geometry_type
+            } else {
+                info.geometry_type
+            };
+        let mut ds = Dataset::new(self.dataset.name.clone(), geometry_type, info.fields.clone());
         ds.crs = info.coordinate_system();
         // What reading the source drops, the export lacks (see `Dataset::zm_dropped`).
         ds.zm_dropped = info.zm_dropped || self.dataset.zm_dropped;

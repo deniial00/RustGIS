@@ -33417,6 +33417,65 @@ fn reopening_zarr_twice_does_not_reuse_cached_or_late_reads_from_the_previous_op
     assert!(!s.notices_since(mark).iter().any(|notice| notice.error));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A reload installs a new opening of the store: a layer asking for a step another read of the
+/// old opening still holds must read the rewritten chunks, not join that read.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_step_requested_after_reload_does_not_join_a_pending_read_of_the_old_store() {
+    use crate::render::rustgis_tiles::cache;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    let _cache = zarr_cache_lock();
+    let (dir, path) = zarr_store_over_time("reload-shared-read");
+    let mut s = Session::new(Project::default());
+    s.zarr_off_frame = true;
+    let id = s.run("layer.addZarr", &json!({"path": path, "variable": "t", "time": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let first = |s: &Session| s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().value(0, 0, 0);
+    assert_eq!(first(&s), Some(8.0));
+    let caller = std::thread::current().id();
+    let checks = AtomicUsize::new(0);
+    let (started, entered) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(1);
+    let released = Mutex::new(released);
+    let still: cache::Still = Arc::new(move || {
+        // The second check is after the old pixels were read, before they are published.
+        if std::thread::current().id() != caller && checks.fetch_add(1, Ordering::SeqCst) == 1 {
+            let _ = started.send(());
+            return released.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).is_ok();
+        }
+        true
+    });
+    cache::with_still(still.clone(), || s.run("time.goTo", &json!({"step": 1}))).unwrap();
+    entered.recv_timeout(std::time::Duration::from_secs(10)).expect("the old read holds its pixels before completion");
+    assert!(s.zarr_waiting());
+    // The slider returns to the step shown, so only the held worker still owns the old read.
+    s.run("time.goTo", &json!({"step": 0})).unwrap();
+    assert!(!s.zarr_waiting());
+    for step in 0..3 {
+        std::fs::write(
+            std::path::Path::new(&path).join(format!("t/{step}.0.0")),
+            std::iter::repeat_n(500.0f32 + step as f32, 12).flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+    }
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    assert_eq!(first(&s), Some(500.0));
+    // The same step, store, selection and lifetime as the held read: only the reload separates them.
+    cache::with_still(still, || s.run("time.goTo", &json!({"step": 1}))).unwrap();
+    release.send(()).unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while s.zarr_waiting() {
+        assert!(std::time::Instant::now() < end, "the step never landed");
+        s.follow_time_landed();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(first(&s), Some(501.0), "the layer shows the rewritten chunks, not the pre-reload step");
+    std::fs::remove_dir_all(dir).unwrap();
+}
 #[test]
 fn topology_validate_says_when_a_polar_check_is_incomplete() {
     // A line winding round the North Pole about 19,000 times: its dangle check measures it coarsely,

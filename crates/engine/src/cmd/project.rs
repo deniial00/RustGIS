@@ -179,6 +179,9 @@ fn reset(s: &mut Session, p: Project) {
     // Kept until the command ends: a failure gives the project back with its history.
     s.put_aside();
     s.project = p;
+    // Reads begun for the previous project aren't joined by the new one's layers.
+    #[cfg(not(target_arch = "wasm32"))]
+    s.zarr_reads.forget_shared(None);
     for text in std::mem::take(&mut s.project.label_read_notices) {
         s.notify(text, false);
     }

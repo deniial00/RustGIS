@@ -670,7 +670,7 @@ const FAILED_KEPT: usize = 16;
 #[derive(Default)]
 pub(crate) struct ReadWaits {
     layers: HashMap<(u64, u64), std::sync::Arc<PendingRead>>,
-    shared: HashMap<(String, String, Option<String>, u64), std::sync::Weak<PendingRead>>,
+    shared: HashMap<(String, String, Option<String>), std::sync::Weak<PendingRead>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -687,7 +687,7 @@ impl ReadWaits {
         {
             return read.clone();
         }
-        let selection = (zt.store.clone(), zt.selection(i), zt.crs.clone(), zt.read_generation);
+        let selection = (zt.store.clone(), zt.selection(i), zt.crs.clone());
         let still = crate::render::rustgis_tiles::cache::current_still();
         let read = self
             .shared
@@ -708,6 +708,15 @@ impl ReadWaits {
     fn retain(&mut self, waiting: &std::collections::HashSet<(u64, u64)>) {
         self.layers.retain(|owner, _| waiting.contains(owner));
         self.shared.retain(|_, read| read.strong_count() > 0);
+    }
+
+    /// Stops new requests joining reads begun before a reload (`Some(store)`) or a project
+    /// replacement (`None`): those read what the store held then. Their own layers still poll them.
+    pub(crate) fn forget_shared(&mut self, store: Option<&str>) {
+        match store {
+            Some(store) => self.shared.retain(|(s, ..), _| s != store),
+            None => self.shared.clear(),
+        }
     }
 }
 

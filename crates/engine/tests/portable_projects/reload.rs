@@ -1344,3 +1344,25 @@ fn load_all_after_empty_duckdb_reload_exports_a_point_geopackage() {
     assert!(exported.features.is_empty());
     assert_eq!(exported.geometry_type, GeometryType::Point, "Load All must not turn the GeoPackage into an attributes-only table");
 }
+
+#[test]
+fn direct_export_after_empty_duckdb_reload_is_a_point_geopackage() {
+    use rustgis_engine::data::source::duckdb;
+    if !duckdb::available() {
+        return;
+    }
+    let f = Fixture::new("reload-duckdb-empty-direct-export");
+    let path = f.file("survey.duckdb");
+    reload_duckdb_sql(&path, "CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(2,48) AS geom");
+    let mut s = session();
+    s.run("layer.addDatabase", &json!({"database": path, "table": "survey", "stream": true})).unwrap();
+    let id = s.active_layer.unwrap();
+    reload_duckdb_sql(&path, "DELETE FROM survey");
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    assert!(s.map().layer(id).unwrap().source.is_some(), "the layer is still streamed");
+    let output = f.file("empty.gpkg");
+    s.run("share.exportLayer", &json!({"layer": id, "path": output})).unwrap();
+    let exported = io::read_path(&output).unwrap().0;
+    assert!(exported.features.is_empty());
+    assert_eq!(exported.geometry_type, GeometryType::Point, "a direct export must keep the layer's declared geometry type");
+}
