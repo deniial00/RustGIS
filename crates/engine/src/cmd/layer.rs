@@ -2920,6 +2920,7 @@ pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
     s.project.normalize();
     super::connections::restore_active(s);
     s.wait_in_place_reads();
+    super::project::say_conversion_fallbacks(s);
     // Only the database the added layer reads can change here.
     let keys: Vec<_> = s.map().layer(id).and_then(|l| l.source.as_ref()).map(super::connections::layer_keys).unwrap_or_default();
     super::connections::resolve_keys(s, &keys);

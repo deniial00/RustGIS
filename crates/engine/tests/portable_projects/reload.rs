@@ -1079,6 +1079,40 @@ fn duckdb_repair_refuses_other_family_only_tables_while_reload_installs_an_empty
     }
 }
 
+/// A layer file or imported map whose GDAL link can't re-read its original says the saved
+/// conversion stands in, as opening a project does.
+#[test]
+fn layer_files_and_imported_maps_say_when_a_saved_conversion_stands_in() {
+    use rustgis_engine::{
+        data::source::Family,
+        map::source::{GdalOrigin, SourceLayer},
+    };
+    let f = Fixture::new("restore-item-conversions");
+    let original = f.file("removed.gdb");
+    let converted = f.file("converted.fgb");
+    io::write_path(&points(&["rank"], Some(8.0)), &converted).unwrap();
+    let handle = rustgis_engine::data::source::open_path(&converted, None).unwrap();
+    let mut source = SourceLayer::from_path(converted.to_str().unwrap(), None, handle);
+    source.gdal =
+        Some(GdalOrigin { path: original.to_str().unwrap().into(), layer: "survey".into(), family: Some(Family::Points), crs: None });
+    let mut s = session();
+    s.map_mut().add_streamed("Saved conversion", source);
+    let layer_file = f.file("survey.rgislyr");
+    s.run("layer.save", &json!({"layer": "Saved conversion", "path": layer_file})).unwrap();
+    let map_file = f.file("survey.rgismap");
+    s.run("map.save", &json!({"path": map_file})).unwrap();
+    drop(s);
+    for (command, path) in [("layer.addLayerFile", &layer_file), ("map.import", &map_file)] {
+        let mut s = session();
+        let mark = s.notice_mark();
+        s.run(command, &json!({"path": path})).unwrap();
+        let notices = s.notices_since(mark);
+        let fallbacks = notices.iter().filter(|n| n.text.contains("showing the saved conversion")).collect::<Vec<_>>();
+        assert_eq!(fallbacks.len(), 1, "{command}: {notices:?}");
+        assert!(fallbacks[0].text.contains(original.to_str().unwrap()), "{}", fallbacks[0].text);
+    }
+}
+
 #[test]
 fn project_open_does_not_repeat_ordinary_source_conversion_notes() {
     use rustgis_engine::map::source::SourceLayer;
