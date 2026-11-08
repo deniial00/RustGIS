@@ -422,7 +422,7 @@ fn embedded_map(m: &Map, budget: &mut u64) -> Map {
 /// Adds maps from a map file, project or package.
 fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     let text = read_text(p)?;
-    crate::project::check_format(&text, "map file or project")?;
+    crate::project::check_format(&text, "map file, project or package")?;
     let dir = ps(p, "path").and_then(|path| std::path::absolute(path).ok()).and_then(|p| p.parent().map(Path::to_path_buf));
     super::connections::clear_active();
     let maps: Vec<Map> = match serde_json::from_str::<Map>(&text) {
@@ -437,21 +437,21 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
             // An older map file's plain COG tile layers open as raster layers read in place, as a
             // project's do (a project imported had them opened as it was read).
             super::tiles::cog_tiles_to_rasters(&mut m);
-            for notice in crate::project::label_losses::map_notices(&text, &m) {
+            for notice in crate::project::label_losses::map_notices(&text, &m, true) {
                 s.notify(notice, false);
             }
             vec![m]
         }
         Err(_) => match Project::from_import_json(&text, dir.as_deref()) {
             Ok(mut project) => {
-                for notice in std::mem::take(&mut project.label_read_notices) {
+                for notice in project.take_read_notices(&[crate::project::ReadPart::Labels, crate::project::ReadPart::Diagrams]) {
                     s.notify(notice, false);
                 }
                 project.maps
             }
             Err(error) => {
                 super::connections::restore_active(s);
-                return Err(error);
+                return Err(not_a(error, "map file, project or package"));
             }
         },
     };
@@ -472,7 +472,9 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     }
     // Repair what was read (rasters reopen, cameras clamp); the sources that read S3 wait for
     // the saved connection that is to read them.
-    s.project.normalize();
+    for notice in s.project.normalize() {
+        s.notify(notice, false);
+    }
     super::connections::restore_active(s);
     super::connections::resolve_project(s);
     crate::s3_connections::resolve_project_s3(s);
@@ -485,6 +487,16 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
         s.active_layer = s.map().layers.first().map(|l| l.id);
     }
     Ok(json!({"maps": names}))
+}
+
+/// A project read's refusal for an import that also takes `kinds`: text that is none of them is
+/// said to be none of them, not only a failed project. Other refusals (such as "Update RustGIS")
+/// are kept as they are.
+fn not_a(error: String, kinds: &str) -> String {
+    match error.strip_prefix("not a RustGIS project: ") {
+        Some(why) => format!("not a RustGIS {kinds}: {why}"),
+        None => error,
+    }
 }
 
 fn add_style(s: &mut Session, mut item: StyleItem) {
@@ -501,12 +513,12 @@ fn import_styles(s: &mut Session, p: &Value) -> CmdResult {
     let text = read_text(p)?;
     crate::project::check_format(&text, "layer file, map file or project")?;
     let layers: Vec<Layer> = if let Ok(l) = serde_json::from_str::<Layer>(&text) {
-        for notice in crate::project::label_losses::layer_notices(&text, &l) {
+        for notice in crate::project::label_losses::layer_notices(&text, &l, false) {
             s.notify(notice, false);
         }
         vec![l]
     } else if let Ok(m) = serde_json::from_str::<Map>(&text) {
-        for notice in crate::project::label_losses::map_notices(&text, &m) {
+        for notice in crate::project::label_losses::map_notices(&text, &m, false) {
             s.notify(notice, false);
         }
         m.layers
@@ -515,8 +527,9 @@ fn import_styles(s: &mut Session, p: &Value) -> CmdResult {
         super::connections::clear_active();
         let project = Project::from_import_json(&text, None);
         super::connections::restore_active(s);
-        let mut project = project?;
-        for notice in std::mem::take(&mut project.label_read_notices) {
+        let mut project = project.map_err(|e| not_a(e, "layer file, map file or project"))?;
+        // Styles take the layers' renderers and labels, not their diagrams or the layouts.
+        for notice in project.take_read_notices(&[crate::project::ReadPart::Labels]) {
             s.notify(notice, false);
         }
         project.maps.into_iter().flat_map(|m| m.layers).collect()
