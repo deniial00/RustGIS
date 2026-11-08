@@ -69,10 +69,10 @@ impl Failure {
     pub fn new(url: &str, message: impl Into<String>) -> Self {
         let message = message.into();
         let reason = crate::cache::http_status(&message).filter(|s| *s >= 400).map_or(Reason::Other, Reason::Status);
-        // A known leading address is sanitized whole first, so its unescaped secret value cannot
-        // be mistaken for the reason or force the conservative cut that drops the reason.
-        let message = if !url.is_empty() && message.starts_with(url) {
-            rustgis_data::diagnostics::message_with_address(url, &message)
+        // Known address occurrences, wherever they are, are sanitized whole first, so an
+        // unescaped secret value can't be mistaken for the reason or force the cut that drops it.
+        let message = if !url.is_empty() && message.contains(url) {
+            rustgis_data::diagnostics::with_address_sanitized(url, &message)
         } else {
             message
         };

@@ -637,19 +637,35 @@ pub fn address_in_message(address: &str) -> String {
 /// the reason after a secret query. Exact address occurrences (including unescaped whitespace)
 /// are sanitized first; unrelated URLs and credential fields still use conservative [`redact`].
 pub fn message_with_address(address: &str, reason: &str) -> String {
-    if address.is_empty() {
-        return redact(reason);
-    }
-    if reason.len() > MAX_INPUT_BYTES {
+    if address.is_empty() || reason.len() > MAX_INPUT_BYTES {
         return redact(reason);
     }
     let shown = address_in_message(address);
+    let reason = address_occurrences_sanitized(address, reason, &shown);
+    let named = reason
+        .strip_prefix(&shown)
+        .is_some_and(|tail| tail.is_empty() || tail.starts_with(':') || tail.chars().next().is_some_and(char::is_whitespace));
+    if named { redact(&reason) } else { redact(&format!("{shown}: {reason}")) }
+}
+
+/// [`message_with_address`] without naming the address in front: for text that already says
+/// where it failed, anywhere in it (a transport's `HTTP 503 from …`).
+pub fn with_address_sanitized(address: &str, text: &str) -> String {
+    if address.is_empty() || text.len() > MAX_INPUT_BYTES {
+        return redact(text);
+    }
+    redact(&address_occurrences_sanitized(address, text, &address_in_message(address)))
+}
+
+/// `reason` with each exact occurrence of `address` (or its runtime binding's inner resource)
+/// replaced by `shown`, before the conservative scanner sees its unescaped secret whitespace.
+fn address_occurrences_sanitized(address: &str, reason: &str, shown: &str) -> String {
     let mut safe_reason = String::with_capacity(reason.len());
     let mut copied = 0;
     // Lower-level transports may name the inner resource of a runtime binding instead.
     let inner = crate::login_address::inner(crate::s3_address::inner(address));
     let mut outer_matches = reason.match_indices(address).peekable();
-    let mut inner_matches = reason.match_indices(inner).filter(|_| inner != address).peekable();
+    let mut inner_matches = reason.match_indices(inner).filter(|_| inner != address && !inner.is_empty()).peekable();
     loop {
         let occurrence = match (outer_matches.peek(), inner_matches.peek()) {
             (Some(outer), Some(inner)) if outer.0 <= inner.0 => outer_matches.next(),
@@ -674,16 +690,12 @@ pub fn message_with_address(address: &str, reason: &str) -> String {
         // A known address must not match the prefix of another address's longer secret.
         if begins && ends {
             safe_reason.push_str(reason.get(copied..start).unwrap_or(""));
-            safe_reason.push_str(&shown);
+            safe_reason.push_str(shown);
             copied = end;
         }
     }
     safe_reason.push_str(reason.get(copied..).unwrap_or(""));
-    let reason = safe_reason;
-    let named = reason
-        .strip_prefix(&shown)
-        .is_some_and(|tail| tail.is_empty() || tail.starts_with(':') || tail.chars().next().is_some_and(char::is_whitespace));
-    if named { redact(&reason) } else { redact(&format!("{shown}: {reason}")) }
+    safe_reason
 }
 
 /// Sanitizes before bounding. Oversized input is omitted *whole*, so a secret can never be
@@ -1170,6 +1182,11 @@ mod tests {
         history.push(Severity::Error, "Network", &clean, &clean);
         assert!(history.report(Filter::All).contains("HTTP 404 fetching"));
         assert!(!history.report(Filter::All).contains("hidden"));
+        // Text that already names where it failed keeps its own wording, without a label in front.
+        let clean = with_address_sanitized(address, &format!("HTTP 503 from {address}; retrying"));
+        assert!(clean.starts_with("HTTP 503 from https://example.org/data") && clean.ends_with("; retrying"), "{clean}");
+        assert!(!clean.contains("hidden") && !clean.contains("alice"), "{clean}");
+        assert_eq!(clean.matches("://").count(), 1, "{clean}");
     }
 
     #[test]

@@ -155,7 +155,15 @@ pub fn checked(url: &str) -> Result<String, String> {
     }
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        let shown: String = crate::sources::address_in_message(url).chars().take(80).collect();
+        let full = crate::sources::address_in_message(url);
+        let mut shown: String = full.chars().take(80).collect();
+        if shown.len() < full.len() {
+            // Never half an omission marker: cut before one the limit would split.
+            if let Some(at) = shown.rfind('[').filter(|&at| !shown.get(at..).unwrap_or("").contains(']')) {
+                shown.truncate(at);
+            }
+            shown.push('…');
+        }
         return Err(crate::sources::message_with_address(&shown, "plugins fetch only http:// and https:// addresses"));
     }
     // A fragment never reaches the server (and RustGIS marks byte ranges with one).
@@ -948,6 +956,16 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long refused address is shortened without cutting an omission marker in half.
+    #[test]
+    fn a_shortened_refused_address_keeps_whole_markers() {
+        let url = format!("ftp://h.example/{}?page=1&token=hidden", "a".repeat(52));
+        let error = checked(&url).unwrap_err();
+        assert!(!error.contains("hidden") && error.contains("plugins fetch only"), "{error}");
+        let unclosed = error.rfind('[').is_some_and(|at| !error.get(at..).unwrap_or("").contains(']'));
+        assert!(!unclosed, "{error}");
+    }
 
     /// A failure answers once a run, in the order it came, and a call made again after it is a new
     /// download: a command trying again gets its next try, not the same failure for ever. What was

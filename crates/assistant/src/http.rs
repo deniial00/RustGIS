@@ -78,11 +78,16 @@ fn send_with(req: &HttpRequest, timeout: std::time::Duration, mut on_chunk: Opti
     Ok(HttpResponse { status, body, headers })
 }
 
-/// The scheme and authority of an already-sanitized address, without its omission suffix.
+/// The scheme and authority of an already-sanitized address, without its omission suffix. A
+/// root address keeps the `/` that separates it from a following `: `; a path is dropped whole.
 fn host(shown: &str) -> &str {
     let url = shown.strip_suffix("[query omitted]").unwrap_or(shown);
     let Some((scheme, rest)) = url.split_once("://") else { return url };
-    let end = rest.find('/').map_or(url.len(), |at| scheme.len() + 3 + at + 1);
+    let end = match rest.find('/') {
+        Some(at) if at + 1 == rest.len() => url.len(),
+        Some(at) => scheme.len() + 3 + at,
+        None => url.len(),
+    };
     url.get(..end).unwrap_or(url)
 }
 
@@ -136,7 +141,7 @@ mod tests {
         let error = transport_error(&cause, url);
         assert_eq!(error.transport, Some(TransportFailure::Interrupted));
         let error = diagnostics::redact(&diagnostics::redact(&error.to_string()));
-        assert!(error.contains("couldn't reach https://models.test") && error.contains("connection closed"), "{error}");
+        assert!(error.contains("couldn't reach https://models.test: ") && error.contains("connection closed"), "{error}");
         for hidden in ["user", "password", "private-key", "secret", "value"] {
             assert!(!error.contains(hidden), "{error}");
         }

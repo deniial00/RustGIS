@@ -26,10 +26,10 @@ Notices and request errors redact a known address before attaching its failure r
 token or signature does not hide the HTTP status or other explanation. The complete query and
 fragment are omitted, including values with unescaped spaces. For an unknown URL embedded in
 free text, a secret-named query or fragment still omits the rest of that text: those later
-words might be part of the credential, not an explanation. Copied history errors use the same
-conservative rule. Ambiguous slash-containing userinfo is omitted rather than guessed to be
-a host, port and path. A root address is shown with `/` before an omission marker or reason,
-so repeated redaction keeps its host.
+words might be part of the credential, not an explanation. The same rule applies to copied
+history errors, saved run messages and notebook cell output. Ambiguous slash-containing userinfo
+is omitted rather than guessed to be a host, port and path. A root address is shown with `/`
+before an omission marker or reason, so repeated redaction keeps its host.
 
 Copied run parameters are sanitized as data, without blanket-omitting JSON/XML syntax.
 Typed addresses lose their keys and credential fields are emptied, but opaque text and nested
