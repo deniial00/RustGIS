@@ -32,8 +32,9 @@ a host, port and path. A root address is shown with `/` before an omission marke
 so repeated redaction keeps its host.
 
 Copied run parameters are sanitized as data, without blanket-omitting JSON/XML syntax.
-Public request parameters remain available for replay; credential fields and secret URL
-values extending past whitespace are still removed.
+Typed addresses lose their keys and credential fields are emptied, but opaque text and nested
+values a tool doesn't describe are kept for replay and flagged with a notice: they can still
+hold credentials, so review copied code before sharing it.
 
 Request and response bodies are not captured by network diagnostics.
 Background requests carry their originating session's weak capture token; failures are not

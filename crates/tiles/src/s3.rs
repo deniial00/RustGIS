@@ -389,7 +389,8 @@ pub fn parse(url: &str) -> Result<(String, String), String> {
         url.get(5..).filter(|_| is_s3(url)).ok_or_else(|| rustgis_data::diagnostics::message_with_address(url, "not an s3:// address"))?;
     let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
     if !valid_bucket(bucket) {
-        return Err(rustgis_data::diagnostics::message_with_address(url, &format!("'{bucket}' isn't a bucket name")));
+        // The bucket text itself is not repeated: without a slash it may hold the query.
+        return Err(rustgis_data::diagnostics::message_with_address(url, "the bucket name isn't one S3 takes"));
     }
     if key.len() > 1024 || key.chars().any(char::is_control) {
         return Err(rustgis_data::diagnostics::message_with_address(url, "the key isn't one S3 takes"));
@@ -1295,6 +1296,10 @@ mod tests {
         for bad in ["s3://", "s3://A_B/x", "s3://ab/x", "https://x.org/a", "s3://-ab-/x"] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+        // A query in place of a key isn't repeated in the error, and the bucket stays readable.
+        let error = parse("s3://bucket?X-Custom-Cred=hidden").unwrap_err();
+        assert!(!error.contains("hidden") && error.contains("s3://bucket/") && error.contains("bucket name"), "{error}");
+        assert_eq!(rustgis_data::diagnostics::redact(&error), error);
         assert_eq!(object_url("my-bucket", "a/b c.tif", None), "https://my-bucket.s3.amazonaws.com/a/b%20c.tif");
         assert_eq!(object_url("my.bucket", "k", None), "https://s3.amazonaws.com/my.bucket/k");
         let aws = Connection { name: "a".into(), endpoint: None, region: "eu-west-1".into(), buckets: vec![], credentials: None };

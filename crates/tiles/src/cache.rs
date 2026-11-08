@@ -978,7 +978,7 @@ impl<'a> RequestDiagnostics<'a> {
                 _ => NetworkKind::Other,
             }
         };
-        let message = failure.message.contains(url).then(|| rustgis_data::diagnostics::message_with_address(url, &failure.message));
+        let message = failure.message.starts_with(url).then(|| rustgis_data::diagnostics::message_with_address(url, &failure.message));
         self.capture.network_failure(
             "Network",
             &clean(message.as_deref().unwrap_or(&failure.message)),

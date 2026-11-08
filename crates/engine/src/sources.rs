@@ -333,8 +333,12 @@ pub fn message_with_address(address: &str, reason: &str) -> String {
         reason.strip_prefix(&shown).is_some_and(|tail| tail.is_empty() || tail.starts_with(": "))
             || reason.split_once(": ").is_some_and(|(label, _)| {
                 label.contains("://")
-                    && rustgis_data::io::shapefile_part_urls(address)
-                        .is_some_and(|parts| parts.iter().any(|(_, part)| address_in_message(part) == label))
+                    && rustgis_data::io::shapefile_part_urls(address).is_some_and(|parts| {
+                        // The part's label may come from either layer's composition.
+                        parts.iter().any(|(_, part)| {
+                            address_in_message(part) == label || rustgis_data::diagnostics::address_in_message(part) == label
+                        })
+                    })
             })
     }) {
         Some(reason) => reason,
@@ -737,6 +741,17 @@ MIIE
             assert_eq!(crate::Session::redacted(&message).as_str(), message);
             message = message_with_address(requested, &message);
         }
+    }
+
+    #[test]
+    fn shapefile_parts_with_secret_queries_are_named_once() {
+        let shp = "https://h.example/roads.shp?token=hidden";
+        let part = "https://h.example/roads.dbf?token=hidden";
+        // A part failure as the data layer writes it, passed back through the source's helper.
+        let label = rustgis_data::diagnostics::message_with_address(part, "http status: 404");
+        let message = message_with_address(shp, &label);
+        assert!(message.contains("roads.dbf") && message.contains("404") && !message.contains("hidden"), "{message}");
+        assert_eq!(message.matches("://").count(), 1, "{message}");
     }
 
     #[test]

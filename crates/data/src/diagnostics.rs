@@ -561,10 +561,11 @@ fn base64_shaped(word: &str) -> bool {
     credential_shaped(word) || (word.chars().count() >= 8 && word.chars().skip(1).any(char::is_uppercase))
 }
 
-/// A slash before `@` can disguise userinfo as an authority and path.
+/// A slash (or a backslash, which URL parsers read as one) before `@` can disguise userinfo as
+/// an authority and path.
 fn ambiguous_userinfo(address: &str) -> bool {
     let Some((_, rest)) = address.split_once("://") else { return false };
-    let Some((authority, path)) = rest.split_once('/') else { return false };
+    let Some((authority, path)) = rest.split_once(['/', '\\']) else { return false };
     let Some((before_at, _)) = path.split_once('@') else { return false };
     !authority.contains('@') && !authority.starts_with('[') && (authority.contains(':') || before_at.contains(':'))
 }
@@ -609,10 +610,18 @@ pub fn address_in_message(address: &str) -> String {
         // A malformed authority is omitted whole, including words after its first token.
         shown.truncate("[address omitted]".len());
     }
+    // A redacted path secret whose value had unescaped whitespace may continue into the words
+    // after it: they belong to this known address, not to diagnostic prose.
+    if url
+        && before_query.contains(char::is_whitespace)
+        && let Some(at) = shown.find(REDACTED).map(|at| at + REDACTED.len())
+    {
+        shown.truncate(at);
+    }
     // Keep root authorities separate from the omission marker and the message's `: `:
     // otherwise another redaction can parse the marker or separator as part of the host/port.
     if let Some((scheme, rest)) = shown.split_once("://")
-        && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && ["http", "https", "s3"].iter().any(|s| scheme.eq_ignore_ascii_case(s))
         && !rest.is_empty()
         && !rest.chars().any(|c| c == '/' || c.is_whitespace())
     {
@@ -699,11 +708,23 @@ pub fn redact_parameter(text: &str) -> String {
 /// fragment whose value may continue past whitespace. Address-only scrubbing cannot know where
 /// that value ends, so callers use this result instead of retaining the later words.
 pub fn secret_continuation_cut(text: &str) -> Option<String> {
-    let strict = redact(text);
-    strict.contains("[query and the rest omitted]").then_some(strict)
+    // Detected before the output is bounded: a long prefix must not cut the marker away.
+    let mut strict = redact_scan(text, true);
+    if !strict.contains("[query and the rest omitted]") {
+        return None;
+    }
+    cut_with_ellipsis(&mut strict, MAX_DETAILS_BYTES);
+    Some(strict)
 }
 
 fn redact_impl(text: &str, diagnostic: bool) -> String {
+    let mut out = redact_scan(text, diagnostic);
+    cut_with_ellipsis(&mut out, MAX_DETAILS_BYTES);
+    out
+}
+
+/// [`redact_impl`] before its output is bounded.
+fn redact_scan(text: &str, diagnostic: bool) -> String {
     if text.len() > MAX_INPUT_BYTES {
         return "[oversized diagnostic omitted]".to_string();
     }
@@ -730,21 +751,22 @@ fn redact_impl(text: &str, diagnostic: bool) -> String {
             i += marker.len();
             continue;
         }
-        if matches!(c, '{' | '[' | '<') && opens_structured(rest) {
-            if diagnostic {
-                out.push_str("[structured content omitted]");
+        // A credential tag, attributes or not: its value can span words and lines, so omit the
+        // remainder whatever else the tag looks like.
+        if c == '<' {
+            let inner = rest.get(1..).unwrap_or("").trim_start_matches('/');
+            let tag = inner.split(|c: char| c.is_whitespace() || matches!(c, '>' | '/')).next().unwrap_or("");
+            if tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && inner.get(..256).unwrap_or(inner).contains('>')
+                && secret_name(tag.rsplit(':').next().unwrap_or(tag))
+            {
+                out.push_str(REDACTED);
                 break;
             }
-            // A parameter may legitimately be markup. A credential-bearing tag is not
-            // innocent syntax: its value can span words and lines, so omit the remainder.
-            if c == '<' {
-                let tag =
-                    rest.trim_start_matches(['<', '/']).split(|c: char| c.is_whitespace() || matches!(c, '>' | '/')).next().unwrap_or("");
-                if secret_name(tag.rsplit(':').next().unwrap_or(tag)) {
-                    out.push_str(REDACTED);
-                    break;
-                }
-            }
+        }
+        if matches!(c, '{' | '[' | '<') && opens_structured(rest) && diagnostic {
+            out.push_str("[structured content omitted]");
+            break;
         }
         if matches!(c, '"' | '\'') {
             let quote = c;
@@ -792,7 +814,7 @@ fn redact_impl(text: &str, diagnostic: bool) -> String {
                     field_before = false;
                     continue;
                 }
-                if !diagnostic && ambiguous_userinfo(address.split(['?', '#']).next().unwrap_or("")) {
+                if ambiguous_userinfo(address.split(['?', '#']).next().unwrap_or("")) {
                     out.push_str("[address omitted]");
                     break;
                 }
@@ -942,7 +964,6 @@ fn redact_impl(text: &str, diagnostic: bool) -> String {
             i += c.len_utf8();
         }
     }
-    cut_with_ellipsis(&mut out, MAX_DETAILS_BYTES);
     out
 }
 
@@ -1069,10 +1090,30 @@ mod tests {
             "GET https://alice:hidden@example.org?format=json",
             "GET https://u:123/w@host/x",
             "GET https://alice/part:123@host/x",
+            "GET https://u:123\\w@host/x",
+            r#"<Password type="plain">hidden hidden-tail</Password> https://example.org"#,
         ] {
             let clean = redact_parameter(private);
             assert!(!clean.contains("hidden") && !clean.contains("alice") && !clean.contains("123"), "{private} -> {clean}");
         }
+        for private in [r#"<Password type="plain">hidden hidden-tail</Password>"#, "GET https://u:123\\w@host/x"] {
+            let clean = redact(private);
+            assert!(!clean.contains("hidden") && !clean.contains("123"), "{private} -> {clean}");
+        }
+        // An attribute-only tag that names no credential is still plain markup.
+        let public = r#"<span class="note"> https://example.org </span>"#;
+        assert_eq!(redact_parameter(public), public);
+    }
+
+    #[test]
+    fn known_path_secrets_and_long_prefixes_do_not_keep_continuations() {
+        let address = "https://example.org/token=hidden hidden-tail/data";
+        let clean = message_with_address(address, "HTTP 404");
+        assert!(clean.contains("HTTP 404") && !clean.contains("hidden"), "{clean}");
+        assert_eq!(redact(&clean), clean);
+        let long = format!("{} https://example.org/a?token=hidden hidden-tail", "word ".repeat(2000));
+        let cut = secret_continuation_cut(&long).expect("the cut is seen past the output bound");
+        assert!(!cut.contains("hidden") && cut.len() <= MAX_DETAILS_BYTES + '…'.len_utf8(), "{}", cut.len());
     }
 
     #[test]
@@ -1105,6 +1146,7 @@ mod tests {
             ("https://models.test:8443", "https://models.test:8443/"),
             ("http://[::1]:8080#token=hidden value", "http://[::1]:8080/"),
             ("HTTPS://models.test?token=hidden", "HTTPS://models.test/"),
+            ("s3://bucket?X-Cred=hidden", "s3://bucket/"),
             ("https://", "https://"),
         ] {
             let mut message = message_with_address(address, "HTTP 503");
@@ -1168,6 +1210,7 @@ mod tests {
             "https://u:123/w@host/x?token=hidden",
             "https://alice:hidden/path@host/x",
             "https://alice/part:123@host/x",
+            "https://u:123\\w@host/x",
         ] {
             let shown = address_in_message(address);
             let clean = message_with_address(address, &format!("{address}: HTTP 401"));
