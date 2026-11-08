@@ -828,13 +828,12 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
         return;
     }
     let f = Fixture::new("restore-gdal-signature");
-    let path = f.file("survey.geojson");
+    // GeoJSON Lines: a file type GDAL reads (plain GeoJSON is read without it).
+    let path = f.file("survey.geojsonl");
     let publish = |x| {
         std::fs::write(
             &path,
-            format!(
-                r#"{{"type":"FeatureCollection","name":"survey","features":[{{"type":"Feature","properties":{{"rank":7}},"geometry":{{"type":"Point","coordinates":[{x},48,100]}}}}]}}"#
-            ),
+            format!(r#"{{"type":"Feature","properties":{{"rank":7}},"geometry":{{"type":"Point","coordinates":[{x},48,100]}}}}"#),
         )
         .unwrap();
     };
