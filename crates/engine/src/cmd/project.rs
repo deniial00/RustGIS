@@ -175,7 +175,8 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
             ]
             .into_iter()
             .find(|kind| note.contains(*kind))
-            .unwrap_or(&note);
+            // An unlisted GDAL warning, without its per-layer occurrence count.
+            .unwrap_or_else(|| note.rsplit_once(" (").filter(|(_, tail)| tail.ends_with("occurrence(s))")).map_or(&note, |(base, _)| base));
             let provider = note.split_once(": ").map_or("", |(provider, _)| provider);
             let key = (provider.to_owned(), kind.to_owned());
             if seen.insert(key.clone()) {

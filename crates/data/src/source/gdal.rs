@@ -484,10 +484,13 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
             *count = count.saturating_add(1);
         }
         let mut notes: Vec<String> = counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect();
-        if let Some(family) = family {
-            let other = count_other_families(&full, layer, family)?;
-            if other > 0 {
-                notes.push(format!("GDAL: {other} features of another geometry type were left out"));
+        // A layer declaring one geometry type holds no other; only a mixed layer is counted. A
+        // count that fails doesn't undo a good conversion: the possible loss is said instead.
+        if let Some(family) = family.filter(|_| kind.is_none()) {
+            match count_other_families(&full, layer, family) {
+                Ok(0) => {}
+                Ok(other) => notes.push(format!("GDAL: {other} features of another geometry type were left out")),
+                Err(_) => notes.push("GDAL: an unknown number of features of another geometry type may have been left out".into()),
             }
         }
         notes
@@ -508,7 +511,7 @@ fn count_other_families(src: &Path, layer: &str, selected: Family) -> Result<u64
     let filter = format!("({}) OR ({})", first.filter(), second.filter());
     let mut c = command(program("ogrinfo").ok_or_else(missing)?, drivers(src)?);
     c.args(["-json", "-ro", "-so", "-nomd", "-where", &filter]).arg(src).arg(layer);
-    let out = output(c, LIST_TIMEOUT, "GDAL")?;
+    let out = output(c, CONVERT_TIMEOUT, "GDAL")?;
     if !out.status.success() {
         return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
