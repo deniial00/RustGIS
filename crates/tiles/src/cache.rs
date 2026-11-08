@@ -2029,9 +2029,9 @@ mod native {
                     }
                 }
                 if status >= 400 {
-                    // A signed or logged-in request's refusal is told by its status alone: a server
-                    // may echo its credentials in the answer's headers or body.
-                    return Err(if detail && !prepared.signed && login.is_none() {
+                    // A signed request or any hop carrying a login makes the refusal status-only:
+                    // a server may echo credentials even after a cross-origin redirect or revocation.
+                    return Err(if detail && !prepared.signed && !carried_login {
                         refused(&mut resp)
                     } else {
                         Failure::without_answer(
@@ -3225,6 +3225,110 @@ mod tests {
         assert!(text.contains("403"));
         assert!(!text.contains(secret) && !text.contains("x-request-id") && !text.contains("foreign-head-secret"));
         assert!(logins::deactivate(&foreign));
+    }
+
+    /// GET keeps refusals private after an authenticated redirect, even after login revocation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn delayed_get_refusal_after_cross_origin_redirect_is_status_only() {
+        if isolate_cache_fixture("cache::tests::delayed_get_refusal_after_cross_origin_redirect_is_status_only") {
+            return;
+        }
+        let _turn = crate::cache::turn();
+        use crate::failure::Reason;
+        use crate::logins::{self, Method};
+        use rustgis_data::diagnostics::{Capture, Filter, History};
+        use std::io::Write;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        for revoke in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let other = format!("http://{}", listener.local_addr().unwrap());
+            let secret = "redirect-get-sentinel-8430";
+            let body = format!("private refusal echoed {secret}");
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nx-request-id: {secret}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let (received_tx, received_rx) = channel();
+            let (release_tx, release_rx) = channel();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                assert!(request.starts_with("GET /refused HTTP/1.1\r\n"), "{request}");
+                assert!(!request.to_ascii_lowercase().contains("x-key:") && !request.contains(secret), "{request}");
+                received_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let (base, asked) = serve_recorded(vec![
+                format!("HTTP/1.1 302 Found\r\nLocation: {other}/refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(),
+            ]);
+            let binding = logins::activate(&base, "redirect-get", Method::Header("X-Key".into()), secret, true).unwrap();
+            let plain = format!("{base}/start");
+            let url = logins::bind(&binding, &plain).unwrap();
+            let history = History::default();
+            let _scope = history.enter();
+            let capture = Capture::current();
+            let worker = std::thread::spawn(move || {
+                let _scope = capture.enter();
+                native::get_detailed(&native::agent(), &url)
+            });
+            let request = asked.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(request.to_ascii_lowercase().contains(&format!("x-key: {secret}\r\n")), "{request}");
+            received_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            if revoke {
+                assert!(logins::deactivate(&binding));
+            }
+            release_tx.send(()).unwrap();
+            let failure = worker.join().unwrap().unwrap_err();
+            server.join().unwrap();
+            assert!(failure.answer.is_none(), "{failure:?}");
+            if revoke {
+                assert!(failure.message.contains("no longer active"), "{failure:?}");
+            } else {
+                assert_eq!(failure.reason, Reason::Status(403));
+                assert_eq!(failure.message, "http status: 403");
+                assert!(logins::deactivate(&binding));
+            }
+            let records = network_records(&history, &plain);
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].network.as_ref().unwrap().status, Some(403));
+            assert!(records[0].details.is_empty(), "{records:?}");
+            let text = format!("{failure:?}\n{records:?}\n{}", history.report(Filter::All));
+            for private in [secret, "x-request-id", "private refusal echoed", binding.as_str()] {
+                assert!(!text.contains(private), "{private} reached the failure or diagnostics: {text}");
+            }
+        }
+
+        // A genuinely anonymous redirect still retains useful refusal headers and body.
+        let body = "useful anonymous refusal";
+        let (other, asked) = serve_recorded(vec![
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nx-request-id: anonymous-trace-8430\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        ]);
+        let base =
+            serve(vec![format!("HTTP/1.1 302 Found\r\nLocation: {other}/refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")]);
+        let url = format!("{base}/anonymous");
+        let history = History::default();
+        let _scope = history.enter();
+        let failure = native::get_detailed(&native::agent(), &url).unwrap_err();
+        let request = asked.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(request.starts_with("GET /refused HTTP/1.1\r\n"), "{request}");
+        assert!(!request.to_ascii_lowercase().contains("x-key:"), "{request}");
+        assert_eq!(failure.reason, Reason::Status(403));
+        assert_eq!(failure.excerpt(), Some(body));
+        assert!(
+            failure.answer.as_ref().unwrap().headers.iter().any(|(name, value)| name == "x-request-id" && value == "anonymous-trace-8430")
+        );
+        let records = network_records(&history, &url);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].network.as_ref().unwrap().status, Some(403));
+        assert!(records[0].details.contains("x-request-id: anonymous-trace-8430"), "{records:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

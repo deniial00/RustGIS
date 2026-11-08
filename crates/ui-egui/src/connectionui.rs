@@ -55,6 +55,8 @@ pub struct State {
 pub struct TestContext {
     opened: u64,
     form: Value,
+    /// Capture the displayed translation so a language change cannot orphan this Test's status.
+    status: &'static str,
     _login: Option<web::TemporaryProbe>,
 }
 
@@ -442,12 +444,13 @@ pub fn start_test(app: &mut RustGisApp) {
     if service && let Some(id) = &app.ui.connection.id {
         q["id"] = json!(id);
     }
-    let context = TestContext { opened: app.session.opened, form: definition(&app.ui.connection), _login: login };
+    let status = tl!("Testing…");
+    let context = TestContext { opened: app.session.opened, form: definition(&app.ui.connection), status, _login: login };
     let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
     let land = slot.clone();
     cache::download(&url, Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)));
     app.ui.connection.test = Some((q, slot, context));
-    app.dialogs.info = Some(tl!("Testing…").into());
+    app.dialogs.info = Some(status.into());
 }
 
 /// A request remains authorized only for its original project and exact saved definitions.
@@ -610,9 +613,13 @@ fn poll_requests(app: &mut RustGisApp) {
 pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     poll_requests(app);
     if !matches!(app.dialogs.open, Some("newConnection" | "editConnection")) {
-        if app.ui.connection.test.take().is_some() && app.dialogs.open.is_none() {
-            app.dialogs.info = None;
-            app.dialogs.error = None;
+        if let Some((_, _, context)) = app.ui.connection.test.take() {
+            if app.dialogs.open.is_none() {
+                app.dialogs.info = None;
+                app.dialogs.error = None;
+            } else if app.dialogs.info.as_deref() == Some(context.status) {
+                app.dialogs.info = None;
+            }
         }
         return;
     }
@@ -1365,16 +1372,29 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_probe_preserves_replacement_dialog_status() {
-        let mut app = RustGisApp::with_sample();
-        open_new(&mut app, "wmts").unwrap();
-        let context = TestContext { opened: app.session.opened, form: definition(&app.ui.connection), _login: None };
-        app.ui.connection.test = Some((json!({}), Slot::default(), context));
-        app.dialogs.open = Some("addDelimited");
-        app.dialogs.error = Some("replacement file read failed".into());
-        poll(&mut app, &egui::Context::default());
-        assert!(app.ui.connection.test.is_none());
-        assert_eq!(app.dialogs.error.as_deref(), Some("replacement file read failed"));
+    fn abandoned_probe_clears_only_its_own_status_in_a_replacement_dialog() {
+        // A captured translation differs from the current language without changing global state.
+        let status = "Prüfung läuft…";
+        for (dialog, info, expected_info, expected_error) in [
+            (Some("addDelimited"), Some(status), None, Some("replacement file read failed")),
+            (Some("addDelimited"), Some("replacement file loaded"), Some("replacement file loaded"), Some("replacement file read failed")),
+            (Some("addDelimited"), None, None, Some("replacement file read failed")),
+            (None, Some(status), None, None),
+            (None, Some("previous info"), None, None),
+        ] {
+            let mut app = RustGisApp::with_sample();
+            open_new(&mut app, "wmts").unwrap();
+            let context = TestContext { opened: app.session.opened, form: definition(&app.ui.connection), status, _login: None };
+            app.ui.connection.test = Some((json!({}), Slot::default(), context));
+            app.dialogs.open = dialog;
+            app.dialogs.info = info.map(str::to_owned);
+            app.dialogs.error = Some("replacement file read failed".into());
+            poll(&mut app, &egui::Context::default());
+            assert!(app.ui.connection.test.is_none());
+            assert_eq!(app.dialogs.open, dialog);
+            assert_eq!(app.dialogs.info.as_deref(), expected_info);
+            assert_eq!(app.dialogs.error.as_deref(), expected_error);
+        }
     }
 
     #[test]
