@@ -22,8 +22,14 @@ pub const UPLOAD: &str = "upload:";
 const MAX_UPLOADS: usize = 16;
 /// A file that couldn't be read is tried again after this long.
 const RETRY: Duration = Duration::from_secs(60);
-/// Invalidates completions that started before a metadata clear.
+/// Counts clears and per-file forgets, so a completion can tell whether one happened since it started.
 static EPOCH: AtomicU64 = AtomicU64::new(0);
+/// The epoch of the last clear of every file's metadata.
+static CLEARED: AtomicU64 = AtomicU64::new(0);
+/// Files [`forgotten`] keeps at most; their paths come from command parameters.
+pub(crate) const MAX_FORGOTTEN: usize = 64;
+/// The epoch [`forgotten`] was last emptied at.
+static EMPTIED: AtomicU64 = AtomicU64::new(0);
 /// A pending OS read stops being presented as normal loading after this long.
 #[cfg(not(target_arch = "wasm32"))]
 const READ_DEADLINE: Duration = Duration::from_secs(30);
@@ -97,10 +103,39 @@ fn infos() -> &'static Mutex<HashMap<String, Result<Arc<Info>, (String, Instant)
     I.get_or_init(Mutex::default)
 }
 
+/// When each file was last forgotten by itself. Taken after [`infos`] and the cache's lock where
+/// they are held. Emptied when full ([`forget_archive`]): reads asked for before that are read again.
+fn forgotten() -> &'static Mutex<HashMap<String, u64>> {
+    static F: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    F.get_or_init(Mutex::default)
+}
+
+/// The epoch now, to tell later whether a file was forgotten since ([`forgotten_since`]).
+pub(crate) fn epoch() -> u64 {
+    EPOCH.load(Ordering::SeqCst)
+}
+
+/// Whether a tile address is of a file forgotten after `epoch`.
+pub(crate) fn forgotten_since(url: &str, epoch: u64) -> bool {
+    parse_url(url)
+        .is_some_and(|(_, _, _, archive)| forgotten().lock().unwrap_or_else(|e| e.into_inner()).get(archive).is_some_and(|at| *at > epoch))
+}
+
+/// How many files [`forgotten`] holds.
+#[cfg(test)]
+pub(crate) fn forgotten_len() -> usize {
+    forgotten().lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// Whether a tile address was asked for at `epoch`, before [`forgotten`] last lost track of what it held.
+pub(crate) fn asked_before_emptied(url: &str, epoch: u64) -> bool {
+    is_tile(url) && epoch < EMPTIED.load(Ordering::SeqCst)
+}
+
 /// Forgets the files' metadata (with the tile cache), so they are read again.
 pub(crate) fn forget() {
     let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
-    EPOCH.fetch_add(1, Ordering::SeqCst);
+    CLEARED.store(EPOCH.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
     all.clear();
     drop(all);
     #[cfg(not(target_arch = "wasm32"))]
@@ -111,7 +146,7 @@ pub(crate) fn forget() {
 pub(crate) fn reload_archive(archive: &str) {
     infos().lock().unwrap_or_else(|e| e.into_inner()).remove(archive);
     #[cfg(not(target_arch = "wasm32"))]
-    rustgis_data::mbtiles::close(std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive)));
+    rustgis_data::mbtiles::close(file_of(archive));
 }
 
 fn info_epoch(archive: &str) -> (u64, u64) {
@@ -126,8 +161,7 @@ pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let path = std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive));
-        let (info, sample) = rustgis_data::mbtiles::read_info_path(path)?;
+        let (info, sample) = rustgis_data::mbtiles::read_info_path(file_of(archive))?;
         if let Some(sample) = sample {
             validate_raster_sample(archive, &sample)?;
         }
@@ -144,6 +178,32 @@ fn validate_raster_sample(archive: &str, sample: &[u8]) -> Result<(), String> {
     crate::cache::decode_image(sample)
         .map(|_| ())
         .map_err(|e| format!("{archive}: cannot decode the MBTiles raster sample ({e}); repair or replace the archive before reloading"))
+}
+
+/// Forgets what was read of one file (its metadata and its connections) with every file's resolved
+/// styles, made again when next drawn, and won't keep a read of it under way: the file may be
+/// replaced next. Reads of other files are kept, as they may be framing a map, until the record of
+/// forgotten files fills up ([`MAX_FORGOTTEN`]).
+/// [`cache::forget`](crate::cache::forget) asks this of any address, so others are left alone.
+pub(crate) fn forget_archive(archive: &str) {
+    if check(archive).is_err() {
+        return;
+    }
+    let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
+    let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut gone = forgotten().lock().unwrap_or_else(|e| e.into_inner());
+    if gone.len() >= MAX_FORGOTTEN && !gone.contains_key(archive) {
+        gone.clear();
+        EMPTIED.store(epoch, Ordering::SeqCst);
+        CLEARED.store(epoch, Ordering::SeqCst);
+    }
+    gone.insert(archive.to_string(), epoch);
+    drop(gone);
+    all.remove(archive);
+    drop(all);
+    crate::source::forget();
+    #[cfg(not(target_arch = "wasm32"))]
+    rustgis_data::mbtiles::close(file_of(archive));
 }
 
 /// An archive's metadata.
@@ -166,14 +226,15 @@ pub fn info(archive: &str) -> Result<Arc<Info>, String> {
 }
 
 /// Checks the initiating context before locking, then keeps a completion only while both its
-/// metadata-clear and archive epochs remain current under their respective invalidation locks.
+/// metadata-clear, per-file forget and archive epochs remain current under their invalidation locks.
 fn remember_info(archive: &str, result: &Result<Arc<Info>, String>, epoch: (u64, u64)) {
     if crate::cache::check_still(&crate::cache::current_still()).is_err() {
         return;
     }
     crate::cache::if_archive_current(archive, epoch.1, || {
         let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
-        if EPOCH.load(Ordering::SeqCst) != epoch.0 {
+        let forgotten_at = forgotten().lock().unwrap_or_else(|e| e.into_inner()).get(archive).copied().unwrap_or(0);
+        if epoch.0 < CLEARED.load(Ordering::SeqCst).max(forgotten_at) {
             return;
         }
         if all.len() >= 64 {
@@ -293,10 +354,23 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
     }
 }
 
+/// The file an archive address names.
+#[cfg(not(target_arch = "wasm32"))]
+fn file_of(archive: &str) -> &std::path::Path {
+    std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive))
+}
+
+/// Closes the connections kept to files none of `archives` names, so another program can move or
+/// delete a file once no layer reads it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn close_unused<'a>(archives: impl Iterator<Item = &'a str>) {
+    let kept: Vec<&std::path::Path> = archives.map(file_of).collect();
+    rustgis_data::mbtiles::close_unless(|file| kept.contains(&file));
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn read_info(archive: &str) -> Result<Arc<Info>, String> {
-    let path = std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive));
-    rustgis_data::mbtiles::open_path(path).map(Arc::new)
+    rustgis_data::mbtiles::open_path(file_of(archive)).map(Arc::new)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -341,8 +415,7 @@ pub(crate) fn fetch(url: &str, done: Done) {
 pub(crate) fn read_local(url: &str) -> Result<Vec<u8>, String> {
     let (z, x, y, archive) = parse_url(url).ok_or_else(|| format!("{url}: not an MBTiles tile address"))?;
     check(archive)?;
-    let path = std::path::Path::new(archive.strip_prefix("file://").unwrap_or(archive));
-    Ok(rustgis_data::mbtiles::tile_path(path, z, x, y)?.unwrap_or_default())
+    Ok(rustgis_data::mbtiles::tile_path(file_of(archive), z, x, y)?.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -463,6 +536,26 @@ mod tests {
         assert!(validate_raster_sample(archive, &valid).is_ok());
         let oversized = tiny_skia::Pixmap::new(4097, 1).unwrap().encode_png().unwrap();
         assert!(validate_raster_sample(archive, &oversized).is_err());
+    }
+
+    /// The metadata of a read under way when its file was forgotten isn't kept; a read of another
+    /// file is, and an address that is no MBTiles file changes nothing.
+    #[test]
+    fn a_forgotten_file_rejects_only_its_own_older_completion() {
+        let _turn = crate::cache::turn();
+        let epoch = info_epoch("/forgotten-while-read.mbtiles");
+        forget_archive("/forgotten-while-read.mbtiles");
+        remember_info("/forgotten-while-read.mbtiles", &Err("old file".into()), epoch);
+        assert!(cached_info("/forgotten-while-read.mbtiles").is_none());
+        // Tried several times: another test's clear may fall in between, but not every time.
+        assert!((0..100).any(|_| {
+            let epoch = info_epoch("/read-meanwhile.mbtiles");
+            forget_archive("/forgotten-while-read.mbtiles");
+            forget_archive("https://example.com/not-an-archive");
+            remember_info("/read-meanwhile.mbtiles", &Err("another file".into()), epoch);
+            cached_info("/read-meanwhile.mbtiles").is_some()
+        }));
+        assert!(!forgotten().lock().unwrap_or_else(|e| e.into_inner()).contains_key("https://example.com/not-an-archive"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

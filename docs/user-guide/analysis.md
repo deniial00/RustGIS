@@ -8,8 +8,9 @@ Lasso** (drag a freehand outline), or **Select by Radius** (drag from the centre
 selection; Ctrl/Cmd removes; Esc cancels an unfinished outline. Area tools use even-odd fill, so a
 self-crossing outline selects its alternating filled regions. Radius uses the Neighborhood Explorer's
 local Mercator distance and retained geographic prefilter; its outline and readout are approximate
-and some features near the outline may be excluded. The main Select button remains click/rectangle
-selection.
+and some features near the outline may be excluded. A feature reaching beyond 85.05°, where Web
+Mercator stops, is measured on the ground instead, so it may be selected outside the outline, which
+stops at 85.05°, or left out inside it. The main Select button remains click/rectangle selection.
 All selection tools take only features that are drawn, in selectable layers: a definition query or
 a display filter hiding a feature keeps it out, and a click picks the feature drawn on top among the
 selectable layers. **Select By Attributes** takes a SQL clause and checks it as you type; **Select By
@@ -29,6 +30,12 @@ ignoring letter case. The toolbar opens Select By Attributes and zooms to, switc
 deletes the selection, adds or calculates a field, and calculates geometry attributes.
 The first column, **Feature ID**, shows each feature's identifier, not its current row position
 after sorting or filtering. It is not a dataset field: do not use it as a geoprocessing field name.
+
+Right-click a column header for **Hide Column**, **Move Left**, **Move Right** and **Show All
+Columns**. A hidden column is only left out of the table: export, selection, expressions and the
+map are unchanged. The toolbar says how many columns are hidden, and clicking it shows them all.
+Hiding the column the rows are sorted by clears the sort. The order and hidden columns are kept
+per table until another project is opened, and are not saved in the project.
 
 <figure markdown="span">
   ![The attribute table docked under the map: the 14 African countries of more than 30 million people, selected by attributes, highlighted on the map and in the table](https://assets.rustgis.app/images/attribute-table.webp)
@@ -132,16 +139,76 @@ that crosses 85.05° is straight in the tools, but the Web Mercator map clamps i
 where that map shows it: about 48 km at 84.5°N for an edge from (0°, 80°N) to (10°E, 89°N). A
 pole is a line in these coordinates, not a point, so Minimum Bounding Geometry of points spread
 around a pole spans their longitudes (a flat polygon with no area, for points on one parallel,
-and the tool says how many hulls have no area), not the cap they enclose on the ground. The globe
-draws a long edge along the great circle between its ends, so near a pole it shows a little
-poleward of where the tools take it: about 850 m at the middle of a 10° edge along 88°N (as
-everywhere, the tools take an edge as straight on the map, not on the globe).
+and the tool says how many hulls have no area), not the cap they
+enclose on the ground. The globe draws a long edge along the great circle between its ends, so near
+a pole it shows a little poleward of where the tools take it: about 850 m at the middle of a 10°
+edge along 88°N (as everywhere, the tools take an edge as straight on the map, not on the globe).
 Beyond 85.05°, the dangle check measures line ends about their pole (on WGS 84's curvature there,
 within 0.13% out to 85°), right up to the pole and across ±180°; an edge winding round a pole so
 many times that it can't be measured closely is measured coarsely, and the check says it's
-incomplete.
-Radius selections and the Neighborhood Explorer still measure in local Web Mercator, and the Cut
-Polygon, Reshape and Trace edits still work in it.
+incomplete. Features that both reach a pole
+(to within 1e-7°, about a centimeter) meet there, one place on the ground, in Select By Location
+and Spatial Join (Intersects), whatever their longitudes; in Clip, the overlays, Erase, Split,
+Summarize Within and Spatial Join ("Have their center in") a point at a pole falls in a polygon
+reaching it (a line or polygon meeting another only at a pole has no part in it, as at a corner
+anywhere); and a point at a pole is covered (Must Be Covered By) by polygons that together surround
+the pole (elsewhere, a point on the boundary between two polygons is still reported, as before),
+not by ones that only touch it at a corner or leave a gap reaching it (a hole no other polygon
+fills included). The check looks at circles around the pole from 1.1 cm to 8.7 km from it on the
+ground, out to the first the polygons don't reach at all: a gap more than 9e-6° of longitude wide
+where it crosses one counts, and narrower ones are taken for the seams the overlays' rounding
+leaves. It leans to reporting: such a gap counts even if it doesn't reach the pole, and so do
+polygons reaching less far from the pole on one side than on another, within 8.7 km.
+Spatial Join's Within, Contains and Largest overlap still see a pole as a line. Radius selections
+and the Neighborhood Explorer measure a feature reaching beyond 85.05°, or any feature from a center
+beyond it, on the ground, following each edge as the tools take it (straight on the map) to within
+about 125 m out to 5,000 km (farther, more, but only ever nearer); the
+Neighborhood Explorer also takes a center beyond 85.05°, while radius selections take centers within
+±85.05°. A feature within ±85.05° searched from a center within it is still measured in local
+Mercator, which doesn't go over the pole, so from a high latitude a feature just within 85.05° on
+the far side of the pole can be left out while one just beyond it, nearer on the ground, is found.
+A search measures at most 250,000 points and steps along edges in each layer, in steps of at most
+half a degree; past them, or along an edge over 512° long (as only a hostile file has), a feature is
+counted at the least distance it could be, so it may lie beyond the radius, and the tool warns how
+many were, layer by layer. Shapes with a finite latitude past ±90° are left out of radius searches,
+with a count; missing or infinite coordinates and their incident edges are omitted from the
+measurement, also with a count. An incomplete polygon is measured along its remaining finite
+edges, without assuming it contains the center. The overlay tools, Select By Location, Spatial Join, Summarize
+Within and topology validation refuse latitudes past ±90° before doing their work.
+
+### Batch geoprocessing (`gp.batch`)
+
+Run one tool over many layers in the project or a folder of vector files:
+
+```json
+gp.batch={"tool":"buffer","inputs":["Cities","Rivers"],"outputPattern":"{input}_buf","params":{"distance":50,"units":"Kilometers"}}
+```
+
+- `"tool"`: the tool's id (such as `"buffer"`, `"simplify"` or `"convexHull"`).
+- `"inputs"`: layer names or, on desktop and the command line, file paths; or `"*"` for every
+  vector layer on the active map, hidden ones included (raster and graphics layers are left out,
+  with a notice). In the browser, add a file as a layer first and use its layer name.
+- `"folder"`: on desktop and the command line, a folder whose `.shp`, `.geojson`, `.json`,
+  `.gpkg`, `.fgb`, `.parquet`, `.geoparquet`, `.kml`, `.kmz`, `.gpx` and `.csv` files are run over
+  in alphabetical order. Subfolders and symbolic links are skipped, with a count.
+- `"outputPattern"` (or `"output_pattern"`): the name of each output layer, `"{input}_{tool}"` by
+  default, where `{input}` is the layer's name or the file's name without its extension and
+  `{tool}` the tool's id. It must include `{input}`. A name already taken gets a number (`_2`).
+  Tools that change a layer in place or select features keep their own names.
+- `"params"`: the parameters every run shares. The batch input replaces a value given there for
+  the input parameter, with a notice.
+- `"param"` (or `"batch_param"`): the parameter each input goes to; by default the tool's first
+  layer parameter, else `"input"`.
+
+One input failing doesn't stop the others. The result counts what `"succeeded"` and `"failed"`,
+names the `"outputs"` (layers or tables) and lists each failure in `"errors"`, with one notice
+for the failures. If every input fails, the batch is an error naming each input and why. What a
+reader drops or assumes for a file input (Z values, a coordinate system) is one notice per kind,
+naming the inputs, and is kept in the history and the result's `"warnings"`. Tools that write a
+file are refused. A batch is yours to run: the AI Assistant asks each time, and plugins and
+imported tasks can't run one.
+
+### Built-in tools
 
 These are the built-in tools; GeoLibre and plugin tools join them when available.
 Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available tools and their parameters):
@@ -803,7 +870,8 @@ being split there (the map, and with it the percentages and shares, takes them t
 while area_km2 takes their ground shape), how many have an edge beyond 85.05° running east or west
 (their percentages and shares follow the analysis plane, which takes such an edge straight in
 longitude and latitude, not clamped as the Web Mercator map draws it, so they and area_km2 can
-differ widely, as above), how many zones overlap no class feature and so have no rows, how many class features have no value in a sum field (they add nothing to its shares) and,
+differ widely, as above), how many zones overlap no class feature and so have no rows, how many
+class features have no value in a sum field (they add nothing to its shares) and,
 with sum fields, how many class features lie partly or wholly outside the zones. Only selected
 features are used when a layer has a selection, and the table is named `<zones>_Tabulate` unless
 `output` names it.
@@ -1144,7 +1212,11 @@ and when it started (`Run #2 (0.84 s)`, and `14:04 UTC` on the right), so a run 
 mistake shows (Undo takes a whole run back). The results show each line's result cut to a line;
 **Details…** on the run's line opens them whole in a window, as View Details in ArcGIS Pro's
 Geoprocessing History: each line folded under its command, opening to its result laid out to
-read, **Copy** for one and **Copy All** for the run, and why it stopped, if it did. Opening a
+read, **Copy** for one and **Copy All** for the run, and why it stopped, if it did. **Clear**
+empties the pane: the script, its results, the count (the next run is Run #1 again) and the
+Details window. It asks nothing: the box keeps the focus, so Ctrl+Z (⌘+Z) brings the script back;
+after a click elsewhere, Ctrl+Z undoes in the project instead, so click into the box first. It is
+off with nothing to clear, and while a run is under way. Opening a
 project (New, Open, the sample, a template, or the same one again), from the app, a script, the
 assistant or an agent, starts the pane blank: the script, its results, the count and the Details
 window go with the old project. A script that opens a project itself stays, with its results, as

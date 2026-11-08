@@ -321,7 +321,15 @@ mod file {
     fn with<T>(path: &Path, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
         let (generation, epoch, pooled) = {
             let mut all = pool().lock().unwrap_or_else(|e| e.into_inner());
-            (all.generation, all.epochs.get(path).copied().unwrap_or(0), all.connections.get_mut(path).and_then(Vec::pop))
+            // Track checked-out files too: close_unless must invalidate a handle even while no
+            // idle connection to its file remains. Bound both this record and the idle pool.
+            if all.epochs.len() >= 16 && !all.epochs.contains_key(path) {
+                all.generation = all.generation.wrapping_add(1);
+                all.connections.clear();
+                all.epochs.clear();
+            }
+            let epoch = *all.epochs.entry(path.to_path_buf()).or_default();
+            (all.generation, epoch, all.connections.get_mut(path).and_then(Vec::pop))
         };
         let conn = match pooled {
             Some(c) => c,
@@ -333,10 +341,6 @@ mod file {
         if all.generation != generation || all.epochs.get(path).copied().unwrap_or(0) != epoch {
             return r;
         }
-        // A few files are open at a time: past that many, start again rather than grow.
-        if all.connections.len() >= 16 && !all.connections.contains_key(path) {
-            all.connections.clear();
-        }
         let slot = all.connections.entry(path.to_path_buf()).or_default();
         if slot.len() < POOL {
             slot.push(conn);
@@ -347,8 +351,9 @@ mod file {
     /// Forgets the open connections to `path` (it changed on disk, or was closed).
     pub fn close(path: &Path) {
         let mut all = pool().lock().unwrap_or_else(|e| e.into_inner());
-        let epoch = all.epochs.entry(path.to_path_buf()).or_default();
-        *epoch = epoch.wrapping_add(1);
+        if let Some(epoch) = all.epochs.get_mut(path) {
+            *epoch = epoch.wrapping_add(1);
+        }
         all.connections.remove(path);
     }
 
@@ -357,6 +362,24 @@ mod file {
         let mut all = pool().lock().unwrap_or_else(|e| e.into_inner());
         all.generation = all.generation.wrapping_add(1);
         all.connections.clear();
+        all.epochs.clear();
+    }
+
+    /// Forgets the open connections to the files `keep` says no to. Windows won't move or delete a
+    /// file SQLite has open, so a file nothing reads any more mustn't stay in the pool.
+    pub fn close_unless(keep: impl Fn(&Path) -> bool) {
+        let mut all = pool().lock().unwrap_or_else(|e| e.into_inner());
+        for (path, epoch) in &mut all.epochs {
+            if !keep(path) {
+                *epoch = epoch.wrapping_add(1);
+            }
+        }
+        all.connections.retain(|path, _| keep(path));
+    }
+
+    /// Whether a connection to `path` is kept open.
+    pub fn is_open(path: &Path) -> bool {
+        pool().lock().unwrap_or_else(|e| e.into_inner()).connections.get(path).is_some_and(|open| !open.is_empty())
     }
 
     /// The metadata of the MBTiles file at `path`.
@@ -590,10 +613,46 @@ mod file {
             std::fs::remove_dir_all(root).unwrap();
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Only the files `keep` says no to lose their connections, and one left alone stays open.
+        #[test]
+        fn close_unless_leaves_the_files_it_keeps() {
+            struct Cleanup(PathBuf);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    // Also clean up if an assertion fails with the files still open.
+                    close_unless(|path| !path.starts_with(&self.0));
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let dir = std::env::temp_dir().join(format!("rustgis-mbtiles-close-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let _cleanup = Cleanup(dir.clone());
+            let (kept, gone) = (dir.join("kept.mbtiles"), dir.join("gone.mbtiles"));
+            for path in [&kept, &gone] {
+                std::fs::write(path, b"").unwrap();
+                with(path, |_| Ok(())).unwrap();
+            }
+            with(&kept, |_| {
+                with(&gone, |_| {
+                    close_unless(|path| path != gone);
+                    Ok(())
+                })
+            })
+            .unwrap();
+            assert!(is_open(&kept));
+            assert!(!is_open(&gone));
+            std::fs::remove_file(&gone).unwrap();
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use file::{close, close_all, open_path, read_info_path, tile_path};
+pub use file::{close, close_all, close_unless, is_open, open_path, read_info_path, tile_path};
 
 #[cfg(test)]
 mod tests {
