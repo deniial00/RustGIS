@@ -30,6 +30,8 @@ pub struct Reads {
 struct Asked {
     command: &'static str,
     params: Value,
+    /// Admitted when asked, including while another read runs; never recreated at start or landing.
+    ahead: Option<reads::ReadAhead>,
     /// What it reads, as its notices name it: the file, or the layer.
     what: String,
     opened: u64,
@@ -67,14 +69,36 @@ pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Valu
 
 /// [`run`], then `then` with what the command answered once it ran, here or as it lands, or why
 /// it never ran.
-pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Option<Then>) -> Result<Value, String> {
+pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then: Option<Then>) -> Result<Value, String> {
     if !app.reads_off_frame {
-        let r = app.run_now(command, p);
+        let r = app.run(command, p);
         return answered(app, then, r);
     }
     let layer = (command == "layer.loadAll")
         .then(|| app.session.layer_id(&p).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
         .flatten();
+    let notice_mark = app.session.notice_mark();
+    if layer.is_some() {
+        let id = app.session.layer_id(&p)?;
+        if p.is_null() {
+            p = json!({});
+        }
+        let Some(params) = p.as_object_mut() else {
+            let error = tl!("Load All parameters must be an object").to_string();
+            app.command_failed(command, &error, notice_mark);
+            not_run(app, then, error.clone());
+            return Err(error);
+        };
+        params.insert("layer".into(), json!(id));
+    }
+    let ahead = match reads::read_ahead(&mut app.session, command, &p) {
+        Ok(ahead) => ahead,
+        Err(error) => {
+            app.command_failed(command, &error, notice_mark);
+            not_run(app, then, error.clone());
+            return Err(error);
+        }
+    };
     // Load All asked again for a layer it is reading already.
     if let Some((instance, _)) = &layer
         // (One whose map or project went never loads it: a new request waits behind it.)
@@ -97,6 +121,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
     let asked = Asked {
         command,
         params: p,
+        ahead: Some(ahead),
         what,
         opened: app.session.opened,
         map: app.session.map().instance_id(),
@@ -204,29 +229,28 @@ fn placed(app: &RustGisApp, asked: &Asked) -> Result<Value, Gone> {
 
 /// Starts `asked`'s read with `p`, or runs it here when it reads nothing ahead (or its thread
 /// can't start).
-fn start(app: &mut RustGisApp, asked: Asked, p: Value) -> Result<Value, String> {
-    // Picked on this thread, so a bug in the picking must not take the app down: it reads here.
-    let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reads::read_ahead(&app.session, asked.command, &p)));
-    let Ok(Some(ahead)) = picked else {
-        if matches!(asked.command, "map.reloadTiles" | "map.repairTiles") {
-            let why = tl!("The archive could not be prepared for background validation. Retry the command.").to_string();
-            app.session.notify(why.clone(), true);
-            not_run(app, asked.then, why.clone());
-            return Err(why);
-        }
-        let r = app.run_now(asked.command, p);
-        return answered(app, asked.then, r);
+fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, String> {
+    let Some(ahead) = asked.ahead.take() else {
+        return complete_here(app, asked, p, Err(tl!("This read was already started").to_string()));
     };
     let name = ahead.name;
     let control = Control::stoppable();
+    if !ahead.reads() {
+        let read = ahead.run(&control);
+        return complete_here(app, asked, p, read);
+    }
     let (ctl, slot) = (control.clone(), crate::Slot::default());
     let out = slot.clone();
-    // A streamed layer's source read on the thread keeps its requests in the session's diagnostics.
+    // Retain the admitted operation if the OS cannot start its worker: the synchronous
+    // fallback must use that same owner, rather than dispatching a new native User command.
+    let held = crate::Slot::default();
+    *held.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ahead);
+    let work = held.clone();
     let diagnostics = app.session.diagnostics.capture();
     let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
         let _diagnostics = diagnostics.enter();
-        let read = ahead.run(&ctl);
-        // Filled even when its lock is poisoned, or the read would show as running forever.
+        let ahead = work.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let read = ahead.ok_or_else(|| tl!("This read was already started").to_string()).and_then(|ahead| ahead.run(&ctl));
         *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
     });
     if let Err(e) = spawned {
@@ -240,11 +264,40 @@ fn start(app: &mut RustGisApp, asked: Asked, p: Value) -> Result<Value, String> 
             return Err(why);
         }
         log::warn!("{name} reads here: its thread didn't start: {e}");
-        let r = app.run_now(asked.command, p);
-        return answered(app, asked.then, r);
+        let read = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| tl!("This read was already started").to_string())
+            .and_then(|ahead| ahead.run(&control));
+        return complete_here(app, asked, p, read);
     }
     app.reads.job = Some(ReadJob { asked, gone: None, name, control, slot });
     Ok(json!({"started": name}))
+}
+
+/// Completes the admitted read, then calls its callback with the actual outcome.
+/// A pre-dispatch failure is reported once even when a queued start discards its error.
+fn complete_here(app: &mut RustGisApp, asked: Asked, p: Value, done: Result<reads::Read, String>) -> Result<Value, String> {
+    let read = match done {
+        Ok(read) => read,
+        Err(error) => {
+            let notice_mark = app.session.notice_mark();
+            app.command_failed(asked.command, &error, notice_mark);
+            not_run(app, asked.then, error.clone());
+            return Err(error);
+        }
+    };
+    let r = app.run_read(asked.command, p, read);
+    if asked.command == "map.repairTiles"
+        && let Ok(answer) = &r
+        && let Some(index) = answer.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok())
+        && let Some(tile) = app.session.map().tiles.get(index)
+    {
+        let text = crate::i18n::fmt("Repaired {name}", &[("name", &tile.name)]);
+        app.session.notify(text, false);
+    }
+    answered(app, asked.then, r)
 }
 
 /// Runs the command a read was for once it's done (or says why it wasn't), then starts the next
@@ -291,44 +344,9 @@ pub fn land(app: &mut RustGisApp) -> bool {
                         not_run(app, asked.then, left_too.clone());
                     }
                 } else {
-                    match done {
-                        Ok(read) => {
-                            read.placed(&mut app.session);
-                            // A failure is said by the command.
-                            let r = app.run_now(job.asked.command, p);
-                            if job.asked.command == "map.repairTiles"
-                                && let Ok(answer) = &r
-                                && let Some(index) = answer.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok())
-                                && let Some(tile) = app.session.map().tiles.get(index)
-                            {
-                                let text = crate::i18n::fmt("Repaired {name}", &[("name", &tile.name)]);
-                                app.session.notify(text, false);
-                            }
-                            let _ = answered(app, job.asked.then, r);
-                            app.session.drop_read();
-                            app.map.invalidate();
-                        }
-                        // A bug in a model's or script's run on a copy of the session: it runs here,
-                        // as it would have.
-                        Err(e) if matches!(job.asked.command, "model.run" | "script.run") => {
-                            app.session.notify(
-                                crate::i18n::fmt(
-                                    "{tool} couldn't work in the background ({e}): it ran here",
-                                    &[("tool", tl_raw!(job.name)), ("e", &e)],
-                                ),
-                                false,
-                            );
-                            let r = app.run_now(job.asked.command, p);
-                            let _ = answered(app, job.asked.then, r);
-                            app.map.invalidate();
-                        }
-                        // A bug in a reader: said, and the next goes on.
-                        Err(e) => {
-                            let said = crate::i18n::fmt("{what}: {e}", &[("what", &job.asked.what), ("e", &e)]);
-                            app.session.notify(said.clone(), true);
-                            not_run(app, job.asked.then, said);
-                        }
-                    }
+                    // The engine consumes the original owner before the callback sees its result.
+                    let _ = complete_here(app, job.asked, p, done);
+                    app.map.invalidate();
                 }
             }
         }

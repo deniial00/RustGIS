@@ -148,6 +148,7 @@ fn validate_raster_sample(archive: &str, sample: &[u8]) -> Result<(), String> {
 
 /// An archive's metadata.
 pub fn info(archive: &str) -> Result<Arc<Info>, String> {
+    crate::cache::check_still(&crate::cache::current_still())?;
     check(archive)?;
     if is_upload(archive) {
         return upload(archive)
@@ -159,13 +160,17 @@ pub fn info(archive: &str) -> Result<Arc<Info>, String> {
     }
     let epoch = info_epoch(archive);
     let r = read_info(archive);
+    crate::cache::check_still(&crate::cache::current_still())?;
     remember_info(archive, &r, epoch);
     r
 }
 
-/// Keeps a completion only if no clear happened since its read started; check and insert share
-/// the same lock as the clear, so an old completion cannot repopulate the new cache.
+/// Checks the initiating context before locking, then keeps a completion only while both its
+/// metadata-clear and archive epochs remain current under their respective invalidation locks.
 fn remember_info(archive: &str, result: &Result<Arc<Info>, String>, epoch: (u64, u64)) {
+    if crate::cache::check_still(&crate::cache::current_still()).is_err() {
+        return;
+    }
     crate::cache::if_archive_current(archive, epoch.1, || {
         let mut all = infos().lock().unwrap_or_else(|e| e.into_inner());
         if EPOCH.load(Ordering::SeqCst) != epoch.0 {
@@ -207,12 +212,24 @@ fn cached_info(archive: &str) -> Option<Result<Arc<Info>, String>> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type Pending = HashMap<(String, u64), Instant>;
+
+/// The metadata workers' shared pending reads and completion signal.
+#[cfg(not(target_arch = "wasm32"))]
+fn metadata_reads() -> &'static (Mutex<Pending>, std::sync::Condvar) {
+    static LOADING: std::sync::LazyLock<(Mutex<Pending>, std::sync::Condvar)> =
+        std::sync::LazyLock::new(|| (Mutex::new(HashMap::new()), std::sync::Condvar::new()));
+    &LOADING
+}
+
 /// Metadata without file I/O on the caller: local reads run in at most eight workers. A caller
 /// may wait up to `timeout`; otherwise `None` means pending. Completion wakes the map. Uploads
 /// are already in memory. At capacity a read remains pending until a later poll can start it.
 /// A read still pending after 30 seconds reports an error. A stalled OS read keeps its worker
 /// slot until it answers; those slots are never recycled into more potentially blocked threads.
 pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>, String> {
+    crate::cache::check_still(&crate::cache::current_still())?;
     check(archive)?;
     if is_upload(archive) {
         return info(archive).map(Some);
@@ -224,11 +241,7 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use std::sync::Condvar;
-        type Pending = HashMap<(String, u64), Instant>;
-        static LOADING: std::sync::LazyLock<(Mutex<Pending>, Condvar)> =
-            std::sync::LazyLock::new(|| (Mutex::new(HashMap::new()), Condvar::new()));
-        let (pending, ready) = &*LOADING;
+        let (pending, ready) = metadata_reads();
         let epoch = info_epoch(archive);
         let key = (archive.to_string(), epoch.1);
         let mut all = pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -247,9 +260,12 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
             all.insert(key.clone(), Instant::now());
             let address = archive.to_string();
             let worker_key = key.clone();
+            let still = crate::cache::current_still();
             let spawned = std::thread::Builder::new().name("rustgis-mbtiles-info".into()).spawn(move || {
-                let result = read_info(&address);
-                remember_info(&address, &result, epoch);
+                crate::cache::with_optional_still(still, || {
+                    let result = crate::cache::check_still(&crate::cache::current_still()).and_then(|_| read_info(&address));
+                    remember_info(&address, &result, epoch);
+                });
                 pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&worker_key);
                 ready.notify_all();
                 crate::cache::notify();
@@ -264,6 +280,9 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
             let (reads, _) = ready.wait_timeout_while(all, wait, |all| all.contains_key(&key)).unwrap_or_else(|e| e.into_inner());
             all = reads;
         }
+        drop(all);
+        crate::cache::check_still(&crate::cache::current_still())?;
+        let all = pending.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(result) = cached_info(archive) {
             return result.map(Some);
         }
@@ -330,6 +349,85 @@ pub(crate) fn read_local(url: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    /// A reentrant authority check may clear metadata; the old epoch must still reject its result.
+    #[test]
+    fn metadata_completion_checks_still_outside_the_cache_lock() {
+        let _turn = crate::cache::turn();
+        let available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = available.clone();
+        let still: crate::cache::Still = Arc::new(move || {
+            let free = infos().try_lock().is_ok();
+            seen.store(free, Ordering::SeqCst);
+            if free {
+                forget();
+            }
+            true
+        });
+        let address = "/reentrant-cache-completion.mbtiles";
+        let epoch = info_epoch(address);
+        crate::cache::with_still(still, || remember_info(address, &Err("old completion".into()), epoch));
+        assert!(available.load(Ordering::SeqCst), "Still ran with the metadata cache locked");
+        assert!(cached_info(address).is_none(), "a clear during the predicate invalidates the earlier completion");
+    }
+
+    /// An authority predicate may reload this source before the archive-epoch publication gate.
+    #[test]
+    fn metadata_completion_checks_still_outside_the_archive_lock() {
+        let _turn = crate::cache::turn();
+        let address = "/reentrant-archive-completion.mbtiles";
+        let epoch = info_epoch(address);
+        let still: crate::cache::Still = Arc::new(move || {
+            crate::cache::reload_archive(address);
+            true
+        });
+        crate::cache::with_still(still, || remember_info(address, &Err("old completion".into()), epoch));
+        assert!(cached_info(address).is_none(), "a reload during the predicate invalidates the earlier completion");
+    }
+
+    /// Both preflight and post-wait authority checks permit metadata reentry without a lock cycle.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn metadata_ready_checks_still_outside_the_pending_lock() {
+        let _turn = crate::cache::turn();
+        let origin = std::thread::current().id();
+        let available = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (free, count) = (available.clone(), checks.clone());
+        let still: crate::cache::Still = Arc::new(move || {
+            if std::thread::current().id() != origin {
+                return false;
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            free.fetch_and(metadata_reads().0.try_lock().is_ok(), Ordering::SeqCst);
+            true
+        });
+        let _ = crate::cache::with_still(still, || info_ready("/reentrant-pending-read.mbtiles", Duration::ZERO));
+        assert!(checks.load(Ordering::SeqCst) >= 2, "the post-wait check must execute");
+        assert!(available.load(Ordering::SeqCst), "Still ran with pending metadata reads locked");
+    }
+
+    /// The metadata worker inherits its initiating transport context instead of reading at root.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn metadata_worker_keeps_still_and_drops_revoked_completion() {
+        let _turn = crate::cache::turn();
+        let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = checks.clone();
+        let still: crate::cache::Still = Arc::new(move || {
+            if std::thread::current().name() == Some("rustgis-mbtiles-info") {
+                worker.fetch_add(1, Ordering::SeqCst);
+                return false;
+            }
+            true
+        });
+        let address = "/revoked-metadata-worker.mbtiles";
+        let got = crate::cache::with_still(still, || info_ready(address, Duration::from_secs(10)));
+        assert!(matches!(got, Ok(None)), "revoked work must not populate metadata");
+        assert!(checks.load(Ordering::SeqCst) > 0, "the real worker checked the inherited context");
+        assert!(cached_info(address).is_none());
+        assert!(crate::cache::current_still().is_none());
+    }
+
     #[test]
     fn cleared_metadata_rejects_an_older_completion() {
         let _turn = crate::cache::turn();
@@ -371,16 +469,21 @@ mod tests {
     #[test]
     fn stalled_metadata_reports_errors_without_recycling_worker_slots() {
         let old = Instant::now().checked_sub(READ_DEADLINE + Duration::from_secs(1)).expect("an earlier instant");
-        let mut reads: HashMap<String, Instant> = (0..8).map(|i| (format!("/{i}.mbtiles"), Instant::now())).collect();
-        assert!(!metadata_stalled(&reads, "/next.mbtiles"), "busy workers initially remain pending");
+        let mut reads: Pending = (0..8).map(|i| ((format!("/{i}.mbtiles"), 0), Instant::now())).collect();
+        let next = ("/next.mbtiles".into(), 0);
+        let stalled = ("/0.mbtiles".into(), 0);
+        let reloaded = ("/0.mbtiles".into(), 1);
+        let healthy = ("/1.mbtiles".into(), 0);
+        assert!(!metadata_stalled(&reads, &next), "busy workers initially remain pending");
         assert!(metadata_wait(Instant::now(), Duration::from_secs(60)) <= READ_DEADLINE);
         assert_eq!(metadata_wait(old, Duration::from_secs(60)), Duration::ZERO);
-        reads.insert("/0.mbtiles".into(), old);
-        assert!(metadata_stalled(&reads, "/0.mbtiles"), "the stalled read reports its deadline");
-        assert!(metadata_stalled(&reads, "/next.mbtiles"), "a saturated stalled pool is an error, not endless loading");
-        assert!(!metadata_stalled(&reads, "/1.mbtiles"), "a healthy admitted read retains its own deadline");
-        reads.remove("/0.mbtiles");
-        assert!(!metadata_stalled(&reads, "/next.mbtiles"), "capacity can recover when the OS returns");
+        reads.insert(stalled.clone(), old);
+        assert!(metadata_stalled(&reads, &stalled), "the stalled read reports its deadline");
+        assert!(metadata_stalled(&reads, &next), "a saturated stalled pool is an error, not endless loading");
+        assert!(metadata_stalled(&reads, &reloaded), "a reload cannot recycle a stalled generation's worker slot");
+        assert!(!metadata_stalled(&reads, &healthy), "a healthy admitted read retains its own deadline");
+        reads.remove(&stalled);
+        assert!(!metadata_stalled(&reads, &next), "capacity can recover when the OS returns");
     }
 
     #[test]

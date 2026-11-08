@@ -8,7 +8,9 @@
 //! too, where the server must allow range requests (and CORS).
 //!
 //! Archives are hostile input: offsets, lengths and directory sizes are checked against the
-//! file and bounded, and nesting is limited.
+//! file and bounded, and nesting is limited. Metadata must be readable, valid JSON objects.
+//! Shared reads retain their initiating request lifetime; retired contexts cannot publish
+//! archive information or directories, and reload epochs reject pre-reload completions.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,7 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::Value;
 use web_time::{Duration, Instant};
 
-use crate::cache::{Done, MAX_BYTES};
+use crate::cache::{Done, MAX_BYTES, caller_callback};
 
 /// The scheme of a tile address read from a PMTiles archive.
 pub const SCHEME: &str = "pmtiles:";
@@ -433,21 +435,30 @@ pub(crate) fn reload_archive(archive: &str) -> impl Sized {
 /// An archive's header and metadata: `Ok(None)` while they are read (the map draws again once
 /// they arrive).
 pub fn info(archive: &str) -> Result<Option<Arc<Info>>, String> {
+    crate::cache::check_still(&crate::cache::current_still())?;
     crate::logins::check(archive).map_err(str::to_string)?;
     let epoch = crate::cache::archive_epoch(archive);
     let result = crate::cache::if_archive_current(archive, epoch, || {
         let mut all = archives().lock().unwrap_or_else(|e| e.into_inner());
         match all.get(archive) {
-            Some(State::Ready(i)) => return (Ok(Some(i.clone())), false),
-            Some(State::Loading(_)) => return (Ok(None), false),
-            Some(State::Failed(e, at)) if at.elapsed() < RETRY => return (Err(e.clone()), false),
+            Some(State::Ready(i)) => return (Ok(Some(i.clone())), false, None),
+            Some(State::Loading(_)) => return (Ok(None), false, None),
+            Some(State::Failed(e, at)) => {
+                let wait = crate::cache::retry_wait(e, RETRY);
+                if at.elapsed() < wait {
+                    return (Err(e.clone()), false, Some(*at + wait));
+                }
+            }
             _ => {}
         }
         all.insert(archive.to_string(), State::Loading(Vec::new()));
-        (Ok(None), true)
+        (Ok(None), true, None)
     });
     match result {
-        Some((result, start)) => {
+        Some((result, start, retry_at)) => {
+            if let Some(at) = retry_at {
+                crate::cache::notify_at(at);
+            }
             if start {
                 load(archive.to_string(), epoch);
             }
@@ -468,6 +479,11 @@ pub fn info_blocking(archive: &str, timeout: std::time::Duration) -> Result<Arc<
 
 /// Calls `f` with the archive's info, once it is read.
 fn with_info(archive: &str, f: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>) {
+    let f = caller_callback(f);
+    if let Err(e) = crate::cache::check_still(&crate::cache::current_still()) {
+        f(Err(e));
+        return;
+    }
     if let Err(e) = crate::logins::check(archive) {
         f(Err(e.to_string()));
         return;
@@ -476,19 +492,24 @@ fn with_info(archive: &str, f: Box<dyn FnOnce(Result<Arc<Info>, String>) + Send>
     let result = crate::cache::if_archive_current(archive, epoch, || {
         let mut all = archives().lock().unwrap_or_else(|e| e.into_inner());
         match all.get_mut(archive) {
-            Some(State::Ready(i)) => (Some((f, Ok(i.clone()))), false),
+            Some(State::Ready(i)) => (Some((f, Ok(i.clone()))), false, None),
             Some(State::Loading(waiting)) => {
                 waiting.push(f);
-                (None, false)
+                (None, false, None)
             }
-            Some(State::Failed(e, at)) if at.elapsed() < RETRY => (Some((f, Err(e.clone()))), false),
+            Some(State::Failed(e, at)) if at.elapsed() < crate::cache::retry_wait(e, RETRY) => {
+                (Some((f, Err(e.clone()))), false, Some(*at + crate::cache::retry_wait(e, RETRY)))
+            }
             _ => {
                 all.insert(archive.to_string(), State::Loading(vec![f]));
-                (None, true)
+                (None, true, None)
             }
         }
     });
-    if let Some((answer, start)) = result {
+    if let Some((answer, start, retry_at)) = result {
+        if let Some(at) = retry_at {
+            crate::cache::notify_at(at);
+        }
         if let Some((f, result)) = answer {
             f(result);
         }
@@ -531,27 +552,42 @@ fn load(archive: String, epoch: u64) {
     );
 }
 
+/// Settles archive waiters with live results, forgetting dropped or retired reads.
 fn finish(archive: &str, r: Result<Info, String>, epoch: u64) {
+    let still = crate::cache::current_still();
+    let r = crate::cache::check_still(&still).and(r);
     let r = crate::logins::check(archive)
         .map_err(str::to_string)
         .and(r)
         .map(Arc::new)
-        .map_err(|e| if rustgis_data::login_address::is_wrapper(archive) { crate::logins::scrub(&e) } else { e });
-    let waiting = crate::cache::if_archive_current(archive, epoch, || {
+        .map_err(|e| if rustgis_data::login_address::is_wrapper(archive) { crate::logins::scrub_error(&e) } else { e });
+    let transient = r.as_ref().err().is_some_and(|e| !crate::cache::keep_failure(e, &still));
+    let (waiting, retry_at) = crate::cache::if_archive_current(archive, epoch, || {
         let mut all = archives().lock().unwrap_or_else(|e| e.into_inner());
+        let mut retry_at = None;
         let old = match &r {
             Ok(i) => all.insert(archive.to_string(), State::Ready(i.clone())),
-            // A read the busy queue dropped isn't the archive's fault: forgotten, so the next
-            // draw reads it again, rather than kept as a failure.
-            Err(e) if e == crate::cache::DROPPED => all.remove(archive),
-            Err(e) => all.insert(archive.to_string(), State::Failed(e.clone(), Instant::now())),
+            // A dropped or retired owner's read isn't the archive's fault: the next caller
+            // starts its own read instead of inheriting a shared retry delay.
+            Err(_) if transient => all.remove(archive),
+            Err(e) => {
+                // Read again once its wait is over: the map draws again then (a 429 or 503 says
+                // when).
+                let at = Instant::now();
+                retry_at = Some(at + crate::cache::retry_wait(e, RETRY));
+                all.insert(archive.to_string(), State::Failed(e.clone(), at))
+            }
         };
-        match old {
+        let waiting = match old {
             Some(State::Loading(w)) => w,
             _ => Vec::new(),
-        }
+        };
+        (waiting, retry_at)
     })
     .unwrap_or_default();
+    if let Some(at) = retry_at {
+        crate::cache::notify_at(at);
+    }
     for w in waiting {
         w(r.clone());
     }
@@ -561,6 +597,10 @@ fn finish(archive: &str, r: Result<Info, String>, epoch: u64) {
 /// Fetches a tile address (`pmtiles:z/x/y@archive`): its bytes, or none for a tile the archive
 /// doesn't have.
 pub(crate) fn fetch(url: &str, done: Done) {
+    if let Err(e) = crate::cache::check_still(&crate::cache::current_still()) {
+        done(Err(e));
+        return;
+    }
     let Some((z, x, y, archive)) = parse_url(url) else {
         done(Err(format!("{url}: not a PMTiles tile address")));
         return;
@@ -592,6 +632,10 @@ pub(crate) fn fetch(url: &str, done: Done) {
 
 /// Looks `id` up in a directory, reading leaf directories as needed, then reads the tile.
 fn find(archive: String, info: Arc<Info>, id: u64, dir: Arc<Vec<Entry>>, depth: usize, done: Done) {
+    if let Err(e) = crate::cache::check_still(&crate::cache::current_still()) {
+        done(Err(e));
+        return;
+    }
     let epoch = info.epoch;
     if crate::cache::archive_epoch(&archive) != epoch {
         done(Err(crate::cache::DROPPED.into()));
@@ -631,6 +675,7 @@ fn find(archive: String, info: Arc<Info>, id: u64, dir: Arc<Vec<Entry>>, depth: 
             Err(e) => done(Err(e)),
         })
     };
+    let next = caller_callback(next);
     // One read per leaf: tiles needing a leaf already on its way wait for it.
     let admitted = crate::cache::if_archive_current(&archive, epoch, || {
         let mut l = leaves().lock().unwrap_or_else(|e| e.into_inner());
@@ -677,6 +722,7 @@ fn find(archive: String, info: Arc<Info>, id: u64, dir: Arc<Vec<Entry>>, depth: 
 }
 
 fn finish_leaf(key: (String, u64), leaf: Result<Arc<Vec<Entry>>, String>, epoch: u64) {
+    let leaf = crate::cache::check_still(&crate::cache::current_still()).and(leaf);
     let waiting = crate::cache::if_archive_current(&key.0, epoch, || {
         let mut all = leaves().lock().unwrap_or_else(|e| e.into_inner());
         let old = match &leaf {
@@ -715,6 +761,10 @@ fn parse_url(url: &str) -> Option<(u8, u32, u32, String)> {
 
 /// Reads `len` bytes at `at` of an archive.
 fn read(archive: &str, at: u64, len: u64, done: Done) {
+    if let Err(e) = crate::cache::check_still(&crate::cache::current_still()) {
+        done(Err(e));
+        return;
+    }
     if len == 0 {
         done(Ok(Vec::new()));
         return;
@@ -1035,6 +1085,180 @@ fn gunzip(b: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn retired_context_cannot_start_or_join_archive_reads() {
+        let _turn = crate::cache::turn();
+        let url = "https://retired-pmtiles-initiation.invalid/archive.pmtiles";
+        let bytes = archive(&[(0, 0, 0, b"tile".to_vec())], 1, false, "{}");
+        let (ready, _, _) = parse_head(&bytes).unwrap();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent = asked.clone();
+        crate::cache::set_fetcher(move |_, done| {
+            sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            done(Err("unexpected range".into()));
+        });
+        for state in [None, Some(State::Loading(Vec::new())), Some(State::Ready(Arc::new(ready)))] {
+            if let Some(state) = state {
+                archives().lock().unwrap().insert(url.into(), state);
+            }
+            crate::cache::with_still(Arc::new(|| false), || {
+                assert!(info(url).is_err());
+                let (tx, rx) = std::sync::mpsc::channel();
+                with_info(url, Box::new(move |result| tx.send(result).unwrap()));
+                assert!(rx.recv().unwrap().is_err());
+                let (tx, rx) = std::sync::mpsc::channel();
+                fetch(&format!("pmtiles:0/0/0@{url}"), Box::new(move |result| tx.send(result).unwrap()));
+                assert!(rx.recv().unwrap().is_err());
+            });
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+        forget_archive(url);
+    }
+
+    /// Revoked metadata/directory reads and dropped metadata cannot become cached successes.
+    /// Ordinary metadata failures remain failures; a fresh live read restores the real style.
+    #[test]
+    fn retired_metadata_does_not_become_ready_archive_info() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let _turn = crate::cache::turn();
+        let held = Arc::new(Mutex::new(Vec::<(String, Done)>::new()));
+        let hold = held.clone();
+        crate::cache::set_fetcher(move |url, done| hold.lock().unwrap().push((url, done)));
+        let bytes = archive(&[(0, 0, 0, Vec::new())], 1, false, r#"{"vector_layers":[{"id":"roads"}],"attribution":"Test"}"#);
+        let answer = |url: String, done: Done| {
+            let (_, range) = crate::cache::split_range(&url);
+            let (a, b) = range.unwrap();
+            done(Ok(bytes[a as usize..((b + 1) as usize).min(bytes.len())].to_vec()));
+        };
+        let mut failures = Vec::new();
+        for revoke in [false, true] {
+            for (case, error) in [None, Some("HTTP 503"), Some(crate::cache::DROPPED)].into_iter().enumerate() {
+                let url = format!("https://retired-metadata.invalid/{revoke}-{case}.pmtiles");
+                let live = Arc::new(AtomicBool::new(true));
+                let flag = live.clone();
+                assert!(crate::cache::with_still(Arc::new(move || flag.load(SeqCst)), || info(&url)).unwrap().is_none());
+                let (asked, done) = held.lock().unwrap().pop().unwrap();
+                answer(asked, done);
+                assert_eq!(held.lock().unwrap().len(), 1, "metadata is a separate real range read");
+                live.store(!revoke, SeqCst);
+                let (asked, done) = held.lock().unwrap().pop().unwrap();
+                if let Some(error) = error {
+                    done(Err(error.into()))
+                } else {
+                    answer(asked, done)
+                }
+                let retry = revoke || error == Some(crate::cache::DROPPED);
+                if retry {
+                    if archives().lock().unwrap().contains_key(&url) {
+                        failures.push(format!("retired/dropped metadata cached with revoke={revoke}, error={error:?}"));
+                        archives().lock().unwrap().remove(&url);
+                    }
+                    assert!(info(&url).unwrap().is_none());
+                    for _ in 0..2 {
+                        let (asked, done) = held.lock().unwrap().pop().unwrap();
+                        answer(asked, done);
+                    }
+                }
+                if let (false, Some(error)) = (retry, error) {
+                    assert_eq!(info(&url).unwrap_err(), error, "a live metadata error cannot become ready information");
+                } else {
+                    let got = info(&url).unwrap().unwrap();
+                    assert_eq!(got.vector_layers(), vec!["roads"]);
+                    assert_eq!(got.attribution(), "Test");
+                }
+                assert!(held.lock().unwrap().is_empty());
+            }
+        }
+        // A ready header can start a separate directory read. Revocation during that read
+        // must not leave old directory bytes for another caller, even though its tile fails.
+        let bytes = archive(&[(0, 0, 0, b"tile".to_vec())], 1, true, "{}");
+        let answer = |url: String, done: Done| {
+            let (_, range) = crate::cache::split_range(&url);
+            let (a, b) = range.unwrap();
+            done(Ok(bytes[a as usize..((b + 1) as usize).min(bytes.len())].to_vec()));
+        };
+        let url = "https://retired-metadata.invalid/directory.pmtiles";
+        assert!(info(url).unwrap().is_none());
+        for _ in 0..2 {
+            let (asked, done) = held.lock().unwrap().pop().unwrap();
+            answer(asked, done);
+        }
+        let live = Arc::new(AtomicBool::new(true));
+        let flag = live.clone();
+        let (done, result) = std::sync::mpsc::channel();
+        let tile = format!("pmtiles:0/0/0@{url}");
+        crate::cache::with_still(Arc::new(move || flag.load(SeqCst)), || fetch(&tile, Box::new(move |r| done.send(r).unwrap())));
+        assert_eq!(held.lock().unwrap().len(), 1);
+        live.store(false, SeqCst);
+        let (asked, done) = held.lock().unwrap().pop().unwrap();
+        answer(asked, done);
+        assert!(result.recv().unwrap().is_err());
+        if leaves().lock().unwrap().keys().any(|(a, _)| a == url) {
+            failures.push("a retired reader cached a successful leaf directory".into());
+            forget_archive(url);
+        }
+        let (done, result) = std::sync::mpsc::channel();
+        fetch(&tile, Box::new(move |r| done.send(r).unwrap()));
+        for _ in 0..4 {
+            let next = held.lock().unwrap().pop();
+            let Some((asked, done)) = next else { break };
+            answer(asked, done);
+        }
+        assert_eq!(result.recv().unwrap().unwrap(), b"tile");
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// A metadata or directory joiner retains its own lifetime before starting another range;
+    /// revoking it does not stop the independent live loader or its tile.
+    #[test]
+    fn shared_archive_waiters_keep_their_own_lifetime() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let _turn = crate::cache::turn();
+        let bytes = archive(&[(0, 0, 0, b"tile".to_vec())], 1, true, "{}");
+        let held = Arc::new(Mutex::new(Vec::<(String, Done)>::new()));
+        let hold = held.clone();
+        crate::cache::set_fetcher(move |url, done| hold.lock().unwrap().push((url, done)));
+        let drain = || {
+            let mut sent = 0;
+            loop {
+                let pending = std::mem::take(&mut *held.lock().unwrap());
+                if pending.is_empty() {
+                    return sent;
+                }
+                for (url, done) in pending {
+                    sent += 1;
+                    assert!(sent <= 8, "bounded directory fixture");
+                    let (_, range) = crate::cache::split_range(&url);
+                    let (a, b) = range.unwrap();
+                    done(Ok(bytes[a as usize..((b + 1) as usize).min(bytes.len())].to_vec()));
+                }
+            }
+        };
+        let mut failures = Vec::new();
+        for join_leaf in [false, true] {
+            let url = format!("https://shared-pmtiles.invalid/{join_leaf}.pmtiles");
+            if join_leaf {
+                assert!(info(&url).unwrap().is_none());
+                assert_eq!(drain(), 2);
+            }
+            let tile = format!("pmtiles:0/0/0@{url}");
+            let (first, first_result) = std::sync::mpsc::channel();
+            fetch(&tile, Box::new(move |r| first.send(r).unwrap()));
+            let live = Arc::new(AtomicBool::new(true));
+            let flag = live.clone();
+            let (done, result) = std::sync::mpsc::channel();
+            crate::cache::with_still(Arc::new(move || flag.load(SeqCst)), || fetch(&tile, Box::new(move |r| done.send(r).unwrap())));
+            assert_eq!(held.lock().unwrap().len(), 1, "the joiner shares the pending read");
+            live.store(false, SeqCst);
+            let sent = drain();
+            assert_eq!(first_result.recv().unwrap().unwrap(), b"tile");
+            if result.recv().unwrap().is_ok() || sent != if join_leaf { 2 } else { 4 } {
+                failures.push(format!("join_leaf={join_leaf}: revoked joiner succeeded or sent extra ranges ({sent})"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
 
     #[test]
     fn reloaded_archive_rejects_old_metadata_and_leaf_answers() {
@@ -1387,6 +1611,7 @@ pub(crate) mod tests {
 
     #[test]
     fn written_archives_read_back() {
+        let _turn = crate::cache::turn();
         let dir = std::env::temp_dir().join(format!("rustgis-pmtiles-write-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let new = |tile_type| NewArchive {
@@ -1435,6 +1660,7 @@ pub(crate) mod tests {
 
     #[test]
     fn reads_tiles_from_root_and_leaf_directories() {
+        let _turn = crate::cache::turn();
         let dir = std::env::temp_dir().join(format!("rustgis-pmtiles-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let tiles = vec![(0u8, 0u32, 0u32, b"zero".to_vec()), (1, 1, 0, b"one-one-zero".to_vec()), (2, 3, 3, b"two".to_vec())];

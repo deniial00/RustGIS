@@ -456,11 +456,14 @@ fn prepared_archive_validation_does_not_evict_or_overwrite_changed_settings() {
     let old_pixels = decoded(&tile);
     write_archive(&path, [0, 255, 0, 255], "After");
     let control = rustgis_engine::analysis::control::Control::stoppable();
-    let read = rustgis_engine::cmd::reads::read_ahead(&s, "map.reloadTiles", &json!({"index":0})).unwrap().run(&control).unwrap();
+    let read = rustgis_engine::cmd::reads::read_ahead(&mut s, "map.reloadTiles", &json!({"index":0})).unwrap().run(&control).unwrap();
     assert!(Arc::ptr_eq(&decoded(&tile), &old_pixels), "validation alone must not invalidate");
     s.run("map.setTiles", &json!({"index":0,"opacity":0.4})).unwrap();
-    read.placed(&mut s);
-    rejected(&mut s, json!({"index":0}), "settings changed");
+    let before = s.map().tiles.clone();
+    let undo = s.undo_depth();
+    assert!(rustgis_engine::cmd::reads::read_land(&mut s, read).is_err());
+    assert_eq!(s.map().tiles, before);
+    assert_eq!(s.undo_depth(), undo);
     assert_eq!(s.map().tiles[0].opacity, 0.4);
     assert!(Arc::ptr_eq(&decoded(&tile), &old_pixels));
     s.run("map.reloadTiles", &json!({"index":0})).unwrap();

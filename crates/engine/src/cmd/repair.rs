@@ -7,11 +7,11 @@ use serde_json::json;
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("layer.repairSource", "Repair Data Source", "Data › Data Source", repair_source).params(
+        C::new("layer.repairSource", "Repair Data Source", "Data › Data Source", repair_source).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"layer"?: name|id (default: the active layer), "path": "the file or folder (a Zarr store, a File Geodatabase) the layer's data moved to", "table"?: "the dataset in a GeoPackage, GDAL or DuckDB file, or a raster's subdataset (default: the one the layer reads now)"}"#),
-        C::new("map.repairTiles", "Repair Tile Archive", "Layers", repair_tiles).params(
+        C::new("map.repairTiles", "Repair Tile Archive", "Layers", repair_tiles).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id, "path": "the .pmtiles or .mbtiles file the archive moved to"}"#),
-        C::new("map.reloadTiles", "Reload Data", "Layers", reload_tiles).params(
+        C::new("map.reloadTiles", "Reload Data", "Layers", reload_tiles).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"name": text | "index": number (0 = top) | "id": catalog id} (give one selector) — rereads a local PMTiles or MBTiles archive at its linked path, keeping its presentation; undo cannot restore overwritten file contents"#),
     ]
 }
@@ -178,7 +178,7 @@ struct ReadArchive {
 
 /// Fresh validation for the desktop's single read worker; nothing is installed or invalidated.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn archive_ahead(s: &Session, command: &str, p: &Value) -> super::reads::ReadAhead {
+pub(crate) fn archive_ahead(s: &Session, command: &str, p: &Value) -> super::reads::ReadWork {
     let request = (|| {
         let i = super::tiles::find(s, p)?.ok_or("name, index or id is required")?;
         let t = s.map().tiles.get(i).ok_or("the tile layer no longer exists")?;
