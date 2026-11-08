@@ -879,6 +879,7 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     assert_eq!(first_point(&io::read_path(&cached).unwrap().0), Coord::new(2.0, 48.0), "the reusable cache really is stale");
     let mut reopened = session();
     reopened.run("project.open", &json!({"path": project})).unwrap();
+    assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("showing the saved conversion")));
     assert_eq!(reopened.map().layers.len(), 1);
     assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
     let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
@@ -887,8 +888,8 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     assert!(restored.info().unwrap().notes.iter().any(|note| note.contains("Z or M coordinates")));
     drop(reopened);
 
-    // Explicit open retains runtime settings and the read generation. If the provenance has
-    // disappeared, an existing converted file remains a usable fallback.
+    // Explicit open retains runtime settings and the read generation. A disposable converted
+    // file must never become a fallback when its provenance disappears.
     let mut restored: SourceLayer = serde_json::from_value(serialized).unwrap();
     restored.limit = 17;
     restored.byte_budget = 12345;
@@ -898,10 +899,10 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     let restored_path = restored.path.clone();
     let restored_origin = restored.gdal.clone();
     std::fs::remove_file(&path).unwrap();
-    restored.open().unwrap();
+    let error = restored.open().unwrap_err();
     assert_eq!(restored.path, restored_path);
     assert_eq!(restored.gdal, restored_origin);
-    assert!(restored.error.is_none());
+    assert_eq!(restored.error.as_deref(), Some(error.as_str()));
     assert_eq!(first_point(&restored.read_all().unwrap().0), Coord::new(8.0, 48.0));
 }
 
@@ -952,6 +953,7 @@ fn saved_duckdb_conversion_restores_fresh_selected_family_despite_an_unchanged_s
     assert_eq!(first_point(&io::read_path(&cached.parts[0].path).unwrap().0), Coord::new(99.0, 48.0), "the reusable cache really is stale");
     let mut reopened = session();
     reopened.run("project.open", &json!({"path": project})).unwrap();
+    assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("showing the saved conversion")));
     assert_eq!(reopened.map().layers.len(), 1);
     let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
     assert_eq!(restored.duckdb, origin);
@@ -966,7 +968,23 @@ fn abandoned_reload_workspace(live: &Path) -> std::path::PathBuf {
     std::fs::create_dir(&abandoned).unwrap();
     std::fs::write(abandoned.join("owner.lock"), []).unwrap();
     std::fs::write(abandoned.join("leftover"), b"crash-abandoned conversion").unwrap();
+    age_reload_directory(&abandoned);
     abandoned
+}
+
+fn age_reload_directory(path: &Path) {
+    let mut options = std::fs::File::options();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.access_mode(0x0100).custom_flags(0x0200_0000); // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS.
+    }
+    options
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(61)))
+        .unwrap();
 }
 
 fn reload_duckdb_sql(path: &Path, statement: &str) {
@@ -1011,7 +1029,7 @@ fn duckdb_reload_reports_other_family_rows_only_for_mixed_tables() {
 }
 
 #[test]
-fn duckdb_reload_installs_empty_points_and_lines_when_only_the_other_family_remains() {
+fn duckdb_repair_refuses_other_family_only_tables_while_reload_installs_an_empty_branch() {
     use rustgis_engine::data::source::{Family, duckdb};
     if !duckdb::available() {
         return;
@@ -1036,6 +1054,16 @@ fn duckdb_reload_installs_empty_points_and_lines_when_only_the_other_family_rema
             .unwrap()
             .id;
         reload_duckdb_sql(&path, &format!("DELETE FROM survey WHERE ST_Dimension(geom)={dimension}"));
+        let prior = s.map().layer(id).unwrap().source.as_ref().unwrap().clone();
+        let before = serde_json::to_value(s.map().layer(id).unwrap()).unwrap();
+        let mark = s.notice_mark();
+        let error = s.run("layer.repairSource", &json!({"layer": id, "path": path, "table": "survey"})).unwrap_err();
+        assert!(error.contains(&format!("replacement table contains no {}", family.label())), "{error}");
+        assert!(error.contains(&format!("DuckDB: {left_out} rows of another geometry type were left out")), "{error}");
+        assert_eq!(serde_json::to_value(s.map().layer(id).unwrap()).unwrap(), before);
+        assert!(s.map().layer(id).unwrap().source.as_ref().unwrap().same_opening(&prior));
+        assert!(s.notices_since(mark).iter().any(|n| n.error && n.text.contains(&error)));
+        assert!(s.notices_since(mark).iter().all(|n| n.error), "refused repair must not report installation");
         let mark = s.notice_mark();
         s.run("layer.reloadData", &json!({"layer": id})).unwrap();
         let notices = s.notices_since(mark);
@@ -1051,7 +1079,7 @@ fn duckdb_reload_installs_empty_points_and_lines_when_only_the_other_family_rema
 }
 
 #[test]
-fn saved_conversion_outside_current_cache_reopens_when_original_source_is_missing() {
+fn saved_durable_conversion_outside_current_cache_reopens_with_one_original_source_failure_notice() {
     use rustgis_engine::{
         data::source::Family,
         map::source::{DuckdbOrigin, GdalOrigin, SourceLayer},
@@ -1087,18 +1115,72 @@ fn saved_conversion_outside_current_cache_reopens_when_original_source_is_missin
         assert!(converted.exists());
         assert!(!original.exists());
         let mut reopened = session();
+        let mark = reopened.notice_mark();
         reopened.run("project.open", &json!({"path": project})).unwrap();
         assert_eq!(reopened.map().layers.len(), 1);
         let source = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
         assert!(source.error.is_none(), "{:?}", source.error);
         assert_eq!(source.path.as_deref(), converted.to_str());
         assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
+        let notices = reopened.notices_since(mark);
+        let fallbacks = notices.iter().filter(|n| n.text.contains("showing the saved conversion")).collect::<Vec<_>>();
+        assert_eq!(fallbacks.len(), 1, "{notices:?}");
+        assert!(fallbacks[0].text.contains(original.to_str().unwrap()), "{}", fallbacks[0].text);
+        assert!(fallbacks[0].text.contains("failed ("), "{}", fallbacks[0].text);
+        assert!(!fallbacks[0].error, "the durable fallback opened successfully, but warns about stale data");
         drop(reopened);
         std::fs::remove_file(&converted).unwrap();
         let mut missing = session();
         missing.run("project.open", &json!({"path": project})).unwrap();
         let source = missing.map().layer(id).unwrap().source.as_ref().unwrap();
         assert!(source.error.is_some(), "losing both provenance and conversion remains an error");
+    }
+}
+
+#[test]
+fn saved_conversion_cannot_borrow_another_sessions_reload_workspace_when_original_is_missing() {
+    use rustgis_engine::{
+        data::source::Family,
+        map::source::{DuckdbOrigin, GdalOrigin, SourceLayer},
+    };
+    for duckdb in [false, true] {
+        let f = Fixture::new("restore-borrowed-conversion");
+        let original = f.file(if duckdb { "removed.duckdb" } else { "removed.gdb" });
+        let workspace = f.file("reload-another-session");
+        std::fs::create_dir(&workspace).unwrap();
+        let converted = workspace.join(if duckdb { "converted.parquet" } else { "converted.fgb" });
+        io::write_path(&points(&["rank"], Some(8.0)), &converted).unwrap();
+        let handle = rustgis_engine::data::source::open_path(&converted, None).unwrap();
+        let mut source = SourceLayer::from_path(converted.to_str().unwrap(), None, handle);
+        if duckdb {
+            source.duckdb = Some(DuckdbOrigin {
+                sql: None,
+                database: Some(original.to_str().unwrap().into()),
+                table: Some("survey".into()),
+                crs: None,
+                family: Family::Points,
+            });
+        } else {
+            source.gdal = Some(GdalOrigin {
+                path: original.to_str().unwrap().into(),
+                layer: "survey".into(),
+                family: Some(Family::Points),
+                crs: None,
+            });
+        }
+        let mut owner = session();
+        let id = owner.map_mut().add_streamed("Borrowed conversion", source);
+        let project = f.file("survey.rgis");
+        owner.run("project.saveAs", &json!({"path": project})).unwrap();
+        let mut reopened = session();
+        reopened.run("project.open", &json!({"path": project})).unwrap();
+        assert!(converted.exists(), "the other session's conversion is still readable");
+        assert_eq!(first_point(&loaded(&owner, id)), Coord::new(8.0, 48.0));
+        let source = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
+        assert!(!source.is_open(), "the restored layer must not install an unowned disposable reader");
+        let error = source.error.as_ref().expect("the unavailable original must remain a layer error");
+        assert!(error.contains(original.to_str().unwrap()), "{error}");
+        assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("showing the saved conversion")));
     }
 }
 

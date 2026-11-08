@@ -217,6 +217,17 @@ fn prepare(input: Input) -> Result<Prepared, String> {
 fn replace_linked(s: &mut Session, id: u32, path: &str, table: Option<&str>) -> Result<(), String> {
     let input = capture(s, id, path.into(), table.map(String::from), false)?;
     let prepared = prepare(input)?;
+    // Reload keeps a selected branch that has become empty. Repair instead chooses a new
+    // source: rows exclusively of another family are not a compatible replacement.
+    if let Candidate::Vector(new) = &prepared.candidate
+        && let Some(origin) = &new.duckdb
+        && let Some(info) = new.info()
+        && info.count == Some(0)
+        && let Some(note) =
+            info.notes.iter().find(|note| note.starts_with("DuckDB: ") && note.ends_with(" rows of another geometry type were left out"))
+    {
+        return Err(format!("{path}: the replacement table contains no {}; {note}. The layer was not changed", origin.family.label()));
+    }
     install(s, prepared)
 }
 

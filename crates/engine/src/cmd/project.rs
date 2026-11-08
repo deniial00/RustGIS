@@ -183,12 +183,19 @@ fn reset(s: &mut Session, p: Project) {
     // What reading a raster left out (a colour table, names, a sidecar's scale) is said again as
     // the project opens, as when it was added. One still read in the background isn't here yet.
     let mut lost: Vec<(String, String)> = Vec::new();
+    let mut source_notes = Vec::new();
     for l in s.project.maps.iter_mut().flat_map(|m| &mut m.layers) {
         if let Some(rl) = &mut l.raster {
             lost.extend(rl.lost_unsaid().into_iter().map(|what| (l.name.clone(), what)));
         }
+        if let Some(info) = l.source.as_ref().and_then(|source| source.info()) {
+            source_notes.extend(info.notes.iter().map(|note| format!("{}: {note}", l.name)));
+        }
     }
     super::raster::say_losses(s, lost);
+    for note in source_notes {
+        s.notify(note, false);
+    }
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s

@@ -216,6 +216,8 @@ table is retained when available. Repair keeps the layer's identity and configur
 the project unsaved and can be undone or redone. A raster drawn with its own color table
 requires a replacement with a color table; incompatible rasters are rejected without changing
 the saved style.
+Vector repair also refuses a table containing only a different geometry family; for example,
+a Lines layer cannot be repaired to a points-only DuckDB table.
 If a tile archive is removed or reordered out of its captured slot while the dialog is open,
 the dialog closes rather than applying the replacement to another archive.
 It does not change embedded data, databases or web links. The web app cannot link to files
@@ -239,8 +241,12 @@ GDAL/DuckDB file-backed layers and editable local GeoPackage tables. GDAL-linked
 Geodatabases and Zarr folders can be reloaded manually. **This is manual reload only**:
 RustGIS does not detect or notify about changes on disk. Folder sources are not monitored;
 use Reload Data even when the folder's timestamp has not changed.
-Saved GDAL/DuckDB links reread their original selected table if the private converted copy
-has been cleaned up, including compatible empty tables; they do not revive an older conversion.
+Saved GDAL/DuckDB links reread their original selected table when restoring a disposable
+converted copy, including compatible empty tables. If the original cannot be read, RustGIS
+does not borrow another session's temporary conversion. A durable saved conversion outside the
+current cache can still open as a fallback, with a notice naming the original and its read error.
+Reloading an existing DuckDB branch that has lost all its rows installs an empty layer of the
+same geometry family, even when rows of another family remain; the omitted rows are reported.
 
 Reload does not turn snapshots into live links. Embedded uploads, generated layers, ordinary
 imports without linked provenance, arbitrary SQL results and layers detached by **Load All

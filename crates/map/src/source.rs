@@ -419,6 +419,9 @@ impl std::fmt::Debug for SourceLayer {
 /// (including reader-owned workspaces) must not borrow another source's artifact lifetime.
 #[cfg(not(target_arch = "wasm32"))]
 fn persistent_conversion(path: &std::path::Path, cache: Option<std::path::PathBuf>) -> bool {
+    if rustgis_data::source::gdal::ReloadWorkspace::contains_file(path) {
+        return false;
+    }
     path.parent()
         .and_then(|p| p.canonicalize().ok())
         .zip(cache.and_then(|p| p.canonicalize().ok()))
@@ -817,6 +820,8 @@ impl SourceLayer {
         if let Some(url) = self.path.clone().filter(|p| rustgis_data::source::is_remote_name(p)) {
             return self.open_remote(&url);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut saved_conversion_note = None;
         let src = if let Some(pg) = &self.postgis {
             open_postgis(pg)
         } else if let Some(my) = &self.mysql {
@@ -834,15 +839,11 @@ impl SourceLayer {
                     && (!path.exists() || !persistent_conversion(path, rustgis_data::source::gdal::cache_dir()))
                 {
                     let candidate = self.relinked(&g.path, None);
-                    if candidate.is_ok() || !path.exists() {
+                    if candidate.is_ok() || !path.exists() || rustgis_data::source::gdal::ReloadWorkspace::contains_file(path) {
                         return self.restored_conversion(candidate);
                     }
-                    // An already-open reader also owns any private workspace. Keep that owner
-                    // rather than replacing it with an unowned handle to the same fallback file.
-                    if self.handle.is_some() {
-                        self.error = None;
-                        self.login = false;
-                        return Ok(());
+                    if let Err(error) = candidate {
+                        saved_conversion_note = Some(format!("re-reading {} failed ({error}); showing the saved conversion", g.path));
                     }
                 }
                 if let Some(d) = &self.duckdb
@@ -853,13 +854,11 @@ impl SourceLayer {
                     && (!path.exists() || !persistent_conversion(path, rustgis_data::source::duckdb::cache_dir()))
                 {
                     let candidate = self.relinked(database, None);
-                    if candidate.is_ok() || !path.exists() {
+                    if candidate.is_ok() || !path.exists() || rustgis_data::source::duckdb::ReloadWorkspace::contains_file(path) {
                         return self.restored_conversion(candidate);
                     }
-                    if self.handle.is_some() {
-                        self.error = None;
-                        self.login = false;
-                        return Ok(());
+                    if let Err(error) = candidate {
+                        saved_conversion_note = Some(format!("re-reading {database} failed ({error}); showing the saved conversion"));
                     }
                 }
             }
@@ -899,6 +898,14 @@ impl SourceLayer {
             Ok(s) => {
                 self.conversion_info = None;
                 self.handle = Some(Arc::from(s));
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(note) = saved_conversion_note
+                    && let Some(info) = self.info()
+                {
+                    let mut info = info.clone();
+                    info.notes.push(note);
+                    self.conversion_info = Some(info);
+                }
                 self.window = None;
                 self.error = None;
                 self.login = false;

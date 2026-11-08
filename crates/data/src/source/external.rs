@@ -25,6 +25,8 @@ pub(crate) fn cache_dir(env: &str, sub: &str) -> Option<PathBuf> {
     crate::dirs::cache_dir().map(|b| b.join(sub))
 }
 
+const RELOAD_PREFIX: &str = "reload-";
+
 /// A private conversion directory and its live-owner lock. Close the lock before deleting the
 /// directory (including on Windows); concrete readers retain this owner until their last read.
 #[derive(Debug)]
@@ -37,6 +39,11 @@ impl ReloadWorkspace {
     pub fn path(&self) -> &Path {
         self.dir.path()
     }
+
+    /// Whether a saved conversion belongs to a disposable workspace rather than a durable cache.
+    pub fn contains_file(path: &Path) -> bool {
+        path.parent().and_then(Path::file_name).is_some_and(|name| name.to_string_lossy().starts_with(RELOAD_PREFIX))
+    }
 }
 
 /// Reclaims a bounded number of crash-abandoned conversions before allocating a new workspace.
@@ -44,23 +51,23 @@ pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<R
     std::fs::create_dir_all(cache)?;
     if let Ok(entries) = std::fs::read_dir(cache) {
         for entry in entries.take(4096).flatten() {
-            if !entry.file_name().to_string_lossy().starts_with("reload-") || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            if !entry.file_name().to_string_lossy().starts_with(RELOAD_PREFIX) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
             let path = entry.path();
+            let age = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+            // The creator installs owner.lock before locking it. A collector must not claim
+            // that unlocked file during installation; an unknown age is not safe to reclaim.
+            if !age.is_some_and(|age| age >= std::time::Duration::from_secs(60)) {
+                continue;
+            }
             let lock_path = path.join("owner.lock");
             let lock = match std::fs::File::options().read(true).write(true).open(&lock_path) {
                 Ok(lock) => lock,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // A creator may not have installed its lock yet. Only legacy or abandoned
                     // directories older than an hour can be reclaimed without one.
-                    if !entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age >= std::time::Duration::from_secs(3600))
-                    {
+                    if !age.is_some_and(|age| age >= std::time::Duration::from_secs(3600)) {
                         continue;
                     }
                     let Ok(lock) = std::fs::File::options().read(true).write(true).create_new(true).open(&lock_path) else {
@@ -78,7 +85,7 @@ pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<R
             }
         }
     }
-    let dir = tempfile::Builder::new().prefix("reload-").tempdir_in(cache)?;
+    let dir = tempfile::Builder::new().prefix(RELOAD_PREFIX).tempdir_in(cache)?;
     let lock = std::fs::File::options().read(true).write(true).create_new(true).open(dir.path().join("owner.lock"))?;
     lock.try_lock().map_err(std::io::Error::other)?;
     Ok(std::sync::Arc::new(ReloadWorkspace { _lock: lock, dir }))
@@ -262,6 +269,51 @@ pub(crate) fn prune(dir: &Path, ours: fn(&str) -> bool, keep: std::time::Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn age_directory(path: &Path, seconds: u64) {
+        let mut options = std::fs::File::options();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.access_mode(0x0100).custom_flags(0x0200_0000); // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS.
+        }
+        options
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds)))
+            .unwrap();
+    }
+
+    #[test]
+    fn reload_collection_preserves_a_new_unlocked_owner_lock_then_reclaims_it_after_grace() {
+        let cache = tempfile::tempdir().unwrap();
+        let abandoned = cache.path().join("reload-installing");
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join("owner.lock"), []).unwrap();
+        std::fs::write(abandoned.join("converted.fgb"), b"saved conversion").unwrap();
+        let fresh = reload_workspace(cache.path()).unwrap();
+        assert!(abandoned.exists(), "the creator has 60 seconds to lock its newly installed lock file");
+        age_directory(&abandoned, 61);
+        let next = reload_workspace(cache.path()).unwrap();
+        assert!(!abandoned.exists(), "an old unlocked workspace is crash-abandoned");
+        assert!(fresh.path().exists() && next.path().exists(), "live owners remain untouched");
+    }
+
+    #[test]
+    fn reload_collection_keeps_missing_lock_hour_grace_and_locked_old_workspaces() {
+        let cache = tempfile::tempdir().unwrap();
+        let missing = cache.path().join("reload-no-lock");
+        std::fs::create_dir(&missing).unwrap();
+        age_directory(&missing, 61);
+        let live = reload_workspace(cache.path()).unwrap();
+        assert!(missing.exists(), "an uninstalled lock retains its longer one-hour grace");
+        age_directory(live.path(), 3601);
+        age_directory(&missing, 3601);
+        let _next = reload_workspace(cache.path()).unwrap();
+        assert!(!missing.exists(), "an hour-old missing lock can be reclaimed");
+        assert!(live.path().exists(), "even an old workspace belongs to its locked owner");
+    }
 
     #[test]
     fn workspace_budget_counts_source_output_and_nested_scratch() {
