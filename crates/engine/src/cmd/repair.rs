@@ -9,11 +9,17 @@ pub fn commands() -> Vec<C> {
     vec![
         C::new("layer.repairSource", "Repair Data Source", "Data › Data Source", repair_source).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"layer"?: name|id (default: the active layer), "path": "the file or folder (a Zarr store, a File Geodatabase) the layer's data moved to", "table"?: "the dataset in a GeoPackage, GDAL or DuckDB file, or a raster's subdataset (default: the one the layer reads now)"}"#),
-        C::new("map.repairTiles", "Repair Tile Archive", "Layers", repair_tiles).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
+        C::new("map.repairTiles", "Repair Tile Archive", "Layers", repair_tiles).inputs(archive_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id, "path": "the .pmtiles or .mbtiles file the archive moved to"}"#),
-        C::new("map.reloadTiles", "Reload Data", "Layers", reload_tiles).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
+        C::new("map.reloadTiles", "Reload Data", "Layers", reload_tiles).inputs(archive_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"name": text | "index": number (0 = top) | "id": catalog id} (give one selector) — rereads a local PMTiles or MBTiles archive at its linked path, keeping its presentation; undo cannot restore overwritten file contents"#),
     ]
+}
+
+/// Freeze the executor's selected archive without reading it or resolving a replacement path.
+fn archive_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::Inputs, String> {
+    let i = super::tiles::find(input, p)?.ok_or("name, index or id is required")?;
+    Ok(super::tiles::tile_inputs(input.map(), [i]))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -133,7 +139,7 @@ fn repair_tiles(s: &mut Session, p: &Value) -> CmdResult {
         if t.archive_file().is_none() {
             return Err(format!("{}: only a tile archive read from a file (PMTiles or MBTiles) can be repaired", t.name));
         }
-        let full = replacement(p)?;
+        let full = replacement(p).map_err(|e| format!("{e}; correct the file and retry Repair Data Source"))?;
         let new = archive_candidate_after_read(t, &full, s.map().instance_id(), prepared)?;
         rustgis_render::rustgis_tiles::cache::reload_archive(&t.url);
         // The replacement path may already have been drawn by another layer.
@@ -168,12 +174,108 @@ fn archive_candidate(t: &rustgis_map::TileLayer, path: &str) -> Result<rustgis_m
     Ok(new)
 }
 
+/// An operation-local observation, not a file snapshot or a monitor baseline.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(PartialEq, Eq)]
+struct FileRevision {
+    len: u64,
+    modified: web_time::SystemTime,
+    #[cfg(unix)]
+    identity_change: (u64, u64, i64, i64),
+    #[cfg(windows)]
+    created: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FileRevision {
+    fn read(path: &str, optional: bool) -> Result<Option<Self>, String> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(format!("{path}: could not observe archive metadata ({e}); finish writing or restore the file and retry"));
+            }
+        };
+        // SQLite creates an empty -wal even for a read-only open of a clean WAL-mode archive,
+        // and cannot remove it again. An empty sidecar holds no commits: same as no sidecar.
+        if optional && metadata.len() == 0 {
+            return Ok(None);
+        }
+        if !metadata.is_file() {
+            return Err(format!("{path}: expected an archive file; restore the file and retry"));
+        }
+        let modified = metadata
+            .modified()
+            .map_err(|e| format!("{path}: could not observe the archive modification time ({e}); check file access and retry"))?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        #[cfg(windows)]
+        use std::os::windows::fs::MetadataExt;
+        Ok(Some(Self {
+            len: metadata.len(),
+            modified,
+            #[cfg(unix)]
+            identity_change: (metadata.dev(), metadata.ino(), metadata.ctime(), metadata.ctime_nsec()),
+            #[cfg(windows)]
+            created: metadata.creation_time(),
+        }))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(PartialEq, Eq)]
+struct ArchiveObservation {
+    primary: Option<FileRevision>,
+    // SQLite commits can change these without changing the main database. The -shm file
+    // is reader coordination, not content, and is deliberately not observed.
+    sqlite: Option<(Option<FileRevision>, Option<FileRevision>)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ArchiveObservation {
+    fn read(path: &str) -> Result<Self, String> {
+        let path = path.strip_prefix("file://").unwrap_or(path);
+        let primary = FileRevision::read(path, false)?;
+        let sqlite = std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("mbtiles"));
+        let sqlite = if sqlite {
+            Some((FileRevision::read(&format!("{path}-wal"), true)?, FileRevision::read(&format!("{path}-journal"), true)?))
+        } else {
+            None
+        };
+        Ok(Self { primary, sqlite })
+    }
+
+    /// Metadata only: safe for final landing, with no archive scan or decompression.
+    fn unchanged(&self, path: &str) -> Result<(), String> {
+        if *self != Self::read(path)? {
+            return Err(format!("{path}: the archive changed while it was read; finish writing and retry the command"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ValidatedArchive {
+    layer: rustgis_map::TileLayer,
+    observation: ArchiveObservation,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn observed_candidate(t: &rustgis_map::TileLayer, path: &str) -> Result<ValidatedArchive, String> {
+    // Keep the archive reader's path boundary ahead of the new metadata I/O too.
+    rustgis_map::tiles::check_path(path, if t.kind == rustgis_map::TileKind::MbTiles { "mbtiles" } else { "pmtiles" })?;
+    let observation = ArchiveObservation::read(path)?;
+    let layer = archive_candidate(t, path)?;
+    observation.unchanged(path)?;
+    Ok(ValidatedArchive { layer, observation })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct ReadArchive {
     map: u64,
     original: rustgis_map::TileLayer,
     path: String,
-    result: Result<rustgis_map::TileLayer, String>,
+    result: Result<ValidatedArchive, String>,
 }
 
 /// Fresh validation for the desktop's single read worker; nothing is installed or invalidated.
@@ -189,7 +291,7 @@ pub(crate) fn archive_ahead(s: &Session, command: &str, p: &Value) -> super::rea
     let name = if command == "map.repairTiles" { "Repair Data Source" } else { "Reload Data" };
     super::reads::ahead(name, command.to_string(), move || {
         request.map(|(map, original, path)| {
-            let result = archive_candidate(&original, &path);
+            let result = observed_candidate(&original, &path);
             ReadArchive { map, original, path, result }
         })
     })
@@ -202,12 +304,17 @@ fn archive_candidate_after_read(
     map: u64,
     prepared: Option<Result<ReadArchive, String>>,
 ) -> Result<rustgis_map::TileLayer, String> {
-    let Some(prepared) = prepared else { return archive_candidate(t, path) };
-    let prepared = prepared?;
-    if prepared.map != map || prepared.original != *t || prepared.path != path {
-        return Err("the archive or its settings changed while it was read; retry the command".into());
-    }
-    prepared.result
+    let candidate = if let Some(prepared) = prepared {
+        let prepared = prepared?;
+        if prepared.map != map || prepared.original != *t || prepared.path != path {
+            return Err("the archive or its settings changed while it was read; retry the command".into());
+        }
+        prepared.result?
+    } else {
+        observed_candidate(t, path)?
+    };
+    candidate.observation.unchanged(path)?;
+    Ok(candidate.layer)
 }
 
 fn reload_tiles(s: &mut Session, p: &Value) -> CmdResult {
@@ -246,5 +353,30 @@ fn reload_tiles(s: &mut Session, p: &Value) -> CmdResult {
         }
         s.notify(message, false);
         Ok(json!({"index": i, "path": path}))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_sqlite_sidecars_match_absent_ones_but_commits_do_not() {
+        let dir = std::env::temp_dir().join(format!("rustgis-repair-observation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clean.mbtiles");
+        std::fs::write(&path, b"main database").unwrap();
+        let path = path.display().to_string();
+        let observed = ArchiveObservation::read(&path).unwrap();
+        for sidecar in ["-wal", "-journal"] {
+            let sidecar = format!("{path}{sidecar}");
+            std::fs::write(&sidecar, b"").unwrap();
+            observed.unchanged(&path).expect("an empty sidecar created by a reader is not a commit");
+            std::fs::write(&sidecar, b"committed frame").unwrap();
+            assert!(observed.unchanged(&path).is_err(), "{sidecar}");
+            std::fs::remove_file(&sidecar).unwrap();
+            observed.unchanged(&path).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

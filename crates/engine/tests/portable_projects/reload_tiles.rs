@@ -10,6 +10,38 @@ use rustgis_engine::{
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 
+/// Archive reloads share process-wide caches, and an MBTiles forget clears every resolved style.
+/// Serializing these tests and dropping each test's archives keeps Arc-identity assertions about
+/// retention rather than about another test's cache work or capacity.
+struct Scoped {
+    fixture: Fixture,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Scoped {
+    fn new(label: &str) -> Self {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let turn = TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self { fixture: Fixture::new(label), _turn: turn }
+    }
+}
+
+impl std::ops::Deref for Scoped {
+    type Target = Fixture;
+    fn deref(&self) -> &Fixture {
+        &self.fixture
+    }
+}
+
+impl Drop for Scoped {
+    fn drop(&mut self) {
+        for file in std::fs::read_dir(&self.fixture.root).into_iter().flatten().flatten() {
+            rustgis_engine::data::mbtiles::close(&file.path());
+            cache::reload_archive(&file.path().display().to_string());
+        }
+    }
+}
+
 fn picture(color: [u8; 4]) -> Vec<u8> {
     let mut p = tiny_skia::Pixmap::new(256, 256).unwrap();
     p.fill(tiny_skia::Color::from_rgba8(color[0], color[1], color[2], color[3]));
@@ -91,7 +123,7 @@ fn assert_render(s: &mut Session, expected: [u8; 4], credit: &str) {
 #[test]
 fn manual_archive_reload_reads_new_pixels_and_credits_without_touching_other_sources() {
     for ext in ["pmtiles", "mbtiles"] {
-        let f = Fixture::new(&format!("reload-{ext}"));
+        let f = Scoped::new(&format!("reload-{ext}"));
         let path = f.file(&format!("linked.{ext}"));
         let other = f.file(&format!("unrelated.{ext}"));
         write_archive(&path, [255, 0, 0, 255], "Old credits");
@@ -154,7 +186,7 @@ fn rejected(s: &mut Session, params: Value, expected: &str) {
 #[test]
 fn failed_archive_reload_retains_tiles_configuration_and_allows_retry() {
     for ext in ["pmtiles", "mbtiles"] {
-        let f = Fixture::new(&format!("reload-failure-{ext}"));
+        let f = Scoped::new(&format!("reload-failure-{ext}"));
         let path = f.file(&format!("linked.{ext}"));
         write_archive(&path, [255, 0, 0, 255], "Retained credits");
         let mut s = session();
@@ -185,7 +217,7 @@ fn write_archive_after_truncation(path: &Path, color: [u8; 4], credit: &str) {
 
 #[test]
 fn locked_mbtiles_reload_fails_without_evicting_retained_data_then_retries() {
-    let f = Fixture::new("reload-locked");
+    let f = Scoped::new("reload-locked");
     let path = f.file("locked.mbtiles");
     write_archive(&path, [255, 0, 0, 255], "Before lock");
     let mut s = session();
@@ -207,7 +239,7 @@ fn locked_mbtiles_reload_fails_without_evicting_retained_data_then_retries() {
 #[cfg(unix)]
 #[test]
 fn replacing_an_open_mbtiles_archive_reloads_the_new_file_not_its_pooled_inode() {
-    let f = Fixture::new("reload-mbtiles-replaced-inode");
+    let f = Scoped::new("reload-mbtiles-replaced-inode");
     let path = f.file("linked.mbtiles");
     let replacement = f.file("replacement.mbtiles");
     write_archive(&path, [255, 0, 0, 255], "Old inode");
@@ -228,7 +260,7 @@ fn replacing_an_open_mbtiles_archive_reloads_the_new_file_not_its_pooled_inode()
 #[test]
 fn incompatible_reload_keeps_archive_presentation_and_undo_restores_prior_error() {
     for ext in ["pmtiles", "mbtiles"] {
-        let f = Fixture::new(&format!("reload-incompatible-{ext}"));
+        let f = Scoped::new(&format!("reload-incompatible-{ext}"));
         let path = f.file(&format!("vector.{ext}"));
         write_vector(&path);
         let mut s = session();
@@ -291,7 +323,7 @@ fn archive_reload_rejects_remote_upload_and_invalid_selectors() {
 #[test]
 fn invalid_raster_and_unreadable_tile_pages_do_not_evict_retained_mbtiles() {
     for damaged_page in [false, true] {
-        let f = Fixture::new(if damaged_page { "reload-tile-page" } else { "reload-png-signature" });
+        let f = Scoped::new(if damaged_page { "reload-tile-page" } else { "reload-png-signature" });
         let path = f.file("linked.mbtiles");
         write_archive(&path, [255, 0, 0, 255], "Retained credits");
         let mut s = session();
@@ -357,7 +389,7 @@ fn write_leaf_archive(path: &Path, corrupt: bool) {
 
 #[test]
 fn malformed_leaf_reload_retains_pixels_and_can_retry_with_a_valid_leaf() {
-    let f = Fixture::new("reload-malformed-leaf");
+    let f = Scoped::new("reload-malformed-leaf");
     let path = f.file("linked.pmtiles");
     write_archive(&path, [255, 0, 0, 255], "Retained credits");
     let mut s = session();
@@ -378,7 +410,7 @@ fn malformed_leaf_reload_retains_pixels_and_can_retry_with_a_valid_leaf() {
 
 #[test]
 fn untrusted_workflows_cannot_reload_but_user_authored_workflows_can() {
-    let f = Fixture::new("reload-workflow-trust");
+    let f = Scoped::new("reload-workflow-trust");
     let path = f.file("linked.pmtiles");
     write_archive(&path, [255, 0, 0, 255], "Before");
     let mut s = session();
@@ -408,7 +440,7 @@ fn untrusted_workflows_cannot_reload_but_user_authored_workflows_can() {
 
 #[test]
 fn successful_reload_cancels_only_its_own_pending_archive_framing() {
-    let f = Fixture::new("reload-pending-view");
+    let f = Scoped::new("reload-pending-view");
     let path = f.file("linked.pmtiles");
     let other = f.file("other.pmtiles");
     for file in [&path, &other] {
@@ -447,7 +479,7 @@ fn successful_reload_cancels_only_its_own_pending_archive_framing() {
 
 #[test]
 fn prepared_archive_validation_does_not_evict_or_overwrite_changed_settings() {
-    let f = Fixture::new("reload-read-ahead");
+    let f = Scoped::new("reload-read-ahead");
     let path = f.file("linked.pmtiles");
     write_archive(&path, [255, 0, 0, 255], "Before");
     let mut s = session();
@@ -469,4 +501,281 @@ fn prepared_archive_validation_does_not_evict_or_overwrite_changed_settings() {
     s.run("map.reloadTiles", &json!({"index":0})).unwrap();
     assert_eq!(s.map().tiles[0].opacity, 0.4);
     assert_color(&decoded(&tile), [0, 255, 0, 255]);
+}
+
+fn archive_read(s: &mut Session, command: &str, params: &Value) -> rustgis_engine::cmd::reads::Read {
+    let control = rustgis_engine::analysis::control::Control::stoppable();
+    rustgis_engine::cmd::reads::read_ahead(s, command, params).unwrap().run(&control).unwrap()
+}
+
+type RetainedArchive = (TileLayer, Arc<cache::Payload>, Arc<source::Resolved>);
+
+fn retain_archive(t: &TileLayer) -> RetainedArchive {
+    (t.clone(), decoded(t), style(t))
+}
+
+fn reject_stale_archive(s: &mut Session, read: rustgis_engine::cmd::reads::Read, retained: &[RetainedArchive]) -> String {
+    let before = serde_json::to_value(&s.project).unwrap();
+    let view = s.style_view.clone();
+    let undo = s.undo_depth();
+    let mark = s.notice_mark();
+    let error = rustgis_engine::cmd::reads::read_land(s, read).unwrap_err();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "failed landing must retain source, presentation and view");
+    assert_eq!(s.style_view, view, "failed landing must not cancel pending framing");
+    assert_eq!(s.undo_depth(), undo);
+    assert!(s.notices_since(mark).iter().all(|n| n.error), "failed landing must not emit a success notice");
+    for (tile, pixels, credits) in retained {
+        assert!(Arc::ptr_eq(&decoded(tile), pixels), "failed landing must not evict {}", tile.url);
+        assert!(Arc::ptr_eq(&style(tile), credits), "failed landing must not evict metadata for {}", tile.url);
+    }
+    error
+}
+
+#[test]
+fn changed_or_removed_archive_after_worker_validation_retains_data_and_retries() {
+    for ext in ["pmtiles", "mbtiles"] {
+        for command in ["map.reloadTiles", "map.repairTiles"] {
+            for remove in [false, true] {
+                let f = Scoped::new(&format!("archive-freshness-{ext}-{command}-{remove}"));
+                let linked = f.file(&format!("linked.{ext}"));
+                let replacement = f.file(&format!("replacement.{ext}"));
+                write_archive(&linked, [255, 0, 0, 255], "Retained credits");
+                write_archive(&replacement, [0, 0, 255, 255], "Replacement credits");
+                let mut s = session();
+                s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
+                s.map_mut().tiles[0].opacity = 0.4;
+                s.map_mut().tiles[0].expanded = true;
+                let tile = s.map().tiles[0].clone();
+                let mut candidate = tile.clone();
+                let mut params = json!({"index":0});
+                let path = if command == "map.repairTiles" {
+                    params["path"] = json!(replacement);
+                    candidate.url = replacement.display().to_string();
+                    &replacement
+                } else {
+                    &linked
+                };
+                let retained = vec![retain_archive(&tile), retain_archive(&candidate)];
+                s.style_view = Some((tile.clone(), s.map().camera, s.map().instance_id()));
+                let read = archive_read(&mut s, command, &params);
+                rustgis_engine::data::mbtiles::close(path);
+                if remove {
+                    std::fs::remove_file(path).unwrap();
+                } else {
+                    let len = std::fs::metadata(path).unwrap().len();
+                    std::fs::OpenOptions::new().write(true).open(path).unwrap().set_len(len + 1).unwrap();
+                }
+                let error = reject_stale_archive(&mut s, read, &retained);
+                assert!(error.contains("retry"), "{error}");
+                let expected = if !remove {
+                    "changed while it was read"
+                } else if command == "map.repairTiles" {
+                    "there's no such file"
+                } else {
+                    "observe archive metadata"
+                };
+                assert!(error.contains(expected), "{error}");
+                if !remove {
+                    std::fs::remove_file(path).unwrap();
+                }
+                write_archive(path, [0, 255, 0, 255], "Retry credits");
+                s.run(command, &params).unwrap();
+                assert_eq!(s.map().tiles[0].opacity, 0.4);
+                assert!(s.map().tiles[0].expanded);
+                assert_color(&decoded(&s.map().tiles[0]), [0, 255, 0, 255]);
+                assert!(style(&s.map().tiles[0]).attribution.iter().any(|a| a.contains("Retry credits")));
+                rustgis_engine::data::mbtiles::close(&linked);
+                rustgis_engine::data::mbtiles::close(&replacement);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_validated_archive_directory_entry_rejects_landing_even_with_identical_contents() {
+    use std::os::unix::fs::MetadataExt;
+    for ext in ["pmtiles", "mbtiles"] {
+        for command in ["map.reloadTiles", "map.repairTiles"] {
+            let f = Scoped::new(&format!("archive-freshness-inode-{ext}-{command}"));
+            let linked = f.file(&format!("linked.{ext}"));
+            let candidate_path = f.file(&format!("candidate.{ext}"));
+            let swapped = f.file(&format!("swapped.{ext}"));
+            write_archive(&linked, [255, 0, 0, 255], "Retained credits");
+            write_archive(&candidate_path, [0, 0, 255, 255], "Candidate credits");
+            let mut s = session();
+            s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
+            let tile = s.map().tiles[0].clone();
+            let retained = vec![retain_archive(&tile)];
+            s.style_view = Some((tile.clone(), s.map().camera, s.map().instance_id()));
+            let mut params = json!({"index":0});
+            let path = if command == "map.repairTiles" {
+                params["path"] = json!(candidate_path);
+                &candidate_path
+            } else {
+                &linked
+            };
+            let read = archive_read(&mut s, command, &params);
+            let old = std::fs::metadata(path).unwrap();
+            std::fs::copy(path, &swapped).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&swapped)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(old.modified().unwrap()))
+                .unwrap();
+            std::fs::rename(&swapped, path).unwrap();
+            let new = std::fs::metadata(path).unwrap();
+            assert_eq!(old.len(), new.len());
+            assert_eq!(old.modified().unwrap(), new.modified().unwrap());
+            assert_ne!(old.ino(), new.ino());
+            assert!(reject_stale_archive(&mut s, read, &retained).contains("changed while it was read"));
+            s.run(command, &params).unwrap();
+            assert_eq!(s.map().tiles[0].url, path.display().to_string());
+            rustgis_engine::data::mbtiles::close(&linked);
+            rustgis_engine::data::mbtiles::close(&candidate_path);
+        }
+    }
+}
+
+#[test]
+fn mbtiles_wal_commit_with_writer_open_invalidates_worker_validation_without_eviction() {
+    for command in ["map.reloadTiles", "map.repairTiles"] {
+        let f = Scoped::new(&format!("archive-freshness-wal-{command}"));
+        let linked = f.file("linked.mbtiles");
+        let replacement = f.file("replacement.mbtiles");
+        write_archive(&linked, [255, 0, 0, 255], "Retained credits");
+        write_archive(&replacement, [0, 0, 255, 255], "Replacement credits");
+        let mut s = session();
+        s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
+        let tile = s.map().tiles[0].clone();
+        let mut params = json!({"index":0});
+        let path = if command == "map.repairTiles" {
+            params["path"] = json!(replacement);
+            &replacement
+        } else {
+            &linked
+        };
+        let writer = rusqlite::Connection::open(path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE metadata SET value='Before worker' WHERE name='attribution';",
+            )
+            .unwrap();
+        let mut candidate = tile.clone();
+        candidate.url = path.display().to_string();
+        let retained = vec![retain_archive(&tile), retain_archive(&candidate)];
+        s.style_view = Some((tile.clone(), s.map().camera, s.map().instance_id()));
+        let read = archive_read(&mut s, command, &params);
+        let before = std::fs::metadata(path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE; UPDATE metadata SET value='Committed after worker' WHERE name='attribution';").unwrap();
+        writer.execute("UPDATE tiles SET tile_data=?1", [picture([0, 255, 0, 255])]).unwrap();
+        writer.execute_batch("COMMIT").unwrap();
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!(before.len(), after.len(), "this regression must exercise a sidecar-only commit");
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert!(reject_stale_archive(&mut s, read, &retained).contains("changed while it was read"));
+        // Keep the writer open: retry must see committed WAL contents, without requiring a checkpoint.
+        s.run(command, &params).unwrap();
+        assert_color(&decoded(&s.map().tiles[0]), [0, 255, 0, 255]);
+        assert!(style(&s.map().tiles[0]).attribution.iter().any(|a| a.contains("Committed after worker")));
+        drop(writer);
+        rustgis_engine::data::mbtiles::close(&linked);
+        rustgis_engine::data::mbtiles::close(&replacement);
+    }
+}
+
+#[test]
+fn clean_wal_mode_mbtiles_first_reload_and_repair_ignore_reader_created_empty_wal() {
+    for command in ["map.reloadTiles", "map.repairTiles"] {
+        let f = Scoped::new(&format!("archive-clean-wal-{command}"));
+        let linked = f.file("linked.mbtiles");
+        let replacement = f.file("replacement.mbtiles");
+        write_archive(&linked, [255, 0, 0, 255], "Retained credits");
+        write_archive(&replacement, [0, 255, 0, 255], "Clean WAL credits");
+        let mut s = session();
+        s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
+        let mut params = json!({"index":0});
+        let path = if command == "map.repairTiles" {
+            params["path"] = json!(replacement);
+            &replacement
+        } else {
+            &linked
+        };
+        // A clean close of the last WAL connection removes -wal/-shm; the archive stays WAL mode.
+        let writer = rusqlite::Connection::open(path).unwrap();
+        writer.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)).unwrap();
+        drop(writer);
+        rustgis_engine::data::mbtiles::close(&linked);
+        rustgis_engine::data::mbtiles::close(&replacement);
+        for sidecar in ["-wal", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{sidecar}", path.display()));
+        }
+        assert!(!Path::new(&format!("{}-wal", path.display())).exists());
+        // Whether or not the reader creates an empty -wal while validating, the first attempt lands.
+        let read = archive_read(&mut s, command, &params);
+        rustgis_engine::cmd::reads::read_land(&mut s, read).unwrap();
+        let expected = if command == "map.repairTiles" { [0, 255, 0, 255] } else { [255, 0, 0, 255] };
+        assert_color(&decoded(&s.map().tiles[0]), expected);
+        if command == "map.repairTiles" {
+            assert_eq!(s.map().tiles[0].url, path.display().to_string());
+        }
+        rustgis_engine::data::mbtiles::close(&linked);
+        rustgis_engine::data::mbtiles::close(&replacement);
+    }
+}
+
+#[test]
+fn archive_observation_begins_in_worker_not_when_work_is_queued() {
+    for ext in ["pmtiles", "mbtiles"] {
+        let f = Scoped::new(&format!("archive-worker-observation-{ext}"));
+        let path = f.file(&format!("linked.{ext}"));
+        write_archive(&path, [255, 0, 0, 255], "Before queue");
+        let mut s = session();
+        s.run("map.addTiles", &json!({"url":path,"overlay":true})).unwrap();
+        let ahead = rustgis_engine::cmd::reads::read_ahead(&mut s, "map.reloadTiles", &json!({"index":0})).unwrap();
+        write_archive(&path, [0, 255, 0, 255], "Written before worker starts");
+        let read = ahead.run(&rustgis_engine::analysis::control::Control::stoppable()).unwrap();
+        rustgis_engine::cmd::reads::read_land(&mut s, read).unwrap();
+        assert_color(&decoded(&s.map().tiles[0]), [0, 255, 0, 255]);
+        rustgis_engine::data::mbtiles::close(&path);
+    }
+}
+
+#[test]
+fn overlapping_pmtiles_runs_reject_reload_and_repair_without_losing_retained_data() {
+    for command in ["map.reloadTiles", "map.repairTiles"] {
+        let f = Scoped::new(&format!("archive-overlapping-runs-{command}"));
+        let linked = f.file("linked.pmtiles");
+        let replacement = f.file("replacement.pmtiles");
+        write_archive(&linked, [255, 0, 0, 255], "Retained credits");
+        let mut s = session();
+        s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
+        let tile = s.map().tiles[0].clone();
+        let retained = vec![retain_archive(&tile)];
+        s.style_view = Some((tile.clone(), s.map().camera, s.map().instance_id()));
+        let archive = pmtiles::NewArchive {
+            tile_type: pmtiles::TileType::Png,
+            gzipped_tiles: false,
+            bounds: [-180.0, -85.0, 180.0, 85.0],
+            metadata: json!({"attribution":"Valid adjacent runs"}),
+        };
+        let valid = pmtiles::write(vec![(0, 0, 0, picture([0, 255, 0, 255])), (1, 0, 0, picture([0, 0, 255, 255]))], &archive).unwrap();
+        assert_eq!(&valid[127..132], &[2, 0, 1, 1, 1], "fixture must contain two adjacent single-tile runs");
+        let mut overlapping = valid.clone();
+        overlapping[130] = 2; // First [0,1) run becomes [0,2), overlapping the next entry.
+        let mut params = json!({"index":0});
+        let path = if command == "map.repairTiles" {
+            params["path"] = json!(replacement);
+            &replacement
+        } else {
+            &linked
+        };
+        std::fs::write(path, overlapping).unwrap();
+        let read = archive_read(&mut s, command, &params);
+        assert!(reject_stale_archive(&mut s, read, &retained).contains("overlapping PMTiles tile runs"));
+        std::fs::write(path, valid).unwrap();
+        s.run(command, &params).unwrap();
+        assert_color(&decoded(&s.map().tiles[0]), [0, 255, 0, 255]);
+    }
 }

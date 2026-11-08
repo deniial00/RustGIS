@@ -319,7 +319,7 @@ fetches them again.
 **Reloading a local tile archive (desktop).** After changing a PMTiles or MBTiles file on disk,
 right-click its row in Layers and choose **Reload Data**. CLI, Python, MCP and the Assistant use
 `map.reloadTiles={"index":0}`; `"name"` or catalog `"id"` can select the archive instead.
-No replacement path is accepted. This is a manual action: RustGIS does not watch the file or detect changes.
+No replacement path is accepted. This is a manual action: RustGIS does not watch the file for changes.
 It rereads that archive's metadata and tiles without clearing other archives or web layers.
 The layer keeps its name, visibility, opacity, blend, drawing order, source-layer visibility,
 style and other presentation settings; the map's view stays where it is. Undo cannot restore
@@ -328,6 +328,17 @@ file contents that another program has overwritten.
 On the desktop, reload and repair validate on a background worker; the status bar shows the work
 and **Cancel**. Only one read runs at a time. If its project, map, archive or presentation changes
 before it lands, the result is left unapplied: retry on the intended target.
+
+Approval binds the selected archive's owning map, stack position and source route, not just its
+name or index. Retargeting or reordering it requires reviewing the operation again.
+
+Each operation observes file size and modification time before validation, checks them again
+after validation and immediately before applying the result, and rejects observable changes.
+It also checks file identity and change time where the platform exposes them, plus MBTiles
+`-wal` and `-journal` existence and revisions (not the reader-coordination `-shm` file).
+Metadata that cannot be read is an error, not permission to apply an unchecked result.
+These checks are not an immutable snapshot: a rewrite that leaves the same observations, or a
+write after the final check, may escape detection. Finish writing before reloading or repairing.
 
 Reload first checks that the file can be read. If it is missing, unreadable or invalid, a notice
 explains the failure and the existing layer and retained cached data are left unchanged.
