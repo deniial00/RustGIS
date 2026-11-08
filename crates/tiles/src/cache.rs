@@ -2059,11 +2059,16 @@ mod native {
                 if crate::earthdata::is_data_host(&at) && crate::earthdata::is_login(&next) {
                     return Err(Failure::without_answer("", crate::earthdata::refused_message(url), Reason::Status(401)));
                 }
-                // Where a redirect leads is the server's choice, not the user's.
-                crate::address::check(&next, Some(&at))?;
+                // A server can echo a login in its chosen destination, even after revocation.
+                crate::address::check(&next, Some(&at))
+                    .map_err(|e| if carried_login { "redirect destination is not allowed".to_string() } else { e })?;
                 // Never from HTTPS down to plain HTTP.
                 if at.starts_with("https://") && !next.starts_with("https://") {
-                    return Err(format!("{next}: a redirect from https to http").into());
+                    return Err(if carried_login {
+                        "a redirect from https to http".into()
+                    } else {
+                        format!("{next}: a redirect from https to http").into()
+                    });
                 }
                 redirects += 1;
                 if redirects > 5 {
@@ -3329,6 +3334,61 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].network.as_ref().unwrap().status, Some(403));
         assert!(records[0].details.contains("x-request-id: anonymous-trace-8430"), "{records:?}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn delayed_rejected_redirect_after_revocation_does_not_record_login() {
+        if isolate_cache_fixture("cache::tests::delayed_rejected_redirect_after_revocation_does_not_record_login") {
+            return;
+        }
+        let _turn = crate::cache::turn();
+        use crate::logins::{self, Method};
+        use rustgis_data::diagnostics::{Capture, Filter, History};
+        use std::io::Write;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let secret = "redirect-rejection-sentinel";
+        let destination = format!("ftp://example.com/{secret}");
+        let response = format!("HTTP/1.1 302 Found\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (received_tx, received_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(request.to_ascii_lowercase().contains(&format!("x-key: {secret}\r\n")), "{request}");
+            received_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let binding = logins::activate(&base, "rejected-redirect", Method::Header("X-Key".into()), secret, true).unwrap();
+        let plain = format!("{base}/start");
+        let url = logins::bind(&binding, &plain).unwrap();
+        let history = History::default();
+        let _scope = history.enter();
+        let capture = Capture::current();
+        let worker = std::thread::spawn(move || {
+            let _scope = capture.enter();
+            native::get_detailed(&native::agent(), &url)
+        });
+        received_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(logins::deactivate(&binding));
+        release_tx.send(()).unwrap();
+        let failure = worker.join().unwrap().unwrap_err();
+        server.join().unwrap();
+        let records = network_records(&history, &plain);
+        assert_eq!(records.len(), 1);
+        let text = format!("{failure:?}\n{records:?}\n{}", history.report(Filter::All));
+        assert!(!text.contains(secret), "credential reached failure or diagnostics: {text}");
+
+        let (base, _) = serve_recorded(vec![
+            format!("HTTP/1.1 302 Found\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(),
+        ]);
+        let failure = native::get_detailed(&native::agent(), &format!("{base}/anonymous")).unwrap_err();
+        assert!(failure.message.contains(&destination), "{failure:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
