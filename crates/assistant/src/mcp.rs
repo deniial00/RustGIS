@@ -102,16 +102,21 @@ pub(crate) struct ArchiveBatch {
     replies: Vec<Value>,
     pending: Option<(Value, tools::CommandCompletion)>,
     ahead: Option<rustgis_engine::cmd::reads::ReadAhead>,
+    /// Successful explicit selections in the current uninterrupted execution segment.
+    picked: bool,
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum ArchiveStep {
-    Done(Option<String>),
+    Done(Option<String>, bool),
     Read(Box<ArchiveBatch>),
 }
 #[cfg(not(target_arch = "wasm32"))]
 impl ArchiveBatch {
     pub(crate) fn take_read(&mut self) -> Option<rustgis_engine::cmd::reads::ReadAhead> {
         self.ahead.take()
+    }
+    pub(crate) fn picked(&self) -> bool {
+        self.picked
     }
     /// The command's reply reports changes made from the moment it actually runs, not from its
     /// admission: the queue may run user work or other reads first.
@@ -121,6 +126,7 @@ impl ArchiveBatch {
         }
     }
     pub(crate) fn finish(mut self, s: &mut Session, result: Result<Value, String>) -> ArchiveStep {
+        self.picked = false;
         if let Some((id, completion)) = self.pending.take() {
             self.replies.push(archive_reply(id, completion.finish(s, result)));
         }
@@ -137,7 +143,7 @@ impl ArchiveBatch {
                 }
                 let (name, args) = tool_request(msg.get("params")?).ok()?;
                 if name != "run_command"
-                    || !matches!(args.get("command").and_then(Value::as_str), Some("map.reloadTiles" | "map.repairTiles"))
+                    || !matches!(args.get("command").and_then(Value::as_str).map(str::trim), Some("map.reloadTiles" | "map.repairTiles"))
                 {
                     return None;
                 }
@@ -158,6 +164,12 @@ impl ArchiveBatch {
                     Err(error) => self.replies.push(archive_reply(id, completion.finish(s, Err(error)))),
                 }
             } else if let Some(reply) = self.server.handle_value(s, &msg, &self.scope, &mut self.permits, &request) {
+                if reply.get("error").is_none() && reply.pointer("/result/isError") == Some(&Value::Bool(false)) {
+                    self.picked |= msg.get("params").is_some_and(|params| {
+                        let Some(name) = params.get("name").and_then(Value::as_str) else { return false };
+                        params.get("arguments").is_some_and(|args| tools::selects_layer(name, args))
+                    });
+                }
                 self.replies.push(reply);
             }
         }
@@ -168,7 +180,7 @@ impl ArchiveBatch {
         } else {
             self.replies.pop().map(|reply| reply.to_string())
         };
-        ArchiveStep::Done(reply)
+        ArchiveStep::Done(reply, self.picked)
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -207,7 +219,7 @@ impl Server {
         let (messages, batch) = match parsed {
             Ok(Value::Array(batch)) if !batch.is_empty() && batch.len() <= MAX_BATCH => (batch, true),
             Ok(msg) if !msg.is_array() => (vec![msg], false),
-            _ => return ArchiveStep::Done(self.handle_scoped(s, message, scope, permits, request)),
+            _ => return ArchiveStep::Done(self.handle_scoped(s, message, scope, permits, request), false),
         };
         ArchiveBatch {
             server: self,
@@ -220,6 +232,7 @@ impl Server {
             replies: Vec::new(),
             pending: None,
             ahead: None,
+            picked: false,
         }
         .advance(s)
     }

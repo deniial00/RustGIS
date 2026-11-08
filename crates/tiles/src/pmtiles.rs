@@ -874,8 +874,16 @@ impl IndexBudget {
     }
 }
 
-/// Completed ranges remember their subtree height, so sharing a directory cannot hide a path
-/// exceeding MAX_DEPTH. An unfinished range encountered again is a cycle.
+/// A completed directory's height and greatest exclusive tile-run end, including descendants.
+/// Recheck both on every shared reference: its parent may impose a tighter depth or tile boundary.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Default)]
+struct DirectorySummary {
+    height: usize,
+    tile_end: u64,
+}
+
+/// An unfinished range encountered again is a cycle; completed ranges cost no further I/O or budget.
 #[cfg(not(target_arch = "wasm32"))]
 fn validate_directories(
     archive: &str,
@@ -883,9 +891,9 @@ fn validate_directories(
     dir: &[Entry],
     depth: usize,
     budget: &mut IndexBudget,
-    seen: &mut HashMap<(u64, u64), Option<usize>>,
-) -> Result<usize, String> {
-    let mut height = 0;
+    seen: &mut HashMap<(u64, u64), Option<DirectorySummary>>,
+) -> Result<DirectorySummary, String> {
+    let mut summary = DirectorySummary::default();
     for (i, e) in dir.iter().enumerate() {
         rustgis_data::progress::check().map_err(|e| e.to_string())?;
         let end = e.offset.checked_add(e.length).ok_or("a PMTiles entry range overflows")?;
@@ -900,6 +908,7 @@ fn validate_directories(
             if e.length > MAX_BYTES as u64 {
                 return Err(format!("{} bytes is too large to read from an archive", e.length));
             }
+            summary.tile_end = summary.tile_end.max(tile_end);
             continue;
         }
         if depth >= MAX_DEPTH {
@@ -914,7 +923,7 @@ fn validate_directories(
             return Err(format!("{} bytes is too large to read from an archive", e.length));
         }
         let key = (at, e.length);
-        let child_height = if let Some(done) = seen.get(&key) {
+        let child_summary = if let Some(done) = seen.get(&key) {
             done.ok_or("cyclic PMTiles directories")?
         } else {
             // Refuse oversized ranges and too many directories before issuing any I/O.
@@ -933,17 +942,21 @@ fn validate_directories(
             let child = parse_dir_bounded(&bytes, budget.entries)?;
             budget.take(e.length, bytes.len() as u64, child.len())?;
             drop(bytes);
-            let child_height = validate_directories(archive, info, &child, depth + 1, budget, seen)?;
-            seen.insert(key, Some(child_height));
-            child_height
+            let child_summary = validate_directories(archive, info, &child, depth + 1, budget, seen)?;
+            seen.insert(key, Some(child_summary));
+            child_summary
         };
-        let subtree = child_height + 1;
+        if dir.get(i + 1).is_some_and(|next| child_summary.tile_end > next.tile_id) {
+            return Err("overlapping PMTiles tile runs".into());
+        }
+        let subtree = child_summary.height + 1;
         if depth + subtree > MAX_DEPTH {
             return Err("PMTiles directories nested too deep".into());
         }
-        height = height.max(subtree);
+        summary.height = summary.height.max(subtree);
+        summary.tile_end = summary.tile_end.max(child_summary.tile_end);
     }
-    Ok(height)
+    Ok(summary)
 }
 
 fn u64_at(b: &[u8], i: usize) -> Option<u64> {
@@ -1434,6 +1447,75 @@ pub(crate) mod tests {
         std::fs::write(&path, indexed_archive(&entries, Vec::new())).unwrap();
         assert_eq!(read_info_local(source).unwrap_err(), "tile ids overflow");
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// Two root pointers; the first reaches [0, 3), optionally through an intermediate directory,
+    /// while the second reaches an empty directory. `next_id = 2` hides tile 2 from lookup.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ancestor_boundary_archive(nested: bool, next_id: u64) -> Vec<u8> {
+        let mut leaves = write_dir(&[Entry { tile_id: 0, offset: 0, length: 3, run_length: 3 }]);
+        let mut first = Entry { tile_id: 0, offset: 0, length: leaves.len() as u64, run_length: 0 };
+        if nested {
+            let directory = write_dir(&[first]);
+            first.offset = leaves.len() as u64;
+            first.length = directory.len() as u64;
+            leaves.extend(directory);
+        }
+        let empty = write_dir(&[]);
+        let next = Entry { tile_id: next_id, offset: leaves.len() as u64, length: empty.len() as u64, run_length: 0 };
+        leaves.extend(empty);
+        indexed_archive(&[first, next], leaves)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fresh_local_validation_checks_descendant_runs_against_ancestor_boundaries() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-ancestor-boundaries-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        for nested in [false, true] {
+            // [0, 3) crosses a boundary at 2, ends exactly at 3, and leaves a gap before 5.
+            for next_id in [2, 3, 5] {
+                std::fs::write(&path, ancestor_boundary_archive(nested, next_id)).unwrap();
+                let result = read_info_local(source);
+                if next_id == 2 {
+                    assert_eq!(result.unwrap_err(), "overlapping PMTiles tile runs", "nested={nested}");
+                } else {
+                    assert!(result.is_ok(), "nested={nested}, next_id={next_id}: {result:?}");
+                }
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn memoized_directory_rechecks_each_parent_boundary_without_io_or_budget() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-memo-boundaries-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        let leaf = write_dir(&[Entry { tile_id: 0, offset: 0, length: 3, run_length: 3 }]);
+        let pointer = Entry { tile_id: 0, offset: 0, length: leaf.len() as u64, run_length: 0 };
+        let bytes = indexed_archive(&[pointer], leaf.clone());
+        let (info, _, _) = parse_head(&bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        // Exactly one leaf's work is available; the initial visit consumes all of it.
+        let mut budget = IndexBudget { stored: leaf.len() as u64, decoded: leaf.len() as u64, entries: 1, directories: 1 };
+        let mut seen = HashMap::new();
+        let summary = validate_directories(source, &info, &[pointer], 0, &mut budget, &mut seen).unwrap();
+        assert_eq!((summary.height, summary.tile_end), (1, 3));
+        assert_eq!((budget.stored, budget.decoded, budget.entries, budget.directories), (0, 0, 0, 0));
+        // Reused references must neither reopen the removed file nor charge the exhausted budget.
+        std::fs::remove_file(&path).unwrap();
+        for next_id in [3, 5, 2] {
+            let parent = [pointer, Entry { tile_id: next_id, offset: 0, length: 3, run_length: 1 }];
+            let result = validate_directories(source, &info, &parent, 0, &mut budget, &mut seen);
+            if next_id == 2 {
+                assert_eq!(result.unwrap_err(), "overlapping PMTiles tile runs");
+            } else {
+                let summary = result.unwrap();
+                assert_eq!((summary.height, summary.tile_end), (1, next_id + 1));
+            }
+            assert_eq!((budget.stored, budget.decoded, budget.entries, budget.directories), (0, 0, 0, 0));
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

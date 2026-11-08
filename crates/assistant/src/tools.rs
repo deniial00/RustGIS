@@ -154,6 +154,18 @@ pub fn target(call: &ToolCall) -> Option<(String, Value)> {
     }
 }
 
+/// Whether a successfully executed tool explicitly chose a layer, even if it was already active.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn selects_layer(name: &str, args: &Value) -> bool {
+    match name {
+        "run_command" => args.get("command").and_then(Value::as_str).map(str::trim) == Some("layer.select"),
+        "run" => args.get("script").and_then(Value::as_str).is_some_and(|script| {
+            rustgis_engine::cmd::workflows::script_commands(script).is_ok_and(|lines| lines.iter().any(|(_, id, _)| id == "layer.select"))
+        }),
+        _ => false,
+    }
+}
+
 /// The executor's strict envelope is the only input to engine planning.
 pub fn policy_call(call: &ToolCall) -> Result<Option<Call>, String> {
     let c = match call.name.as_str() {

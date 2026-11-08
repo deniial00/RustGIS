@@ -269,3 +269,142 @@ fn reviewed_batch_suffix_keeps_its_preflight_state_across_a_landed_reload() {
     assert!(s.map().tiles[0].error.is_none(), "the observer's turn came after the reload landed");
     relay.stop();
 }
+
+#[test]
+fn padded_archive_commands_use_the_worker_and_keep_admission_and_landing_boundaries() {
+    for reviewed in [false, true] {
+        for repair in [false, true] {
+            let (_root, mut s, original, replacement) = fixture();
+            let retained = pmtiles::info_blocking(original.to_str().unwrap(), Duration::from_secs(10)).unwrap();
+            archive(&original, "Reloaded");
+            let relay = Relay::start(0).unwrap();
+            let grant = if reviewed { relay.grant_reviewed(false).unwrap() } else { relay.grant(true).unwrap() };
+            let name = if repair { " map.repairTiles " } else { " map.reloadTiles " };
+            let params = if repair { json!({"index":0,"path":replacement}) } else { json!({"index":0}) };
+            let depth = s.undo_depth();
+            let (id, rx) = queue(&relay, &grant, command(1, name, params));
+            assert_eq!(relay.poll(&mut s), 0);
+            if reviewed {
+                assert_eq!(grant.pending().len(), 1);
+                assert!(relay.take_archive_read().is_none());
+                grant.decide(id, true);
+                assert_eq!(relay.poll(&mut s), 0);
+            }
+            let ahead = relay.take_archive_read().unwrap();
+            assert!(ahead.reads(), "{name} must use the archive worker");
+            let done = worker(ahead);
+            assert!(rx.try_recv().is_err());
+            assert_eq!(s.undo_depth(), depth);
+            assert_eq!(s.map().tiles[0].url, original.to_str().unwrap());
+            assert!(Arc::ptr_eq(&retained, &pmtiles::info_blocking(original.to_str().unwrap(), Duration::from_secs(10)).unwrap()));
+            finish(&relay, &mut s, done);
+            let answer = reply(&rx);
+            assert_eq!(answer["result"]["isError"], false, "{answer}");
+            assert_eq!(s.undo_depth(), depth + 1);
+            assert_eq!(s.map().tiles[0].url, if repair { replacement.to_str().unwrap() } else { original.to_str().unwrap() });
+            relay.stop();
+        }
+    }
+}
+
+#[test]
+fn padded_archive_commands_without_authorization_do_not_start_a_read() {
+    for repair in [false, true] {
+        let (_root, mut s, original, replacement) = fixture();
+        let relay = Relay::start(0).unwrap();
+        let grant = relay.grant(false).unwrap();
+        let name = if repair { " map.repairTiles " } else { " map.reloadTiles " };
+        let params = if repair { json!({"index":0,"path":replacement}) } else { json!({"index":0}) };
+        let (_, rx) = queue(&relay, &grant, command(1, name, params));
+        assert_eq!(relay.poll(&mut s), 1);
+        assert!(relay.take_archive_read().is_none());
+        let answer = reply(&rx);
+        assert_eq!(answer["result"]["isError"], true, "{answer}");
+        assert_eq!(s.map().tiles[0].url, original.to_str().unwrap());
+        relay.stop();
+    }
+}
+
+fn layers(s: &mut Session) -> (u32, u32) {
+    for name in ["A", "B"] {
+        s.run("layer.template", &json!({"template":"points","name":name})).unwrap();
+    }
+    let a = s.map().layer_by_name("A").unwrap().id;
+    let b = s.map().layer_by_name("B").unwrap().id;
+    s.run("layer.select", &json!({"layer":a})).unwrap();
+    (a, b)
+}
+
+#[test]
+fn selecting_the_active_layer_is_owned_before_each_archive_pause() {
+    for second_pause in [false, true] {
+        let (_root, mut s, _, _) = fixture();
+        let (a, b) = layers(&mut s);
+        let before_a = s.map().layer(a).unwrap().renderer.clone();
+        let before_b = s.map().layer(b).unwrap().renderer.clone();
+        let relay = Relay::start(0).unwrap();
+        let grant = relay.grant(true).unwrap();
+        let mut batch = Vec::new();
+        if second_pause {
+            batch.push(command(1, "map.reloadTiles", json!({"index":0})));
+        }
+        batch.extend([
+            command(2, "layer.select", json!({"layer":a})),
+            // An unrelated failure must not erase a selection that actually succeeded.
+            command(3, "layer.select", json!({"layer":"Missing"})),
+            command(4, "map.reloadTiles", json!({"index":0})),
+            command(5, "layer.color", json!({"color":"#123456"})),
+        ]);
+        let (_, rx) = queue(&relay, &grant, json!(batch));
+        assert_eq!(relay.poll(&mut s), 0);
+        if second_pause {
+            let done = worker(relay.take_archive_read().unwrap());
+            finish(&relay, &mut s, done);
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(s.active_layer, Some(a));
+        assert_eq!(lock(&relay.owner.shared.agents).get(&grant.token).unwrap().active, Some(a));
+        let done = worker(relay.take_archive_read().unwrap());
+        s.run("layer.select", &json!({"layer":b})).unwrap();
+        finish(&relay, &mut s, done);
+        let answer = reply(&rx);
+        let replies = answer.as_array().unwrap();
+        assert_eq!(replies.last().unwrap()["result"]["isError"], false, "{answer}");
+        assert_ne!(s.map().layer(a).unwrap().renderer, before_a, "suffix must change the selected A");
+        assert_eq!(s.map().layer(b).unwrap().renderer, before_b, "user-selected B must not be changed");
+        assert_eq!(s.active_layer, Some(b), "the user's active layer is restored");
+        relay.stop();
+    }
+}
+
+#[test]
+fn failed_or_unexecuted_selection_does_not_own_a_layer_at_archive_pause() {
+    let (_root, mut s, _, _) = fixture();
+    let (a, b) = layers(&mut s);
+    let before_a = s.map().layer(a).unwrap().renderer.clone();
+    let before_b = s.map().layer(b).unwrap().renderer.clone();
+    let relay = Relay::start(0).unwrap();
+    let grant = relay.grant(true).unwrap();
+    let (_, rx) = queue(
+        &relay,
+        &grant,
+        json!([
+            command(1, "layer.select", json!({"layer":"Missing"})),
+            command(2, "map.reloadTiles", json!({"index":0})),
+            command(3, "layer.color", json!({"color":"#123456"})),
+            command(4, "layer.select", json!({"layer":a})),
+        ]),
+    );
+    assert_eq!(relay.poll(&mut s), 0);
+    assert_eq!(lock(&relay.owner.shared.agents).get(&grant.token).unwrap().active, None);
+    let done = worker(relay.take_archive_read().unwrap());
+    s.run("layer.select", &json!({"layer":b})).unwrap();
+    finish(&relay, &mut s, done);
+    let answer = reply(&rx);
+    assert_eq!(answer[0]["result"]["isError"], true, "{answer}");
+    assert_eq!(answer[2]["result"]["isError"], false, "{answer}");
+    assert_eq!(s.map().layer(a).unwrap().renderer, before_a);
+    assert_ne!(s.map().layer(b).unwrap().renderer, before_b, "without an executed selection the suffix follows the user");
+    assert_eq!(s.active_layer, Some(b));
+    relay.stop();
+}

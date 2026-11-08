@@ -749,17 +749,16 @@ impl Relay {
         let Archive { req, batch, started, .. } = archive;
         let layers = self.enter_agent(s, &req.token);
         let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (*batch).finish(s, result)))
-            .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line))));
-        let out = match step {
+            .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line)), false));
+        let (out, picked) = match step {
             crate::mcp::ArchiveStep::Read(batch) => {
-                self.leave_agent(s, &req.token, layers, false);
+                self.leave_agent(s, &req.token, layers, batch.picked());
                 *lock(&self.owner.shared.archive) = Some(Archive { req, batch, started });
                 self.owner.shared.notify();
                 return;
             }
-            crate::mcp::ArchiveStep::Done(out) => out,
+            crate::mcp::ArchiveStep::Done(out, picked) => (out, picked),
         };
-        let picked = selects_layer(&req.line) && reply_ok(out.as_deref());
         self.leave_agent(s, &req.token, layers, picked);
         self.audit(&req.line, out.as_deref(), started.elapsed());
         if let Some(action) = action(&req.line, out.as_deref()) {
@@ -1007,11 +1006,11 @@ impl Relay {
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 server.start_archive_batch(s, &req.line, scope, permits, &req.id.to_string())
             }))
-            .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line))));
-            let out = match out {
-                crate::mcp::ArchiveStep::Done(out) => out,
+            .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line)), false));
+            let (out, picked) = match out {
+                crate::mcp::ArchiveStep::Done(out, picked) => (out, picked),
                 crate::mcp::ArchiveStep::Read(batch) => {
-                    self.leave_agent(s, &req.token, layers, false);
+                    self.leave_agent(s, &req.token, layers, batch.picked());
                     *lock(&self.owner.shared.archive) = Some(Archive { req, batch, started });
                     let mut queue = lock(&self.owner.shared.requests);
                     for rest in pending.rev() {
@@ -1020,8 +1019,6 @@ impl Relay {
                     return ran;
                 }
             };
-            // A layer.select that failed (an unknown layer, a refusal) chose nothing.
-            let picked = selects_layer(&req.line) && reply_ok(out.as_deref());
             self.leave_agent(s, &req.token, layers, picked);
             self.audit(&req.line, out.as_deref(), started.elapsed());
             if let Some(a) = action(&req.line, out.as_deref()) {
@@ -1092,11 +1089,9 @@ pub(crate) fn reply_ok(reply: Option<&str>) -> bool {
 pub(crate) fn selects_layer(line: &str) -> bool {
     let Ok(msg) = serde_json::from_str::<Value>(line) else { return false };
     let messages = msg.as_array().map(Vec::as_slice).unwrap_or_else(|| std::slice::from_ref(&msg));
-    messages.iter().filter_map(|m| m.get("params").and_then(|p| p.get("arguments"))).any(|a| {
-        a.get("command").and_then(Value::as_str) == Some("layer.select")
-            || a.get("script").and_then(Value::as_str).is_some_and(|s| {
-                rustgis_engine::cmd::workflows::script_commands(s).is_ok_and(|lines| lines.iter().any(|(_, id, _)| id == "layer.select"))
-            })
+    messages.iter().filter_map(|m| m.get("params")).any(|params| {
+        let Some(name) = params.get("name").and_then(Value::as_str) else { return false };
+        params.get("arguments").is_some_and(|args| crate::tools::selects_layer(name, args))
     })
 }
 

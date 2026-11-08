@@ -110,8 +110,10 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then:
     }
     let archive = matches!(command, "map.reloadTiles" | "map.repairTiles").then(|| reads::archive_target(&app.session, &p)).flatten();
     let mut p = p;
-    if let Some((i, _)) = &archive {
-        p["index"] = json!(i);
+    if let Some((i, _)) = &archive
+        && let Some(params) = p.as_object_mut()
+    {
+        params.insert("index".into(), json!(i));
     }
     let what = match &layer {
         Some((_, name)) => name.clone(),
@@ -149,7 +151,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then:
 /// Queues an archive read already admitted by the relay, without dispatching another command.
 pub fn admitted(app: &mut RustGisApp, ahead: reads::ReadAhead, relay: rustgis_assistant::relay::Relay) {
     let Some((command, params)) = ahead.command() else {
-        relay.finish_archive_read(&mut app.session, Err(tl!("This read was already started").to_string()));
+        finish_relay(app, &relay, Err(tl!("This read was already started").to_string()));
         return;
     };
     let params = params.clone();
@@ -183,7 +185,16 @@ fn not_run_asked(app: &mut RustGisApp, asked: &Asked, why: String) {
     not_run(app, asked.then, why.clone());
     if let Some(relay) = &asked.relay {
         relay.begin_archive_landing(&app.session);
-        relay.finish_archive_read(&mut app.session, Err(why));
+        finish_relay(app, relay, Err(why));
+    }
+}
+
+/// Resumed relay suffixes have the same interaction guard as calls run by `Relay::poll`.
+fn finish_relay(app: &mut RustGisApp, relay: &rustgis_assistant::relay::Relay, result: Result<Value, String>) {
+    let state = app.session.state();
+    relay.finish_archive_read(&mut app.session, result);
+    if app.session.state() != state {
+        app.map.cancel_label_drag();
     }
 }
 
@@ -345,7 +356,7 @@ fn complete_here(app: &mut RustGisApp, asked: Asked, p: Value, done: Result<read
         app.session.notify(text, false);
     }
     if let Some(relay) = &asked.relay {
-        relay.finish_archive_read(&mut app.session, r.clone());
+        finish_relay(app, relay, r.clone());
     }
     answered(app, asked.then, r)
 }
@@ -491,6 +502,187 @@ mod tests {
             assert!(std::time::Instant::now() < end, "the reads never landed");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    fn relay_command(id: u64, command: &str, params: Value) -> Value {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"run_command","arguments":{"command":command,"params":params}}})
+    }
+
+    fn paused_relay(
+        app: &mut RustGisApp,
+        batch: Value,
+    ) -> (rustgis_assistant::relay::Relay, rustgis_assistant::relay::Grant, std::net::TcpStream, reads::ReadAhead) {
+        use rustgis_assistant::relay::{Relay, read_token_file};
+        use std::io::Write;
+        use std::net::TcpStream;
+        let relay = Relay::start(0).unwrap();
+        let grant = relay.grant(true).unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", relay.port())).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let token = read_token_file(grant.token_file()).unwrap();
+        writeln!(client, "{}", json!({"jsonrpc":"2.0","method":"rustgis/attach","params":{"token":token,"access":true}})).unwrap();
+        writeln!(client, "{batch}").unwrap();
+        client.flush().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            relay.poll(&mut app.session);
+            if let Some(ahead) = relay.take_archive_read() {
+                return (relay, grant, client, ahead);
+            }
+            assert!(std::time::Instant::now() < end, "relay never paused at its archive read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn label_drag_harness(path: &std::path::Path) -> (egui_kittest::Harness<'static, RustGisApp>, egui::Pos2) {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("map.addTiles", json!({"url":path,"name":"Linked","overlay":true})).unwrap();
+        app.run("layer.template", json!({"template":"points","name":"Labelled"})).unwrap();
+        app.run(
+            "edit.addFeature",
+            json!({"layer":"Labelled","geometry":{"type":"Point","coordinates":[1,1]},"attributes":{"name":"Relay drag"}}),
+        )
+        .unwrap();
+        app.run("labels.field", json!({"layer":"Labelled","field":"name"})).unwrap();
+        app.run("tool.set", json!({"tool":"moveLabel"})).unwrap();
+        app.reads_off_frame = true;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 860.0))
+            .with_step_dt(0.016)
+            .with_max_steps(10_000)
+            .build_ui_state(
+                |ui, app: &mut RustGisApp| {
+                    let ctx = ui.ctx().clone();
+                    app.logic(&ctx);
+                    app.ui(ui);
+                },
+                app,
+            );
+        h.step();
+        h.state_mut().run("map.zoomToExtent", json!({"extent":[-1,-1,5,5]})).unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        let at = loop {
+            h.step();
+            if let Some(at) = h.state().map.label_position_for_tests("Relay drag")
+                && !h.state().map.drawing()
+            {
+                break at;
+            }
+            assert!(std::time::Instant::now() < end, "the label was never drawn");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        label_pointer(&mut h, at, None);
+        label_pointer(&mut h, at, Some(true));
+        for i in 1..=6 {
+            label_pointer(&mut h, at + egui::vec2(0.0, -8.0 * i as f32), None);
+        }
+        assert!(h.state().map.label_dragging_for_tests(), "a real label drag must be active");
+        (h, at + egui::vec2(0.0, -48.0))
+    }
+
+    fn label_pointer(h: &mut egui_kittest::Harness<'_, RustGisApp>, at: egui::Pos2, pressed: Option<bool>) {
+        h.event(egui::Event::PointerMoved(at));
+        if let Some(pressed) = pressed {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.step();
+    }
+
+    #[test]
+    fn resumed_relay_edits_cancel_label_drags_on_success_failure_and_cancel_but_reads_preserve_them() {
+        use std::io::{BufRead, BufReader};
+        let _turn = crate::fetching::turn();
+        let dir = std::env::temp_dir().join(format!("rustgis-relay-label-drag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for outcome in ["success", "failure", "cancel", "not_run"] {
+            for removes in [true, false] {
+                let path = dir.join(format!("{outcome}-{removes}.pmtiles"));
+                archive(&path, "Label drag");
+                let (mut h, release) = label_drag_harness(&path);
+                let suffix = if removes {
+                    relay_command(2, "layer.remove", json!({"layer":"Labelled"}))
+                } else {
+                    relay_command(2, "map.tiles", json!({}))
+                };
+                let batch = json!([relay_command(1, "map.reloadTiles", json!({"index":0})), suffix]);
+                let (relay, _grant, client, ahead) = paused_relay(h.state_mut(), batch);
+                assert!(h.state().map.label_dragging_for_tests());
+                if outcome == "failure" {
+                    std::fs::write(&path, b"not a PMTiles archive").unwrap();
+                }
+                admitted(h.state_mut(), ahead, relay.clone());
+                if outcome == "cancel" {
+                    h.state().reads.cancel_for_tests();
+                } else if outcome == "not_run" {
+                    let job = h.state_mut().reads.job.take().unwrap();
+                    job.control.cancel();
+                    not_run_asked(h.state_mut(), &job.asked, "The archive read could not start".into());
+                    let end = std::time::Instant::now() + Duration::from_secs(10);
+                    while job.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() {
+                        assert!(std::time::Instant::now() < end, "cancelled worker did not stop");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+                landed(h.state_mut(), 60);
+                let mut line = String::new();
+                BufReader::new(client).read_line(&mut line).unwrap();
+                let reply: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(reply[0]["result"]["isError"], outcome != "success", "{outcome}: {reply}");
+                assert_eq!(reply[1]["result"]["isError"], false, "{reply}");
+                assert_eq!(h.state().map.label_dragging_for_tests(), !removes, "{outcome}: resumed edit guard");
+                assert_eq!(h.state().session.map().layer_by_name("Labelled").is_none(), removes);
+                let mark = h.state().session.notice_mark();
+                let depth = h.state().session.undo_depth();
+                label_pointer(&mut h, release, Some(false));
+                assert!(!h.state().map.label_dragging_for_tests());
+                if removes {
+                    assert_eq!(h.state().session.undo_depth(), depth, "release must not dispatch labels.move");
+                    assert!(h.state().session.notices_since(mark).is_empty(), "no stale labels.move error after removal");
+                } else {
+                    assert_eq!(h.state().session.map().layer_by_name("Labelled").unwrap().labels.default.moved.len(), 1);
+                    assert_eq!(h.state().session.undo_depth(), depth + 1, "a read-only suffix preserves the pending move");
+                }
+                relay.stop();
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn archive_parameter_normalization_uses_objects_and_rejects_non_objects_without_panicking() {
+        let _turn = crate::fetching::turn();
+        let dir = std::env::temp_dir().join(format!("rustgis-archive-params-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.pmtiles");
+        let replacement = dir.join("replacement.pmtiles");
+        archive(&original, "Original");
+        archive(&replacement, "Replacement");
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("map.addTiles", json!({"url":original,"name":"Linked","overlay":true})).unwrap();
+        app.reads_off_frame = true;
+        for command in ["map.reloadTiles", "map.repairTiles"] {
+            for params in [Value::Null, json!(true), json!(7), json!([]), json!("not an object")] {
+                assert!(run(&mut app, command, params).is_err());
+                assert!(!busy(&app), "hostile parameters must not start a read");
+            }
+            let id = app.session.map().tiles[0].id.clone();
+            for mut params in [json!({"index":0}), json!({"name":"Linked"}), json!({"id":id})] {
+                if command == "map.repairTiles" {
+                    params.as_object_mut().unwrap().insert("path".into(), json!(replacement));
+                }
+                run(&mut app, command, params).unwrap();
+                let asked = &app.reads.job.as_ref().unwrap().asked;
+                assert_eq!(asked.params.get("index"), Some(&json!(0)));
+                assert_eq!(asked.archive.as_ref().unwrap().0, 0);
+                landed(&mut app, 60);
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

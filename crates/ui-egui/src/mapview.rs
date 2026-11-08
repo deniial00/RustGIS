@@ -536,6 +536,17 @@ impl MapView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn label_dragging_for_tests(&self) -> bool {
+        self.moving_label.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn label_position_for_tests(&self, text: &str) -> Option<Pos2> {
+        let label = self.labels.iter().find(|label| label.text == text)?;
+        Some(self.view_rect?.0.min + vec2(label.x, label.y))
+    }
+
     /// Cancels a vertex preview and its pending release together, leaving other map gestures
     /// alone. The chosen node is cleared because its row/address may now belong to another shape.
     pub(crate) fn cancel_vertex_drag(&mut self) {
