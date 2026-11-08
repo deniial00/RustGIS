@@ -41,7 +41,7 @@ pub struct FgbSource {
     slots: Vec<Option<usize>>,
     /// Kept after the input so all readers close before the private workspace is removed.
     #[cfg(not(target_arch = "wasm32"))]
-    _workspace: Option<Arc<tempfile::TempDir>>,
+    _workspace: Option<Arc<super::gdal::ReloadWorkspace>>,
 }
 
 impl FgbSource {
@@ -52,7 +52,7 @@ impl FgbSource {
 
     /// Opens a private conversion, keeping its files alive for every shared reader.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_owned_path(path: &Path, name: &str, workspace: Arc<tempfile::TempDir>) -> Result<Self> {
+    pub fn open_owned_path(path: &Path, name: &str, workspace: Arc<super::gdal::ReloadWorkspace>) -> Result<Self> {
         let mut source = Self::open_path(path, name)?;
         source._workspace = Some(workspace);
         Ok(source)

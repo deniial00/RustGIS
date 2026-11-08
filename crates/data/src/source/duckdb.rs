@@ -14,6 +14,7 @@
 //! network permissions (`rustgis_engine::cmd::plugins::SQL`).
 
 use super::Family;
+pub use super::external::ReloadWorkspace;
 use super::external::{self, TempFile, fnv1a, output, stamp, touch};
 use crate::secrets::Secret;
 use crate::{DataError, Result};
@@ -312,6 +313,8 @@ pub struct Output {
     pub parts: Vec<Part>,
     /// Rows without a geometry, left out.
     pub skipped: u64,
+    /// Rows of unselected geometry families, left out of a manual replacement.
+    pub other_family: u64,
 }
 
 /// A table of a database with a geometry column.
@@ -720,12 +723,18 @@ fn run_selected_in(dir: &Path, q: &Query<'_>, confined: bool, selected: Option<F
         }
     }
     if let Some(family) = selected {
-        if out.parts.is_empty() && out.skipped == 0 {
-            // DuckDB's GEOMETRY declaration is not family-specific. With no rows there is no
-            // conflicting family, and COPY has still written a valid empty GeoParquet.
+        out.parts.retain(|p| {
+            if p.family == family {
+                true
+            } else {
+                out.other_family = out.other_family.saturating_add(p.count);
+                false
+            }
+        });
+        if out.parts.is_empty() && (out.other_family > 0 || out.skipped == 0) {
+            // COPY wrote a valid empty GeoParquet for every family, even when the selected
+            // family disappeared while rows of another family remain.
             out.parts.push(Part { path: dir.join(format!("{run_tag}.{}.parquet", family.label())), family, count: 0 });
-        } else {
-            out.parts.retain(|p| p.family == family);
         }
     }
     if out.parts.is_empty() {
@@ -826,7 +835,7 @@ pub fn convert_table_of(database: &Database, table: &Table, crs: Option<&str>) -
 #[derive(Debug)]
 pub struct FreshOutput {
     pub output: Output,
-    pub workspace: std::sync::Arc<tempfile::TempDir>,
+    pub workspace: std::sync::Arc<ReloadWorkspace>,
 }
 
 /// Re-reads only a selected table/family, bypassing file-signature caches. The result has its own
@@ -837,8 +846,7 @@ pub fn convert_table_fresh(database: &Path, table: &Table, family: Family, crs: 
 }
 
 fn convert_table_fresh_in(dir: &Path, database: &Path, table: &Table, family: Family, crs: Option<&str>) -> Result<FreshOutput> {
-    std::fs::create_dir_all(dir)?;
-    let workspace = std::sync::Arc::new(tempfile::Builder::new().prefix("reload-").tempdir_in(dir)?);
+    let workspace = external::reload_workspace(dir)?;
     let output = run_selected_in(
         workspace.path(),
         &Query { sql: &table.sql(), database: Some(&Database::File(database.to_path_buf())), crs },
@@ -1235,12 +1243,16 @@ mod tests {
         assert_eq!(a.parts.iter().map(|p| p.count).collect::<Vec<_>>(), vec![1000]);
         // The second time is a cache hit, read back from the key file.
         assert_eq!(convert_table_in(&cache, &db, &tables[0], None).unwrap(), a);
-        // A rejected selected-family conversion has written temporary Parquets already; its
-        // private workspace must disappear even though ordinary cached results remain reusable.
-        assert!(convert_table_fresh_in(&cache, &db, &tables[0], Family::Lines, None).is_err());
+        // A selected family the table no longer holds is an empty branch, with the other family's
+        // rows counted; its private workspace disappears with its owner even though ordinary
+        // cached results remain reusable.
+        let fresh = convert_table_fresh_in(&cache, &db, &tables[0], Family::Lines, None).unwrap();
+        assert_eq!(fresh.output.parts.iter().map(|p| (p.family, p.count)).collect::<Vec<_>>(), vec![(Family::Lines, 0)]);
+        assert_eq!(fresh.output.other_family, 1000);
+        drop(fresh);
         assert!(
             std::fs::read_dir(&cache).unwrap().flatten().all(|entry| !entry.file_name().to_string_lossy().starts_with("reload-")),
-            "failed fresh conversions must not retain workspaces"
+            "dropped fresh conversions must not retain workspaces"
         );
         // Changes still in the write-ahead log are a different file.
         let mut wal = db.clone().into_os_string();

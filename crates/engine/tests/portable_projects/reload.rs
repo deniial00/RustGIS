@@ -616,7 +616,11 @@ fn reload_reconverts_original_gdal_folder_and_accepts_its_declared_empty_table()
     let live_workspace = live_path.parent().unwrap().to_path_buf();
     assert_ne!(live_path, fresh_path, "a saved link cannot borrow another session's disposable FGB");
     assert_eq!(opened_while_live.map().layers.len(), 1);
+    let abandoned = abandoned_reload_workspace(&fresh_workspace);
     let candidate = retained.relinked(folder.to_str().unwrap(), None).unwrap();
+    assert!(!abandoned.exists(), "a new GDAL conversion reclaims crash-abandoned workspaces");
+    assert!(fresh_workspace.exists(), "the live reader's locked workspace must survive pruning");
+    assert_eq!(first_point(&retained.read_all().unwrap().0), Coord::new(8.0, 48.0));
     let candidate_path = std::path::PathBuf::from(candidate.path.as_ref().unwrap());
     let candidate_workspace = candidate_path.parent().unwrap().to_path_buf();
     assert!(candidate_path.exists());
@@ -728,7 +732,12 @@ fn reload_reconverts_duckdb_table_and_keeps_only_its_original_geometry_branch() 
     let id = s.active_layer.unwrap();
     assert_eq!(first_point(&loaded(&s, id)), Coord::new(2.0, 48.0));
     sql("UPDATE survey SET geom=ST_Point(8,48); INSERT INTO survey VALUES(9,ST_GeomFromText('LINESTRING(0 0,1 1)'))");
+    let mark = s.notice_mark();
     s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    assert_eq!(
+        s.notices_since(mark).iter().filter(|n| n.text.contains("DuckDB: 1 rows of another geometry type were left out")).count(),
+        1
+    );
     let fresh = loaded(&s, id);
     assert_eq!(first_point(&fresh), Coord::new(8.0, 48.0));
     assert_eq!(fresh.features.len(), 1);
@@ -739,7 +748,11 @@ fn reload_reconverts_duckdb_table_and_keeps_only_its_original_geometry_branch() 
     let fresh_path = std::path::PathBuf::from(source.path.as_ref().unwrap());
     let fresh_workspace = fresh_path.parent().unwrap().to_path_buf();
     assert_eq!(s.map().layer(id).unwrap().linked_file(), path.to_str());
+    let abandoned = abandoned_reload_workspace(&fresh_workspace);
     let candidate = source.relinked(path.to_str().unwrap(), None).unwrap();
+    assert!(!abandoned.exists(), "a new DuckDB conversion reclaims crash-abandoned workspaces");
+    assert!(fresh_workspace.exists(), "the live reader's locked workspace must survive pruning");
+    assert_eq!(first_point(&retained.read_all().unwrap().0), Coord::new(8.0, 48.0));
     let candidate_path = std::path::PathBuf::from(candidate.path.as_ref().unwrap());
     let candidate_workspace = candidate_path.parent().unwrap().to_path_buf();
     drop(candidate);
@@ -874,8 +887,8 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     assert!(restored.info().unwrap().notes.iter().any(|note| note.contains("Z or M coordinates")));
     drop(reopened);
 
-    // Explicit open also retains runtime settings and the read generation. A failed
-    // candidate leaves the old provenance, path and actual reader untouched.
+    // Explicit open retains runtime settings and the read generation. If the provenance has
+    // disappeared, an existing converted file remains a usable fallback.
     let mut restored: SourceLayer = serde_json::from_value(serialized).unwrap();
     restored.limit = 17;
     restored.byte_budget = 12345;
@@ -884,12 +897,11 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     assert_eq!((restored.limit, restored.byte_budget, restored.reads), (17, 12345, 23));
     let restored_path = restored.path.clone();
     let restored_origin = restored.gdal.clone();
-    let retained = restored.clone();
     std::fs::remove_file(&path).unwrap();
-    assert!(restored.open().is_err());
+    restored.open().unwrap();
     assert_eq!(restored.path, restored_path);
     assert_eq!(restored.gdal, restored_origin);
-    assert!(restored.same_opening(&retained));
+    assert!(restored.error.is_none());
     assert_eq!(first_point(&restored.read_all().unwrap().0), Coord::new(8.0, 48.0));
 }
 
@@ -945,4 +957,173 @@ fn saved_duckdb_conversion_restores_fresh_selected_family_despite_an_unchanged_s
     assert_eq!(restored.duckdb, origin);
     assert_eq!(restored.linked_file(), path.to_str());
     assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(2.0, 48.0));
+}
+
+fn abandoned_reload_workspace(live: &Path) -> std::path::PathBuf {
+    let lock = std::fs::File::options().read(true).write(true).open(live.join("owner.lock")).unwrap();
+    assert!(lock.try_lock().is_err(), "a live concrete reader owns an exclusive workspace lock");
+    let abandoned = live.with_file_name(format!("reload-abandoned-{}", live.file_name().unwrap().to_string_lossy()));
+    std::fs::create_dir(&abandoned).unwrap();
+    std::fs::write(abandoned.join("owner.lock"), []).unwrap();
+    std::fs::write(abandoned.join("leftover"), b"crash-abandoned conversion").unwrap();
+    abandoned
+}
+
+fn reload_duckdb_sql(path: &Path, statement: &str) {
+    use rustgis_engine::data::source::duckdb;
+    let output = std::process::Command::new(duckdb::program().unwrap())
+        .arg(path)
+        .arg("-c")
+        .arg(format!("LOAD spatial; {statement}"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn duckdb_reload_reports_other_family_rows_only_for_mixed_tables() {
+    use rustgis_engine::data::source::duckdb;
+    if !duckdb::available() {
+        return;
+    }
+    let f = Fixture::new("reload-duckdb-family-notice");
+    let path = f.file("survey.duckdb");
+    reload_duckdb_sql(
+        &path,
+        "CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(2,48) AS geom;
+         INSERT INTO survey VALUES (8,ST_GeomFromText('LINESTRING(0 0,1 1)')), (9,ST_GeomFromText('LINESTRING(2 2,3 3)'))",
+    );
+    let mut s = session();
+    s.run("layer.addDatabase", &json!({"database": path, "table": "survey", "stream": true})).unwrap();
+    let id = s.map().layers.iter().find(|l| l.dataset.geometry_type == GeometryType::Point).unwrap().id;
+    let mark = s.notice_mark();
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    let notices = s.notices_since(mark);
+    let losses = notices.iter().filter(|n| n.text.contains("rows of another geometry type were left out")).collect::<Vec<_>>();
+    assert_eq!(losses.len(), 1);
+    assert!(losses[0].text.contains("DuckDB: 2 rows of another geometry type were left out"), "{}", losses[0].text);
+    assert_eq!(loaded(&s, id).features.len(), 1);
+    reload_duckdb_sql(&path, "DELETE FROM survey WHERE ST_Dimension(geom)=1");
+    let mark = s.notice_mark();
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("rows of another geometry type were left out")));
+    assert_eq!(loaded(&s, id).features.len(), 1);
+}
+
+#[test]
+fn duckdb_reload_installs_empty_points_and_lines_when_only_the_other_family_remains() {
+    use rustgis_engine::data::source::{Family, duckdb};
+    if !duckdb::available() {
+        return;
+    }
+    for (family, geometry, dimension, left_out) in
+        [(Family::Points, GeometryType::Point, 0, 2), (Family::Lines, GeometryType::Polyline, 1, 1)]
+    {
+        let f = Fixture::new("reload-duckdb-empty-family");
+        let path = f.file("survey.duckdb");
+        reload_duckdb_sql(
+            &path,
+            "CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(2,48) AS geom;
+             INSERT INTO survey VALUES (8,ST_GeomFromText('LINESTRING(0 0,1 1)')), (9,ST_GeomFromText('LINESTRING(2 2,3 3)'))",
+        );
+        let mut s = session();
+        s.run("layer.addDatabase", &json!({"database": path, "table": "survey", "stream": true})).unwrap();
+        let id = s
+            .map()
+            .layers
+            .iter()
+            .find(|l| l.source.as_ref().and_then(|s| s.duckdb.as_ref()).is_some_and(|d| d.family == family))
+            .unwrap()
+            .id;
+        reload_duckdb_sql(&path, &format!("DELETE FROM survey WHERE ST_Dimension(geom)={dimension}"));
+        let mark = s.notice_mark();
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        let notices = s.notices_since(mark);
+        let losses = notices.iter().filter(|n| n.text.contains("rows of another geometry type were left out")).collect::<Vec<_>>();
+        assert_eq!(losses.len(), 1);
+        assert!(losses[0].text.contains(&format!("DuckDB: {left_out} rows of another geometry type were left out")));
+        let layer = s.map().layer(id).unwrap();
+        assert_eq!(layer.dataset.geometry_type, geometry);
+        assert_eq!(layer.source.as_ref().unwrap().info().unwrap().count, Some(0));
+        let ds = loaded(&s, id);
+        assert!(ds.features.is_empty());
+    }
+}
+
+#[test]
+fn saved_conversion_outside_current_cache_reopens_when_original_source_is_missing() {
+    use rustgis_engine::{
+        data::source::Family,
+        map::source::{DuckdbOrigin, GdalOrigin, SourceLayer},
+    };
+    for duckdb in [false, true] {
+        let f = Fixture::new("restore-external-conversion");
+        let original = f.file(if duckdb { "removed.duckdb" } else { "removed.gdb" });
+        let converted = f.file(if duckdb { "converted.parquet" } else { "converted.fgb" });
+        io::write_path(&points(&["rank"], Some(8.0)), &converted).unwrap();
+        let handle = rustgis_engine::data::source::open_path(&converted, None).unwrap();
+        let mut source = SourceLayer::from_path(converted.to_str().unwrap(), None, handle);
+        if duckdb {
+            source.duckdb = Some(DuckdbOrigin {
+                sql: None,
+                database: Some(original.to_str().unwrap().into()),
+                table: Some("survey".into()),
+                crs: None,
+                family: Family::Points,
+            });
+        } else {
+            source.gdal = Some(GdalOrigin {
+                path: original.to_str().unwrap().into(),
+                layer: "survey".into(),
+                family: Some(Family::Points),
+                crs: None,
+            });
+        }
+        let mut s = session();
+        let id = s.map_mut().add_streamed("Saved conversion", source);
+        let project = f.file("survey.rgis");
+        s.run("project.saveAs", &json!({"path": project})).unwrap();
+        drop(s);
+        assert!(converted.exists());
+        assert!(!original.exists());
+        let mut reopened = session();
+        reopened.run("project.open", &json!({"path": project})).unwrap();
+        assert_eq!(reopened.map().layers.len(), 1);
+        let source = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
+        assert!(source.error.is_none(), "{:?}", source.error);
+        assert_eq!(source.path.as_deref(), converted.to_str());
+        assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
+        drop(reopened);
+        std::fs::remove_file(&converted).unwrap();
+        let mut missing = session();
+        missing.run("project.open", &json!({"path": project})).unwrap();
+        let source = missing.map().layer(id).unwrap().source.as_ref().unwrap();
+        assert!(source.error.is_some(), "losing both provenance and conversion remains an error");
+    }
+}
+
+#[test]
+fn load_all_after_empty_duckdb_reload_exports_a_point_geopackage() {
+    use rustgis_engine::data::source::duckdb;
+    if !duckdb::available() {
+        return;
+    }
+    let f = Fixture::new("reload-duckdb-empty-export");
+    let path = f.file("survey.duckdb");
+    reload_duckdb_sql(&path, "CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(2,48) AS geom");
+    let mut s = session();
+    s.run("layer.addDatabase", &json!({"database": path, "table": "survey", "stream": true})).unwrap();
+    let id = s.active_layer.unwrap();
+    reload_duckdb_sql(&path, "DELETE FROM survey");
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    s.run("layer.loadAll", &json!({"layer": id})).unwrap();
+    let layer = s.map().layer(id).unwrap();
+    assert!(layer.source.is_none());
+    assert!(layer.dataset.features.is_empty());
+    assert_eq!(layer.dataset.geometry_type, GeometryType::Point);
+    let output = f.file("empty.gpkg");
+    s.run("share.exportLayer", &json!({"layer": id, "path": output})).unwrap();
+    let exported = io::read_path(&output).unwrap().0;
+    assert!(exported.features.is_empty());
+    assert_eq!(exported.geometry_type, GeometryType::Point, "Load All must not turn the GeoPackage into an attributes-only table");
 }

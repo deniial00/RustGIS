@@ -599,6 +599,102 @@ mod tests {
         app.session.map().layer(id).unwrap().dataset.features[0].attrs[0].clone()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn chosen_vertex_reload_fixture(off_frame: bool, dragging: bool) -> (tempfile::TempDir, RustGisApp, u32, std::path::PathBuf) {
+        use rustgis_engine::data::{Coord, Dataset, Geometry, GeometryType, VertexId, raster::Crs, source::gpkg};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roads.gpkg");
+        let mut data = Dataset::new("roads", GeometryType::Polyline, vec![]);
+        data.push(Some(Geometry::Line(vec![vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(2.0, 1.0)]])), vec![]);
+        gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let id = app.run("gpkg.addLayer", json!({"path": path, "table": "roads"})).unwrap()["layer"].as_u64().unwrap() as u32;
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        app.run("tool.set", json!({"tool": "editVertices"})).unwrap();
+        app.run("select.rows", json!({"layer": id, "rows": [0]})).unwrap();
+        app.reads_off_frame = off_frame;
+        if dragging {
+            app.session.map_mut().camera.res = 1000.0;
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0));
+            let from = crate::mapview::lonlat_to_screen(&app, rect, Coord::new(1.0, 0.0)).unwrap();
+            assert!(crate::vertexedit::drag_start(&mut app, rect, from));
+            assert!(app.map.vertex_drag_owner.is_some());
+        } else {
+            app.map.vertex = Some((id, 0, VertexId::new(0, 0, 1)));
+        }
+        assert_eq!(app.map.vertex, Some((id, 0, VertexId::new(0, 0, 1))));
+        (dir, app, id, path)
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn successful_reload_clears_chosen_vertex_and_drag_only_for_the_replaced_layer() {
+        use rustgis_engine::data::{Coord, Dataset, Geometry, GeometryType, VertexId, raster::Crs, source::gpkg};
+        for off_frame in [false, true] {
+            for dragging in [false, true] {
+                let (dir, mut app, id, path) = chosen_vertex_reload_fixture(off_frame, dragging);
+                let replacement = Geometry::Line(vec![vec![Coord::new(10.0, 0.0), Coord::new(11.0, 0.0), Coord::new(12.0, 1.0)]]);
+                let mut data = Dataset::new("roads", GeometryType::Polyline, vec![]);
+                data.push(Some(replacement.clone()), vec![]);
+                let fresh = dir.path().join("replacement.gpkg");
+                gpkg::write_in(&data, &fresh, Crs::LonLat).unwrap();
+                std::fs::copy(fresh, &path).unwrap();
+                app.run("ui.reloadData", json!({"layer": id})).unwrap();
+                if off_frame {
+                    assert!(showing(&app));
+                    assert!(app.map.vertex.is_some(), "starting a read must not clear the vertex before it succeeds");
+                    assert_eq!(app.map.vertex_drag.is_some(), dragging);
+                    landed(&mut app, 60);
+                }
+                assert!(app.map.vertex.is_none());
+                assert!(app.map.vertex_drag.is_none());
+                assert!(app.map.vertex_drag_owner.is_none());
+                app.run("select.rows", json!({"layer": id, "rows": [0]})).unwrap();
+                let undo = app.session.undo_label().map(str::to_string);
+                assert!(!crate::vertexedit::delete_chosen(&mut app), "Delete has no chosen vertex on the replacement row");
+                crate::vertexedit::drag_stop(&mut app);
+                assert_eq!(app.session.map().layer(id).unwrap().dataset.features[0].geometry, Some(replacement));
+                assert_eq!(app.session.undo_label(), undo.as_deref(), "stale Delete and release create no edit");
+
+                let other = app.run("gpkg.addLayer", json!({"path": path, "table": "roads"})).unwrap()["layer"].as_u64().unwrap() as u32;
+                let chosen = Some((other, 0, VertexId::new(0, 0, 1)));
+                app.map.vertex = chosen;
+                app.run("ui.reloadData", json!({"layer": id})).unwrap();
+                landed(&mut app, 60);
+                assert_eq!(app.map.vertex, chosen, "reloading another layer keeps this layer's chosen vertex");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn failed_reload_retains_chosen_vertex_and_held_drag() {
+        for off_frame in [false, true] {
+            for dragging in [false, true] {
+                let (_dir, mut app, id, path) = chosen_vertex_reload_fixture(off_frame, dragging);
+                let chosen = app.map.vertex;
+                let geometry = app.session.map().layer(id).unwrap().dataset.features[0].geometry.clone();
+                let undo = app.session.undo_label().map(str::to_string);
+                std::fs::write(path, b"not a GeoPackage").unwrap();
+                let mark = app.session.notice_mark();
+                let result = app.run("ui.reloadData", json!({"layer": id}));
+                if off_frame {
+                    assert!(result.unwrap().get("started").is_some());
+                    landed(&mut app, 60);
+                } else {
+                    assert!(result.is_err());
+                }
+                assert_eq!(app.session.notices_since(mark).iter().filter(|notice| notice.error).count(), 1);
+                assert_eq!(app.map.vertex, chosen);
+                assert_eq!(app.map.vertex_drag.is_some(), dragging);
+                assert_eq!(app.map.vertex_drag_owner.is_some(), dragging);
+                assert_eq!(app.session.map().layer(id).unwrap().dataset.features[0].geometry, geometry);
+                assert_eq!(app.session.undo_label(), undo.as_deref());
+                assert!(crate::vertexedit::delete_chosen(&mut app), "the original chosen vertex remains usable");
+                assert_ne!(app.session.map().layer(id).unwrap().dataset.features[0].geometry, geometry);
+            }
+        }
+    }
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn queued_reload_retains_confirmed_rows_schema_and_edit_baseline() {

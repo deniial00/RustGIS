@@ -616,6 +616,13 @@ impl Layer {
         let (mut ds, report) = copy.read_all()?;
         ds.name = self.dataset.name.clone();
         ds.zm_dropped |= self.dataset.zm_dropped;
+        if ds.features.is_empty() && ds.geometry_type == rustgis_data::GeometryType::None {
+            ds.geometry_type = if self.dataset.geometry_type != rustgis_data::GeometryType::None {
+                self.dataset.geometry_type
+            } else {
+                copy.info().map_or(rustgis_data::GeometryType::None, |info| info.geometry_type)
+            };
+        }
         // (A project that lists no fields keeps the source's, as `sync_source` gives it.)
         if !self.dataset.fields.is_empty() {
             ds.fields = self.dataset.fields.clone();

@@ -54,7 +54,7 @@ pub struct ParquetSource {
     group_rows: usize,
     /// Declared after `reader`: Windows must close its file before removing the workspace.
     #[cfg(not(target_arch = "wasm32"))]
-    _workspace: Option<Arc<tempfile::TempDir>>,
+    _workspace: Option<Arc<super::duckdb::ReloadWorkspace>>,
 }
 
 impl ParquetSource {
@@ -65,7 +65,7 @@ impl ParquetSource {
 
     /// Opens a private conversion, keeping its files alive for every shared reader.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_owned_path(path: &Path, name: &str, workspace: Arc<tempfile::TempDir>) -> Result<Self> {
+    pub fn open_owned_path(path: &Path, name: &str, workspace: Arc<super::duckdb::ReloadWorkspace>) -> Result<Self> {
         let mut source = Self::open_path(path, name)?;
         source._workspace = Some(workspace);
         Ok(source)

@@ -6,6 +6,7 @@
 //! time too. Nothing links to GDAL: without the program, these formats report how to get it.
 //! Layers mixing geometry types (KML often does) become one converted layer per type.
 
+pub use super::external::ReloadWorkspace;
 use super::external::{self, TempFile, fnv1a, output, stamp, touch};
 use crate::{DataError, Result};
 use std::path::{Path, PathBuf};
@@ -214,7 +215,7 @@ pub struct FreshConverted {
     pub empty: bool,
     pub zm_dropped: bool,
     /// Private conversion files, retained by the concrete reader after opening.
-    pub workspace: std::sync::Arc<tempfile::TempDir>,
+    pub workspace: std::sync::Arc<ReloadWorkspace>,
 }
 
 #[derive(Debug)]
@@ -234,8 +235,7 @@ pub fn convert_one_fresh(src: &Path, layer: &str, family: Option<Family>, crs: O
 }
 
 fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<FreshConverted> {
-    std::fs::create_dir_all(dir)?;
-    let workspace = std::sync::Arc::new(tempfile::Builder::new().prefix("reload-").tempdir_in(dir)?);
+    let workspace = external::reload_workspace(dir)?;
     let all = list(src)?;
     let info = all
         .iter()

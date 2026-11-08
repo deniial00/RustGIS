@@ -650,6 +650,9 @@ impl SourceLayer {
                 if out.skipped > 0 {
                     conversion_notes.push(format!("DuckDB: {} rows without a geometry were left out", out.skipped));
                 }
+                if out.other_family > 0 {
+                    conversion_notes.push(format!("DuckDB: {} rows of another geometry type were left out", out.other_family));
+                }
                 let part = out.parts.first().ok_or_else(|| format!("{path}: the table returns no {}", d.family.label()))?;
                 declared_empty = part.count == 0;
                 new.path = Some(part.path.display().to_string());
@@ -831,7 +834,16 @@ impl SourceLayer {
                     && (!path.exists() || !persistent_conversion(path, rustgis_data::source::gdal::cache_dir()))
                 {
                     let candidate = self.relinked(&g.path, None);
-                    return self.restored_conversion(candidate);
+                    if candidate.is_ok() || !path.exists() {
+                        return self.restored_conversion(candidate);
+                    }
+                    // An already-open reader also owns any private workspace. Keep that owner
+                    // rather than replacing it with an unowned handle to the same fallback file.
+                    if self.handle.is_some() {
+                        self.error = None;
+                        self.login = false;
+                        return Ok(());
+                    }
                 }
                 if let Some(d) = &self.duckdb
                     && d.sql.is_none()
@@ -841,7 +853,14 @@ impl SourceLayer {
                     && (!path.exists() || !persistent_conversion(path, rustgis_data::source::duckdb::cache_dir()))
                 {
                     let candidate = self.relinked(database, None);
-                    return self.restored_conversion(candidate);
+                    if candidate.is_ok() || !path.exists() {
+                        return self.restored_conversion(candidate);
+                    }
+                    if self.handle.is_some() {
+                        self.error = None;
+                        self.login = false;
+                        return Ok(());
+                    }
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]

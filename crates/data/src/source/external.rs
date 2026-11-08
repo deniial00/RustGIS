@@ -25,6 +25,65 @@ pub(crate) fn cache_dir(env: &str, sub: &str) -> Option<PathBuf> {
     crate::dirs::cache_dir().map(|b| b.join(sub))
 }
 
+/// A private conversion directory and its live-owner lock. Close the lock before deleting the
+/// directory (including on Windows); concrete readers retain this owner until their last read.
+#[derive(Debug)]
+pub struct ReloadWorkspace {
+    _lock: std::fs::File,
+    dir: tempfile::TempDir,
+}
+
+impl ReloadWorkspace {
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Reclaims a bounded number of crash-abandoned conversions before allocating a new workspace.
+pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<ReloadWorkspace>> {
+    std::fs::create_dir_all(cache)?;
+    if let Ok(entries) = std::fs::read_dir(cache) {
+        for entry in entries.take(4096).flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("reload-") || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let path = entry.path();
+            let lock_path = path.join("owner.lock");
+            let lock = match std::fs::File::options().read(true).write(true).open(&lock_path) {
+                Ok(lock) => lock,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // A creator may not have installed its lock yet. Only legacy or abandoned
+                    // directories older than an hour can be reclaimed without one.
+                    if !entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age >= std::time::Duration::from_secs(3600))
+                    {
+                        continue;
+                    }
+                    let Ok(lock) = std::fs::File::options().read(true).write(true).create_new(true).open(&lock_path) else {
+                        continue;
+                    };
+                    lock
+                }
+                Err(_) => continue,
+            };
+            if lock.try_lock().is_ok() {
+                // Windows cannot remove an open lock file. No writer claims an existing
+                // workspace; once unlocked, only other collectors can race its removal.
+                drop(lock);
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+    let dir = tempfile::Builder::new().prefix("reload-").tempdir_in(cache)?;
+    let lock = std::fs::File::options().read(true).write(true).create_new(true).open(dir.path().join("owner.lock"))?;
+    lock.try_lock().map_err(std::io::Error::other)?;
+    Ok(std::sync::Arc::new(ReloadWorkspace { _lock: lock, dir }))
+}
+
 /// Runs a program, reading its output as it comes (so a chatty one can't block on a full pipe) and
 /// killing it if it runs past `timeout`. `what` names it in the timeout error.
 pub(crate) fn output(c: Command, timeout: std::time::Duration, what: &str) -> std::io::Result<std::process::Output> {

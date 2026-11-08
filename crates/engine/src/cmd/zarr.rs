@@ -599,13 +599,25 @@ pub(crate) fn relink_following(
     if dim != zt.dim || !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
         return Err(format!("{full}: {}'s time axis is incompatible with the layer", zt.variable));
     }
-    let start = usize::try_from(zt.offset).map_err(|_| format!("{full}: time period is out of range"))?;
-    let dates = dates
-        .get(start..start.saturating_add(zt.dates.len()))
-        .ok_or_else(|| format!("{full}: {} no longer contains the selected time period", zt.variable))?
-        .to_vec();
-    let mut zt =
-        ZarrTime { store: full.into(), shown: None, read_generation: rustgis_map::raster::next_read_generation(), dates, ..zt.clone() };
+    let missing_period =
+        || format!("{full}: {} no longer contains the selected time period unchanged; existing layer retained", zt.variable);
+    // Preserve the selected dates, not their old numeric positions: earlier steps may have
+    // been inserted since the layer was opened.
+    let first = zt.dates.first().ok_or_else(missing_period)?;
+    let start = dates.binary_search_by(|date| date.total_cmp(first)).map_err(|_| missing_period())?;
+    let dates = dates.get(start..start.saturating_add(zt.dates.len())).ok_or_else(missing_period)?;
+    if dates != zt.dates {
+        return Err(missing_period());
+    }
+    let offset = u64::try_from(start).map_err(|_| missing_period())?;
+    let mut zt = ZarrTime {
+        store: full.into(),
+        offset,
+        shown: None,
+        read_generation: rustgis_map::raster::next_read_generation(),
+        dates: dates.to_vec(),
+        ..zt.clone()
+    };
     zt.repair();
     if let Some(slider) = slider {
         // Binary search the sorted candidate axis for each window, not dates × steps.
@@ -658,7 +670,7 @@ const FAILED_KEPT: usize = 16;
 #[derive(Default)]
 pub(crate) struct ReadWaits {
     layers: HashMap<(u64, u64), std::sync::Arc<PendingRead>>,
-    shared: HashMap<(String, String, Option<String>), std::sync::Weak<PendingRead>>,
+    shared: HashMap<(String, String, Option<String>, u64), std::sync::Weak<PendingRead>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -671,10 +683,11 @@ impl ReadWaits {
             && read.zt.store == zt.store
             && read.zt.crs == zt.crs
             && read.zt.selection(i) == zt.selection(i)
+            && read.zt.read_generation == zt.read_generation
         {
             return read.clone();
         }
-        let selection = (zt.store.clone(), zt.selection(i), zt.crs.clone());
+        let selection = (zt.store.clone(), zt.selection(i), zt.crs.clone(), zt.read_generation);
         let still = crate::render::rustgis_tiles::cache::current_still();
         let read = self
             .shared
