@@ -813,7 +813,8 @@ fn metadata(info: &mut Info, bytes: Vec<u8>, expected: u64) -> Result<(), String
 }
 
 /// Reads the current local file without consulting or changing retained caches. All reachable
-/// directories are validated within fixed aggregate budgets; tile payloads remain lazy.
+/// directories and nonoverlapping tile runs are validated within fixed aggregate budgets;
+/// cancellation is checked between entries, while tile payloads remain lazy.
 /// Ranges are bounded and freshly opened; failure leaves the displayed archive intact.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_info_local(archive: &str) -> Result<Arc<Info>, String> {
@@ -885,10 +886,14 @@ fn validate_directories(
     seen: &mut HashMap<(u64, u64), Option<usize>>,
 ) -> Result<usize, String> {
     let mut height = 0;
-    for e in dir {
+    for (i, e) in dir.iter().enumerate() {
+        rustgis_data::progress::check().map_err(|e| e.to_string())?;
         let end = e.offset.checked_add(e.length).ok_or("a PMTiles entry range overflows")?;
         if e.run_length > 0 {
-            e.tile_id.checked_add(e.run_length).ok_or("tile ids overflow")?;
+            let tile_end = e.tile_id.checked_add(e.run_length).ok_or("tile ids overflow")?;
+            if dir.get(i + 1).is_some_and(|next| tile_end > next.tile_id) {
+                return Err("overlapping PMTiles tile runs".into());
+            }
             if end > info.data_length || info.data_offset.checked_add(end).is_none() {
                 return Err("a tile outside the archive".into());
             }
@@ -1390,6 +1395,80 @@ pub(crate) mod tests {
         lazy[98] = 2;
         std::fs::write(&path, lazy).unwrap();
         assert!(read_info_local(source).is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fresh_local_validation_checks_run_boundaries_in_roots_and_reachable_leaves() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-run-boundaries-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        for nested in [false, true] {
+            for next_is_leaf in [false, true] {
+                // [0, 2) overlaps id 1, is adjacent to id 2, and leaves a gap before id 4.
+                for next_id in [1, 2, 4] {
+                    let tile = Entry { tile_id: next_id, offset: 0, length: 3, run_length: 1 };
+                    let mut leaves = if next_is_leaf { write_dir(&[tile]) } else { Vec::new() };
+                    let next = if next_is_leaf { Entry { length: leaves.len() as u64, run_length: 0, ..tile } } else { tile };
+                    let entries = [Entry { tile_id: 0, offset: 0, length: 3, run_length: 2 }, next];
+                    let bytes = if nested {
+                        let directory = write_dir(&entries);
+                        let root = Entry { tile_id: 0, offset: leaves.len() as u64, length: directory.len() as u64, run_length: 0 };
+                        leaves.extend(directory);
+                        indexed_archive(&[root], leaves)
+                    } else {
+                        indexed_archive(&entries, leaves)
+                    };
+                    std::fs::write(&path, bytes).unwrap();
+                    let result = read_info_local(source);
+                    if next_id == 1 {
+                        assert_eq!(result.unwrap_err(), "overlapping PMTiles tile runs", "nested={nested}, next_is_leaf={next_is_leaf}");
+                    } else {
+                        assert!(result.is_ok(), "nested={nested}, next_is_leaf={next_is_leaf}, next_id={next_id}: {result:?}");
+                    }
+                }
+            }
+        }
+        // The final run has no following entry, but its exclusive end must still not overflow.
+        let entries = [Entry { tile_id: u64::MAX, offset: 0, length: 3, run_length: 1 }];
+        std::fs::write(&path, indexed_archive(&entries, Vec::new())).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "tile ids overflow");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fresh_local_validation_cancels_before_reading_a_later_malformed_leaf() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CancelBeforeThirdEntry(AtomicUsize);
+        impl rustgis_data::progress::Probe for CancelBeforeThirdEntry {
+            fn cancelled(&self) -> bool {
+                self.0.fetch_add(1, Ordering::Relaxed) >= 2
+            }
+            fn begin(&self, _: u64) {}
+            fn advance(&self, _: u64) {}
+        }
+
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-cancel-traversal-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        let first = write_dir(&[Entry { tile_id: 0, offset: 0, length: 3, run_length: 1 }]);
+        let root = [
+            Entry { tile_id: 0, offset: 0, length: first.len() as u64, run_length: 0 },
+            Entry { tile_id: 1, offset: first.len() as u64, length: 1, run_length: 0 },
+        ];
+        let mut leaves = first;
+        leaves.push(0x80);
+        std::fs::write(&path, indexed_archive(&root, leaves)).unwrap();
+        assert_eq!(read_info_local(source).unwrap_err(), "a truncated directory");
+        let probe = Arc::new(CancelBeforeThirdEntry(AtomicUsize::new(0)));
+        {
+            let _installed = rustgis_data::progress::install(Some(probe.clone()));
+            assert_eq!(read_info_local(source).unwrap_err(), rustgis_data::DataError::Cancelled.to_string());
+        }
+        // Root pointer, its reachable tile, then the next root pointer: stop before its I/O.
+        assert_eq!(probe.0.load(Ordering::Relaxed), 3);
+        assert_eq!(read_info_local(source).unwrap_err(), "a truncated directory");
         std::fs::remove_file(path).unwrap();
     }
 
