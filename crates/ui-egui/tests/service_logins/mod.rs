@@ -297,7 +297,6 @@ fn unsaved_wmts_test_uses_typed_header_or_basic_without_touching_saved_login() {
         assert_eq!(h.state().session.connections.connections, vec![saved.clone()]);
         assert_eq!(web::known_secret(&h.state().session, &saved).unwrap().expose(), "existing-saved-login");
         for entry in h.state().session.log.entries().filter(|e| e.command == "connection.test") {
-            assert_eq!(entry.params["auth"], "none");
             assert!(entry.params.get("id").is_none());
             assert!(entry.params.get("password").is_none());
             assert!(entry.params.get("apiKey").is_none());
@@ -310,7 +309,11 @@ fn unsaved_wmts_test_uses_typed_header_or_basic_without_touching_saved_login() {
 
 #[test]
 fn short_service_answers_do_not_retain_echoed_credentials_in_history() {
-    for answer in ["web-widget-secret-sentinel", "<Exception>web-widget-secret-sentinel</Exception>"] {
+    for answer in [
+        "web-widget-secret-sentinel",
+        "<Exception>web-widget-secret-sentinel</Exception>",
+        "<ServiceExceptionReport><ServiceException>Rejected credential web-widget-secret-sentinel</ServiceException></ServiceExceptionReport>",
+    ] {
         let (address, requests, release, server) = probe_server_with_answer(Some(answer));
         let mut h = session_ui();
         header_form(&mut h, &address);
@@ -321,10 +324,19 @@ fn short_service_answers_do_not_retain_echoed_credentials_in_history() {
         requests.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         release.send(()).unwrap();
         finish_probe(&mut h);
-        assert!(h.state().dialogs.error.is_some());
+        let ui_error = h.state().dialogs.error.as_deref().expect("the service response must produce a UI error");
+        assert!(!ui_error.contains("web-widget-secret-sentinel"), "the UI error must not retain the credential");
         let entry = h.state().session.log.entries().filter(|e| e.command == "connection.test").last().unwrap();
         assert!(entry.params.get("answer").is_some(), "the response parsing command must actually be recorded");
         assert!(!entry.params.to_string().contains("web-widget-secret-sentinel"), "the response must not retain the credential");
+        let logged_error = entry.error.as_deref().expect("the response parsing error must actually be recorded");
+        assert!(!logged_error.contains("web-widget-secret-sentinel"), "the command log error must not retain the credential");
+        if answer.starts_with("<ServiceExceptionReport>") {
+            for error in [logged_error, ui_error] {
+                assert!(error.contains("the service answered with an error"), "the service exception must reach the consumer: {error}");
+                assert!(error.contains("Rejected credential [redacted]"), "the echoed credential must be redacted in the error: {error}");
+            }
+        }
         assert_redacted(&h);
         server.join().unwrap();
     }

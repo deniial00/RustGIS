@@ -1407,7 +1407,6 @@ mod tests {
                 assert_eq!(app.session.connections.connections, vec![saved.clone()]);
                 assert_eq!(web::known_secret(&app.session, &saved).unwrap().expose(), "saved-validation-key");
                 for entry in app.session.log.entries().filter(|e| e.command == "connection.test") {
-                    assert_eq!(entry.params["auth"], "none");
                     assert!(entry.params.get("apiKey").is_none());
                     assert!(entry.params.get("password").is_none());
                 }

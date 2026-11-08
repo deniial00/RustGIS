@@ -1249,6 +1249,18 @@ pub fn head(url: &str, done: HeadDone) {
     }
 }
 
+/// Resolves a GET's destination and S3 headers for both native and browser transports.
+/// A validated explicit service login takes precedence over an implicit endpoint signer.
+/// Its credential is still applied separately at send time, so revocation cannot fall back
+/// to anonymous access or ambient S3 credentials.
+pub fn prepare_get(url: &str) -> Result<crate::s3::Prepared, String> {
+    crate::logins::check(url).map_err(str::to_string)?;
+    if rustgis_data::login_address::is_wrapper(url) {
+        return Ok(crate::s3::Prepared { url: crate::logins::inner(url).to_string(), headers: Vec::new(), signed: false });
+    }
+    crate::s3::prepare(url)
+}
+
 /// Fetches an address's bytes, uncached (through the browser's fetcher, or the worker threads).
 /// A status in `omit` is an expected answer: its failure isn't recorded, only noted once per
 /// server (a tile past a map's edge).
@@ -1940,10 +1952,8 @@ mod native {
             let (url, mut range) = super::split_range(url);
             // The last bytes asked for, while the file's length is asked for instead (see below).
             let mut measuring: Option<u64> = None;
-            // An `s3://` address becomes its web address, and a request to an S3 connection's
-            // endpoint is signed.
-            crate::logins::check(url)?;
-            let prepared = crate::s3::prepare(crate::logins::inner(url))?;
+            // Explicit service logins outrank implicit S3 endpoint signing.
+            let prepared = super::prepare_get(url)?;
             let mut at = prepared.url.clone();
             let first_origin = crate::logins::origin(&at);
             let mut same_origin = true;
@@ -2965,6 +2975,102 @@ mod tests {
             }
         });
         (format!("http://{addr}"), received)
+    }
+
+    #[test]
+    fn get_preparation_keeps_explicit_service_authority_over_ambient_s3() {
+        let _turn = crate::cache::turn();
+        use crate::{
+            logins::{self, Method},
+            s3,
+        };
+        let base = "https://get-preparation-login.example";
+        let name = "get-preparation-ambient-s3";
+        s3::connect(s3::Connection {
+            name: name.into(),
+            endpoint: Some(base.into()),
+            region: s3::DEFAULT_REGION.into(),
+            buckets: Vec::new(),
+            credentials: Some(s3::Credentials {
+                access_key_id: "PREPARATIONKEY".into(),
+                secret_access_key: "preparation-s3-secret".into(),
+                session_token: Some("preparation-s3-token".into()),
+            }),
+        })
+        .unwrap();
+        let plain = format!("{base}/service%2Fpath?query=a%20b");
+        assert!(prepare_get(&plain).unwrap().signed);
+        let binding =
+            logins::activate(base, "get-preparation/service", Method::Header("Authorization".into()), "Bearer service-secret", false)
+                .unwrap();
+        let bound = logins::bind(&binding, &plain).unwrap();
+        // This is the shared preparation used before browser RequestInit construction:
+        // no S3 canonicalization or signing headers survive the explicit binding.
+        let prepared = prepare_get(&bound).unwrap();
+        assert_eq!(prepared.url, plain);
+        assert!(!prepared.signed);
+        assert!(prepared.headers.is_empty());
+        let target = logins::inherit(&bound, &prepared.url);
+        let login = logins::apply(&target).unwrap().unwrap();
+        assert_eq!(login.url, plain);
+        assert_eq!(login.header, Some(("Authorization".into(), "Bearer service-secret".into())));
+        // Preparation itself carries no credential or authority: after revocation both
+        // fresh preparation and send-time application fail instead of using ambient S3.
+        assert!(logins::deactivate(&binding));
+        assert!(prepare_get(&bound).unwrap_err().contains("no longer active"));
+        assert!(logins::apply(&target).is_err());
+        assert!(prepare_get(&plain).unwrap().signed);
+        assert!(s3::disconnect(name));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_service_login_beats_ambient_s3_on_native_get_and_redirect() {
+        let _turn = crate::cache::turn();
+        use crate::{
+            logins::{self, Method},
+            s3,
+        };
+        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntile".to_vec();
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (base, asked) = serve_recorded(vec![ok.clone(), redirect.clone(), ok.clone(), redirect, ok]);
+        let name = "native-get-ambient-s3";
+        s3::connect(s3::Connection {
+            name: name.into(),
+            endpoint: Some(base.clone()),
+            region: s3::DEFAULT_REGION.into(),
+            buckets: Vec::new(),
+            credentials: Some(s3::Credentials {
+                access_key_id: "NATIVEGETKEY".into(),
+                secret_access_key: "native-get-s3-secret".into(),
+                session_token: Some("native-get-s3-token".into()),
+            }),
+        })
+        .unwrap();
+        let agent = native::agent();
+        let plain = format!("{base}/start");
+        assert_eq!(native::get(&agent, &plain, &[]).unwrap(), b"tile");
+        let received = asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+        assert!(received.contains("authorization: aws4-hmac-sha256 credential=nativegetkey/"));
+        assert!(received.contains("x-amz-security-token: native-get-s3-token\r\n"));
+        for (header, value) in
+            [("Authorization", logins::basic("service-user", "service-password")), ("X-Service-Key", "explicit-service-key".to_string())]
+        {
+            let binding = logins::activate(&base, "native-get/service", Method::Header(header.into()), &value, true).unwrap();
+            let bound = logins::bind(&binding, &plain).unwrap();
+            assert_eq!(native::get(&agent, &bound, &[]).unwrap(), b"tile");
+            for path in ["/start", "/next"] {
+                let received = asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+                assert!(received.starts_with(&format!("get {path} http/1.1\r\n")), "{received}");
+                assert!(received.contains(&format!("{}: {}\r\n", header.to_ascii_lowercase(), value.to_ascii_lowercase())), "{received}");
+                assert!(!received.contains("aws4-hmac-sha256") && !received.contains("x-amz-"), "{received}");
+                assert!(!received.contains("nativegetkey") && !received.contains("native-get-s3-token"), "{received}");
+            }
+            assert!(logins::deactivate(&binding));
+            let failure = native::get(&agent, &bound, &[]).unwrap_err();
+            assert!(failure.contains("no longer active"), "{failure}");
+        }
+        assert!(s3::disconnect(name));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

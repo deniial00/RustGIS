@@ -669,7 +669,8 @@ connections; saved database rows remain visible but cannot be opened or tested t
 Search and Planetary Computer remain available under **Library**.
 
 For a new web-service connection, enter its Basic password or header API key to test it before
-saving. The test uses only the entered login, not a saved connection's login at the same address.
+saving. The test uses only the entered login, not a saved service login or an S3 session login
+at the same address.
 For an `http://` address, tick the confirmation before sending the login unencrypted. After a test
 starts, RustGIS clears the password or key and the confirmation from the form; enter them again
 if you want to save a session login. The test does not save the connection or retain its login.
