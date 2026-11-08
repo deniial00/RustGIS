@@ -17,6 +17,15 @@ pub(crate) fn supported(layer: &Layer) -> bool {
     source(layer).is_some()
 }
 
+/// The editable data the user agreed to replace, retained only when dispatching a read.
+/// Features and the edit baseline share their rows until a later mutation.
+struct ConfirmedEdit {
+    features: rustgis_engine::data::Features,
+    fields: Vec<rustgis_engine::data::Field>,
+    geometry: rustgis_engine::data::GeometryType,
+    edit: rustgis_engine::map::source::GpkgEdit,
+}
+
 pub struct Form {
     opened: u64,
     map: u64,
@@ -28,6 +37,7 @@ pub struct Form {
     error: Option<String>,
     /// Display cache only; dispatch always recounts before requesting a mutation.
     counted: Option<(u64, [usize; 3])>,
+    confirmed: Option<ConfirmedEdit>,
 }
 
 impl Form {
@@ -45,7 +55,21 @@ impl Form {
             gpkg,
             error: None,
             counted: None,
+            confirmed: None,
         })
+    }
+
+    /// Freeze the confirmed editable state at queue entry, not when opening the live modal.
+    pub(crate) fn for_read(s: &Session, id: u32) -> Result<Self, String> {
+        let mut form = Self::new(s, id)?;
+        let layer = form.target(s)?;
+        form.confirmed = layer.gpkg.as_ref().map(|edit| ConfirmedEdit {
+            features: layer.dataset.features.clone(),
+            fields: layer.dataset.fields.clone(),
+            geometry: layer.dataset.geometry_type,
+            edit: edit.clone(),
+        });
+        Ok(form)
     }
 
     fn target<'a>(&self, s: &'a Session) -> Result<&'a Layer, String> {
@@ -62,6 +86,19 @@ impl Form {
 
     pub(crate) fn is_current(&self, s: &Session) -> bool {
         self.target(s).is_ok()
+    }
+
+    pub(crate) fn data_is_current(&self, s: &Session) -> bool {
+        let Some(confirmed) = &self.confirmed else { return true };
+        let Ok(layer) = self.target(s) else { return false };
+        layer.gpkg.as_ref().is_some_and(|edit| {
+            // Check shared identities first: no row hashing or baseline scan every frame.
+            layer.dataset.features.shares(&confirmed.features)
+                && edit.versions.shares(&confirmed.edit.versions)
+                && edit == &confirmed.edit
+                && layer.dataset.fields == confirmed.fields
+                && layer.dataset.geometry_type == confirmed.geometry
+        })
     }
 
     fn pending<'a>(&self, s: &'a Session) -> Result<(&'a str, [usize; 3]), String> {

@@ -92,8 +92,15 @@ fn pending_counts_are_rechecked_while_confirmation_is_open() {
     h.state_mut().run("edit.setValue", json!({"layer": id, "row": 1, "field": "name", "value": "also pending"})).unwrap();
     h.run_steps(3);
     h.get_by_label("Inserts: 0; updates: 2; deletes: 0.");
-    h.key_press(egui::Key::Escape);
+    // Consent captures the state at dispatch, not the older state when the modal opened.
+    h.get_by_role_and_label(Role::Button, "Discard Edits and Reload").click();
     h.run_steps(3);
+    assert_eq!(h.state().dialogs.open, None);
+    assert_eq!(value(&h, id), Value::Text("original".into()));
+    assert_eq!(h.state().session.map().layer(id).unwrap().dataset.features[1].attrs[0], Value::Text("original".into()));
+    h.state_mut().run("edit.undo", json!({})).unwrap();
+    assert_eq!(value(&h, id), Value::Text("pending".into()));
+    assert_eq!(h.state().session.map().layer(id).unwrap().dataset.features[1].attrs[0], Value::Text("also pending".into()));
     assert_eq!(h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap()["updates"], 2);
 }
 

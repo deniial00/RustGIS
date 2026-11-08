@@ -418,6 +418,9 @@ fn raster_reload_refreshes_pixels_preserves_style_and_rejects_missing_bands() {
     raster.style.brightness = 17.0;
     raster.style.mask.values = vec![2.0];
     let style = serde_json::to_value(&raster.style).unwrap();
+    let opening = raster.clone();
+    s.map_mut().camera.res = 1234.0;
+    let camera = serde_json::to_value(s.map().camera).unwrap();
     let mut changed = rustgis_engine::data::raster::read_path(&path).unwrap();
     changed.bands[2].data[0] = 99.0;
     std::fs::write(&path, geotiff::write(&changed, 0).unwrap()).unwrap();
@@ -425,6 +428,12 @@ fn raster_reload_refreshes_pixels_preserves_style_and_rejects_missing_bands() {
     let raster = s.map().layer(id).unwrap().raster.as_ref().unwrap();
     assert_eq!(raster.data.as_ref().unwrap().value(2, 0, 0), Some(99.0));
     assert_eq!(serde_json::to_value(&raster.style).unwrap(), style);
+    assert!(!raster.same_opening(&opening), "a successful reload owns a fresh runtime read");
+    assert_eq!(serde_json::to_value(s.map().camera).unwrap(), camera);
+    let saved = serde_json::to_string(raster).unwrap();
+    assert!(!saved.contains("read_generation"), "read identities are never saved");
+    let reopened: RasterLayer = serde_json::from_str(&saved).unwrap();
+    assert!(!raster.same_opening(&reopened), "deserialization cannot reuse a prior opening");
     let data = Arc::clone(raster.data.as_ref().unwrap());
     raster_file(&path, 1);
     reject_reload(&mut s, id, "band");
@@ -435,21 +444,72 @@ fn raster_reload_refreshes_pixels_preserves_style_and_rejects_missing_bands() {
 
 #[test]
 fn raster_reload_requires_the_palette_used_by_a_saved_colormap() {
+    use rustgis_engine::data::raster::cog::{Example, example_with};
     let f = Fixture::new("reload-palette");
     let path = f.file("palette.tif");
+    let palette = example_with(&Example { size: 300, tile: 128, classes: true, ..Example::default() });
+    std::fs::write(&path, &palette).unwrap();
+    let mut s = session();
+    s.run("layer.addData", &json!({"path": path})).unwrap();
+    let id = s.active_layer.unwrap();
+    let raster = s.map().layer(id).unwrap().raster.as_ref().unwrap();
+    assert!(matches!(raster.style.renderer, RasterRenderer::Colormap));
+    let data = Arc::clone(raster.data.as_ref().unwrap());
+    std::fs::write(&path, example_with(&Example { size: 300, tile: 128, classes: true, no_table: true, ..Example::default() })).unwrap();
+    reject_reload(&mut s, id, "palette");
+    assert!(Arc::ptr_eq(s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap(), &data));
+    std::fs::write(&path, palette).unwrap();
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    assert!(matches!(s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().color, ColorHint::Palette(_)));
+}
+
+#[test]
+fn raster_reload_and_repair_disclose_fresh_losses_once_without_repeating_them_on_a_frame() {
+    use rustgis_engine::data::raster::cog::{Example, example_with};
+    let f = Fixture::new("reload-raster-losses");
+    let path = f.file("grey.tif");
+    let moved = f.file("moved.tif");
     raster_file(&path, 1);
     let mut s = session();
     s.run("layer.addData", &json!({"path": path})).unwrap();
     let id = s.active_layer.unwrap();
-    // The writer does not export palettes; retain a decoded palette on a real linked raster.
-    let mut pixels = rustgis_engine::data::raster::read_path(&path).unwrap();
-    pixels.color = ColorHint::Palette(vec![[0, 0, 0, 255], [30, 120, 240, 255]]);
-    let raster = RasterLayer::from_path(pixels, path.to_str().unwrap());
-    assert!(matches!(raster.style.renderer, RasterRenderer::Colormap));
-    let data = Arc::clone(raster.data.as_ref().unwrap());
-    s.map_mut().layer_mut(id).unwrap().raster = Some(raster);
-    reject_reload(&mut s, id, "palette");
-    assert!(Arc::ptr_eq(s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap(), &data));
+    let lossy = example_with(&Example { size: 300, tile: 128, classes: true, no_table: true, ..Example::default() });
+    std::fs::write(&path, &lossy).unwrap();
+    std::fs::write(&moved, lossy).unwrap();
+    for (command, params) in [("layer.reloadData", json!({"layer": id})), ("layer.repairSource", json!({"layer": id, "path": moved}))] {
+        let mark = s.notice_mark();
+        s.run(command, &params).unwrap();
+        let losses = s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().lost.clone();
+        assert!(!losses.is_empty(), "the real TIFF fixture lacks its required colour table");
+        s.notice_landed_rasters();
+        s.notice_landed_rasters();
+        for loss in losses {
+            assert_eq!(s.notices_since(mark).iter().filter(|n| n.text.ends_with(&loss)).count(), 1, "{command}: {loss}");
+        }
+    }
+    raster_file(&moved, 1);
+    let mark = s.notice_mark();
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    s.notice_landed_rasters();
+    assert!(s.map().layer(id).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().lost.is_empty());
+    assert!(s.notices_since(mark).iter().all(|n| n.text.contains("data reloaded")), "a clean replacement reports no losses");
+}
+
+#[test]
+fn raster_reload_excludes_remote_cogs_and_does_not_convert_them_to_local_sources() {
+    let f = Fixture::new("reload-remote-cog");
+    let path = f.file("local.tif");
+    raster_file(&path, 1);
+    let pixels = rustgis_engine::data::raster::read_path(&path).unwrap();
+    let remote = RasterLayer::in_place(pixels, "https://example.invalid/remote.tif");
+    assert!(remote.relinked(path.to_str().unwrap(), None).unwrap_err().contains("read in place"));
+    let opening = remote.clone();
+    let mut s = session();
+    let id = s.map_mut().add_raster("Remote COG", remote);
+    reject_reload(&mut s, id, "local");
+    let raster = s.map().layer(id).unwrap().raster.as_ref().unwrap();
+    assert!(raster.in_place && raster.same_opening(&opening));
+    assert!(Arc::ptr_eq(raster.data.as_ref().unwrap(), opening.data.as_ref().unwrap()));
 }
 
 #[test]
@@ -548,13 +608,21 @@ fn reload_reconverts_original_gdal_folder_and_accepts_its_declared_empty_table()
     let escaped = source.visit_source().unwrap();
     let fresh_path = std::path::PathBuf::from(source.path.as_ref().unwrap());
     let fresh_workspace = fresh_path.parent().unwrap().to_path_buf();
-    let candidate = source.relinked(folder.to_str().unwrap(), None).unwrap();
+    let live_project = f.file("live-conversion.rgis");
+    s.run("project.saveAs", &json!({"path": live_project})).unwrap();
+    let mut opened_while_live = session();
+    opened_while_live.run("project.open", &json!({"path": live_project})).unwrap();
+    let live_path = std::path::PathBuf::from(opened_while_live.map().layer(id).unwrap().source.as_ref().unwrap().path.as_ref().unwrap());
+    let live_workspace = live_path.parent().unwrap().to_path_buf();
+    assert_ne!(live_path, fresh_path, "a saved link cannot borrow another session's disposable FGB");
+    assert_eq!(opened_while_live.map().layers.len(), 1);
+    let candidate = retained.relinked(folder.to_str().unwrap(), None).unwrap();
     let candidate_path = std::path::PathBuf::from(candidate.path.as_ref().unwrap());
     let candidate_workspace = candidate_path.parent().unwrap().to_path_buf();
     assert!(candidate_path.exists());
     drop(candidate);
     assert!(!candidate_workspace.exists(), "an uninstalled candidate has no owner");
-    assert!(source.relinked(folder.to_str().unwrap(), Some("truly_absent")).is_err());
+    assert!(retained.relinked(folder.to_str().unwrap(), Some("truly_absent")).is_err());
     publish("survey", None, false);
     s.run("layer.reloadData", &json!({"layer": id})).unwrap();
     assert!(loaded(&s, id).features.is_empty());
@@ -562,6 +630,10 @@ fn reload_reconverts_original_gdal_folder_and_accepts_its_declared_empty_table()
     let empty_source = s.map().layer(id).unwrap().source.as_ref().unwrap();
     assert_eq!(empty_source.info().unwrap().count, Some(0));
     let empty_path = std::path::PathBuf::from(empty_source.path.as_ref().unwrap());
+    let empty_workspace = empty_path.parent().unwrap().to_path_buf();
+    let empty_origin = empty_source.gdal.clone();
+    let empty_project = f.file("empty-conversion.rgis");
+    s.run("project.saveAs", &json!({"path": empty_project})).unwrap();
     s.run("edit.undo", &json!({})).unwrap();
     assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0), "undo must retain its actual converted reader");
     s.run("edit.redo", &json!({})).unwrap();
@@ -591,6 +663,30 @@ fn reload_reconverts_original_gdal_folder_and_accepts_its_declared_empty_table()
     }
     drop(s);
     assert!(!empty_path.exists(), "the final active/undo owner releases its private conversion");
+    assert!(!empty_workspace.exists(), "all original owners of the saved empty conversion have dropped");
+    assert_eq!(first_point(&loaded(&opened_while_live, id)), Coord::new(8.0, 48.0));
+    drop(opened_while_live);
+    assert!(!live_workspace.exists(), "the independently restored reader owns its workspace");
+    publish("survey", None, false);
+    let mut reopened = session();
+    reopened.run("project.open", &json!({"path": empty_project})).unwrap();
+    assert_eq!(reopened.map().layers.len(), 1, "restoring a selected table must not add siblings");
+    let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
+    assert_eq!(restored.gdal, empty_origin);
+    assert_eq!(restored.linked_file(), folder.to_str());
+    assert_eq!(restored.info().unwrap().count, Some(0));
+    assert_eq!(restored.info().unwrap().geometry_type, GeometryType::Point);
+    let restored_path = std::path::PathBuf::from(restored.path.as_ref().unwrap());
+    let restored_workspace = restored_path.parent().unwrap().to_path_buf();
+    assert_ne!(restored_path, empty_path);
+    let restored_reader = restored.visit_source().unwrap();
+    assert!(loaded(&reopened, id).features.is_empty());
+    drop(reopened);
+    assert!(restored_workspace.exists(), "an escaped restored reader pins its fresh workspace");
+    let batch = restored_reader.read(&rustgis_engine::data::source::Request { extent: None, limit: 1 }).unwrap();
+    assert!(batch.complete && batch.features.is_empty() && batch.skipped == 0);
+    drop(restored_reader);
+    assert!(!restored_workspace.exists(), "the last restored reader releases all conversion artifacts");
     assert!(fresh_path.exists(), "a cloned SourceLayer and escaping export reader pin their file");
     drop(retained);
     assert!(fresh_path.exists(), "the escaping concrete reader owns its conversion independently of SourceLayer");
@@ -658,6 +754,10 @@ fn reload_reconverts_duckdb_table_and_keeps_only_its_original_geometry_branch() 
     assert_eq!(empty_source.info().unwrap().count, Some(0));
     assert_eq!(empty_source.info().unwrap().geometry_type, GeometryType::Point);
     let empty_path = std::path::PathBuf::from(empty_source.path.as_ref().unwrap());
+    let empty_workspace = empty_path.parent().unwrap().to_path_buf();
+    let empty_origin = empty_source.duckdb.clone();
+    let empty_project = f.file("empty-conversion.rgis");
+    s.run("project.saveAs", &json!({"path": empty_project})).unwrap();
     s.run("edit.undo", &json!({})).unwrap();
     assert_eq!(first_point(&loaded(&s, id)), Coord::new(8.0, 48.0));
     s.run("edit.redo", &json!({})).unwrap();
@@ -667,6 +767,27 @@ fn reload_reconverts_duckdb_table_and_keeps_only_its_original_geometry_branch() 
     reject_reload(&mut s, id, "survey");
     drop(s);
     assert!(!empty_path.exists());
+    assert!(!empty_workspace.exists(), "all original owners of the saved empty conversion have dropped");
+    sql("CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(0,0) AS geom WHERE false; CREATE TABLE sibling AS SELECT ST_Point(1,1) AS geom");
+    let mut reopened = session();
+    reopened.run("project.open", &json!({"path": empty_project})).unwrap();
+    assert_eq!(reopened.map().layers.len(), 1, "restoring a selected table must not add siblings");
+    let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
+    assert_eq!(restored.duckdb, empty_origin);
+    assert_eq!(restored.linked_file(), path.to_str());
+    assert_eq!(restored.info().unwrap().count, Some(0));
+    assert_eq!(restored.info().unwrap().geometry_type, GeometryType::Point);
+    let restored_path = std::path::PathBuf::from(restored.path.as_ref().unwrap());
+    let restored_workspace = restored_path.parent().unwrap().to_path_buf();
+    assert_ne!(restored_path, empty_path);
+    let restored_reader = restored.visit_source().unwrap();
+    assert!(loaded(&reopened, id).features.is_empty());
+    drop(reopened);
+    assert!(restored_workspace.exists(), "an escaped restored reader pins its fresh workspace");
+    let batch = restored_reader.read(&rustgis_engine::data::source::Request { extent: None, limit: 1 }).unwrap();
+    assert!(batch.complete && batch.features.is_empty() && batch.skipped == 0);
+    drop(restored_reader);
+    assert!(!restored_workspace.exists(), "the last restored reader releases all conversion artifacts");
     assert!(fresh_path.exists());
     drop(retained);
     assert!(fresh_path.exists(), "the escaping concrete reader must survive the layer and undo stack");
@@ -682,4 +803,146 @@ fn reload_reconverts_duckdb_table_and_keeps_only_its_original_geometry_branch() 
     assert_eq!(exported[0].geometry.as_ref().unwrap().extent().center(), Coord::new(8.0, 48.0));
     drop(escaped);
     assert!(!fresh_workspace.exists(), "close Parquet readers before removing their workspace on Windows too");
+}
+
+#[test]
+fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged_signature() {
+    use rustgis_engine::{
+        data::source::{Family, gdal},
+        map::source::{GdalOrigin, SourceLayer},
+    };
+    if !gdal::available() {
+        return;
+    }
+    let f = Fixture::new("restore-gdal-signature");
+    let path = f.file("survey.geojson");
+    let publish = |x| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"type":"FeatureCollection","name":"survey","features":[{{"type":"Feature","properties":{{"rank":7}},"geometry":{{"type":"Point","coordinates":[{x},48,100]}}}}]}}"#
+            ),
+        )
+        .unwrap();
+    };
+    publish(2);
+    let signature = std::fs::metadata(&path).unwrap();
+    let origin = GdalOrigin {
+        path: path.to_str().unwrap().into(),
+        layer: "survey".into(),
+        family: Some(Family::Points),
+        crs: Some("EPSG:4326".into()),
+    };
+    let cached = gdal::convert_one(&path, &origin.layer, origin.family, origin.crs.as_deref()).unwrap().unwrap();
+    let handle = rustgis_engine::data::source::open_path(&cached, None).unwrap();
+    let mut source = SourceLayer::from_path(cached.to_str().unwrap(), None, handle);
+    source.gdal = Some(origin.clone());
+    source.open().unwrap();
+    assert_eq!(source.path.as_deref(), cached.to_str(), "nonmissing reusable conversions retain their ordinary policy");
+    let mut source = source.relinked(path.to_str().unwrap(), None).unwrap();
+    source.limit = 17;
+    source.byte_budget = 12345;
+    source.reads = 23;
+    let private_path = std::path::PathBuf::from(source.path.as_ref().unwrap());
+    let private_workspace = private_path.parent().unwrap().to_path_buf();
+    let serialized = serde_json::to_value(&source).unwrap();
+    let mut s = session();
+    let id = s.map_mut().add_streamed("Survey", source);
+    let project = f.file("survey.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    drop(s);
+    assert!(!private_workspace.exists());
+
+    publish(8);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(signature.modified().unwrap()))
+        .unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), signature.len());
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), signature.modified().unwrap());
+    assert_eq!(gdal::convert_one(&path, &origin.layer, origin.family, origin.crs.as_deref()).unwrap().unwrap(), cached);
+    assert_eq!(first_point(&io::read_path(&cached).unwrap().0), Coord::new(2.0, 48.0), "the reusable cache really is stale");
+    let mut reopened = session();
+    reopened.run("project.open", &json!({"path": project})).unwrap();
+    assert_eq!(reopened.map().layers.len(), 1);
+    assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
+    let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
+    assert_eq!(restored.gdal, Some(origin.clone()));
+    assert!(restored.info().unwrap().zm_dropped);
+    assert!(restored.info().unwrap().notes.iter().any(|note| note.contains("Z or M coordinates")));
+    drop(reopened);
+
+    // Explicit open also retains runtime settings and the read generation. A failed
+    // candidate leaves the old provenance, path and actual reader untouched.
+    let mut restored: SourceLayer = serde_json::from_value(serialized).unwrap();
+    restored.limit = 17;
+    restored.byte_budget = 12345;
+    restored.reads = 23;
+    restored.open().unwrap();
+    assert_eq!((restored.limit, restored.byte_budget, restored.reads), (17, 12345, 23));
+    let restored_path = restored.path.clone();
+    let restored_origin = restored.gdal.clone();
+    let retained = restored.clone();
+    std::fs::remove_file(&path).unwrap();
+    assert!(restored.open().is_err());
+    assert_eq!(restored.path, restored_path);
+    assert_eq!(restored.gdal, restored_origin);
+    assert!(restored.same_opening(&retained));
+    assert_eq!(first_point(&restored.read_all().unwrap().0), Coord::new(8.0, 48.0));
+}
+
+#[test]
+fn saved_duckdb_conversion_restores_fresh_selected_family_despite_an_unchanged_signature() {
+    use rustgis_engine::data::source::duckdb;
+    if !duckdb::available() {
+        return;
+    }
+    let f = Fixture::new("restore-duckdb-signature");
+    let path = f.file("survey.duckdb");
+    let stale_db = f.file("stale.duckdb");
+    let sql = |db: &std::path::Path, statement: &str| {
+        let output = std::process::Command::new(duckdb::program().unwrap())
+            .arg(db)
+            .arg("-c")
+            .arg(format!("LOAD spatial; {statement}"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    sql(&path, "CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(2,48) AS geom; CREATE TABLE sibling AS SELECT ST_Point(1,1) AS geom");
+    sql(&stale_db, "CREATE TABLE survey AS SELECT 7 AS rank, ST_Point(99,48) AS geom");
+    let mut s = session();
+    s.run("layer.addDatabase", &json!({"database": path, "layer": "survey", "stream": true})).unwrap();
+    let id = s.active_layer.unwrap();
+    let cached_path = std::path::PathBuf::from(s.map().layer(id).unwrap().source.as_ref().unwrap().path.clone().unwrap());
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    let source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    let origin = source.duckdb.clone();
+    let private_path = std::path::PathBuf::from(source.path.as_ref().unwrap());
+    let private_workspace = private_path.parent().unwrap().to_path_buf();
+    let project = f.file("survey.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    drop(s);
+    assert!(!private_workspace.exists());
+
+    // Make the ordinary signature cache hold different data while the database is unchanged:
+    // restoring through that cache would revive the stale conversion.
+    let stale = duckdb::Database::File(stale_db.clone());
+    let stale_table = duckdb::find_table_of(&stale, "survey").unwrap();
+    let stale_out = duckdb::convert_table_of(&stale, &stale_table, None).unwrap();
+    std::fs::copy(&stale_out.parts[0].path, &cached_path).unwrap();
+    let database = duckdb::Database::File(path.clone());
+    let table = duckdb::find_table_of(&database, "survey").unwrap();
+    let cached = duckdb::convert_table_of(&database, &table, None).unwrap();
+    assert_eq!(cached.parts[0].path, cached_path, "the ordinary signature cache remains reusable");
+    assert_eq!(first_point(&io::read_path(&cached.parts[0].path).unwrap().0), Coord::new(99.0, 48.0), "the reusable cache really is stale");
+    let mut reopened = session();
+    reopened.run("project.open", &json!({"path": project})).unwrap();
+    assert_eq!(reopened.map().layers.len(), 1);
+    let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
+    assert_eq!(restored.duckdb, origin);
+    assert_eq!(restored.linked_file(), path.to_str());
+    assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(2.0, 48.0));
 }

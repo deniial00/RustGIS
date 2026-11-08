@@ -7,11 +7,11 @@ use serde_json::json;
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("layer.repairSource", "Repair Data Source", "Data › Data Source", repair_source).params(
+        C::new("layer.repairSource", "Repair Data Source", "Data › Data Source", repair_source).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"layer"?: name|id (default: the active layer), "path": "the file or folder (a Zarr store, a File Geodatabase) the layer's data moved to", "table"?: "the dataset in a GeoPackage, GDAL or DuckDB file, or a raster's subdataset (default: the one the layer reads now)"}"#),
-        C::new("layer.reloadData", "Reload Data", "Data › Data Source", reload_data).params(
+        C::new("layer.reloadData", "Reload Data", "Data › Data Source", reload_data).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"layer"?: "name|id (default: the active layer). Manually rereads linked local data, retaining presentation. Folder sources are not monitored; snapshots must be added again.", "discardEdits"?: "bool (default: false): explicitly discard pending GeoPackage edits. Undo restores in-memory edits and configuration, not overwritten files or historical streamed contents."}"#),
-        C::new("map.repairTiles", "Repair Tile Archive", "Layers", repair_tiles).params(
+        C::new("map.repairTiles", "Repair Tile Archive", "Layers", repair_tiles).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"name"?: text | "index"?: number (0 = top) | "id"?: catalog id, "path": "the .pmtiles or .mbtiles file the archive moved to"}"#),
     ]
 }
@@ -188,7 +188,7 @@ fn capture(s: &Session, id: u32, path: String, table: Option<String>, discard: b
 
 /// Only source reads/conversion run on the worker. Installation uses the live presentation.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn reload_ahead(s: &Session, p: &Value) -> Option<super::reads::ReadAhead> {
+pub(crate) fn reload_ahead(s: &Session, p: &Value) -> Option<super::reads::ReadWork> {
     let input = reload_input(s, p);
     Some(super::reads::ahead("Reload Data", "layer.reloadData".into(), move || input.and_then(prepare)))
 }
@@ -198,11 +198,16 @@ pub(crate) fn reload_ahead(s: &Session, p: &Value) -> Option<super::reads::ReadA
 fn prepare(input: Input) -> Result<Prepared, String> {
     let candidate = match &input.source {
         Snapshot::Editable { name, edit, .. } => Candidate::Editable(Box::new(super::gpkg::read_candidate(name, edit)?)),
-        Snapshot::Raster(rl) => Candidate::Raster(Box::new(if rl.time_zarr.is_some() {
-            super::zarr::relink_following(input.slider.as_ref(), rl, &input.path)?
-        } else {
-            rl.relinked(&input.path, input.table.as_deref())?
-        })),
+        Snapshot::Raster(rl) => {
+            let new = if rl.time_zarr.is_some() {
+                let mut new = super::zarr::relink_following(input.slider.as_ref(), rl, &input.path)?;
+                new.reset_replacement_read();
+                new
+            } else {
+                rl.relinked(&input.path, input.table.as_deref())?
+            };
+            Candidate::Raster(Box::new(new))
+        }
         Snapshot::Vector(source) => Candidate::Vector(Box::new(source.relinked(&input.path, input.table.as_deref())?)),
     };
     Ok(Prepared { input, candidate })
@@ -229,7 +234,7 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
         return Err(stale());
     }
     match candidate {
-        Candidate::Raster(new) => {
+        Candidate::Raster(mut new) => {
             let current = l.raster.as_ref().ok_or_else(stale)?;
             let Snapshot::Raster(prior) = &input.source else { return Err(stale()) };
             let same_pixels = match (&current.data, &prior.data) {
@@ -238,6 +243,8 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
                 _ => false,
             };
             if current.path != prior.path
+                || current.in_place != prior.in_place
+                || !current.same_opening(prior)
                 || current.subdataset != prior.subdataset
                 || current.crs != prior.crs
                 || current.placement != prior.placement
@@ -251,9 +258,7 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
                 return Err(stale());
             }
             let name = l.name.clone();
-            if let Some(data) = new.data.as_deref() {
-                super::raster::read_notices(s, &name, data);
-            }
+            super::raster::read_notices(s, &name, &mut new);
             let l = s.map_mut().layer_mut(id).ok_or("the layer no longer exists")?;
             l.raster = Some(*new);
             l.selection.clear();

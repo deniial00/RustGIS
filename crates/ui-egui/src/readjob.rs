@@ -26,10 +26,12 @@ pub struct Reads {
 }
 
 /// A command asked for, with where it was asked: the project, map and layer then open.
-/// A reload also retains its source, so a queued request cannot target a repaired path.
+/// A reload also retains its source and confirmed editable state until it lands.
 struct Asked {
     command: &'static str,
     params: Value,
+    /// Admitted when asked, including while another read runs; never recreated at start or landing.
+    ahead: Option<reads::ReadAhead>,
     /// What it reads, as its notices name it: the file, or the layer.
     what: String,
     opened: u64,
@@ -66,7 +68,7 @@ pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Valu
 
 /// [`run`], then `then` with what the command answered once it ran, here or as it lands, or why
 /// it never ran.
-pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Option<Then>) -> Result<Value, String> {
+pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then: Option<Then>) -> Result<Value, String> {
     if !app.reads_off_frame {
         let r = app.run(command, p);
         return answered(app, then, r);
@@ -74,6 +76,28 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
     let layer = matches!(command, "layer.loadAll" | "layer.reloadData")
         .then(|| app.session.layer_id(&p).ok().and_then(|id| app.session.map().layer(id)).map(|l| (l.instance_id(), l.name.clone())))
         .flatten();
+    let notice_mark = app.session.notice_mark();
+    if layer.is_some() {
+        let id = app.session.layer_id(&p)?;
+        if p.is_null() {
+            p = json!({});
+        }
+        let Some(params) = p.as_object_mut() else {
+            let error = tl!("Load All parameters must be an object").to_string();
+            app.command_failed(command, &error, notice_mark);
+            not_run(app, then, error.clone());
+            return Err(error);
+        };
+        params.insert("layer".into(), json!(id));
+    }
+    let ahead = match reads::read_ahead(&mut app.session, command, &p) {
+        Ok(ahead) => ahead,
+        Err(error) => {
+            app.command_failed(command, &error, notice_mark);
+            not_run(app, then, error.clone());
+            return Err(error);
+        }
+    };
     // Load All asked again for a layer it is reading already.
     if command == "layer.loadAll"
         && let Some((instance, _)) = &layer
@@ -90,7 +114,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
         None => p.get("path").and_then(Value::as_str).map(|path| file_name(path).to_string()).unwrap_or_default(),
     };
     let reload = if command == "layer.reloadData" {
-        match app.session.layer_id(&p).and_then(|id| crate::reloaddata::Form::new(&app.session, id)) {
+        match app.session.layer_id(&p).and_then(|id| crate::reloaddata::Form::for_read(&app.session, id)) {
             Ok(form) => Some(form),
             Err(why) => {
                 not_run(app, then, why.clone());
@@ -103,6 +127,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Opt
     let asked = Asked {
         command,
         params: p,
+        ahead: Some(ahead),
         what,
         opened: app.session.opened,
         map: app.session.map().instance_id(),
@@ -173,6 +198,7 @@ enum Gone {
     Map,
     Layer,
     Source,
+    Data,
 }
 
 impl std::fmt::Display for Gone {
@@ -183,6 +209,7 @@ impl std::fmt::Display for Gone {
             Gone::Map => tl_raw!("the map it was asked for isn't open"),
             Gone::Layer => tl_raw!("its layer was removed"),
             Gone::Source => tl_raw!("its data source changed"),
+            Gone::Data => tl_raw!("its data or pending edits changed; confirm Reload Data again"),
         })
     }
 }
@@ -201,6 +228,9 @@ fn placed(app: &RustGisApp, asked: &Asked) -> Result<Value, Gone> {
     if asked.reload.as_ref().is_some_and(|reload| !reload.is_current(&app.session)) {
         return Err(Gone::Source);
     }
+    if asked.reload.as_ref().is_some_and(|reload| !reload.data_is_current(&app.session)) {
+        return Err(Gone::Data);
+    }
     let mut p = asked.params.clone();
     p["layer"] = json!(l.id);
     Ok(p)
@@ -208,32 +238,58 @@ fn placed(app: &RustGisApp, asked: &Asked) -> Result<Value, Gone> {
 
 /// Starts `asked`'s read with `p`, or runs it here when it reads nothing ahead (or its thread
 /// can't start).
-fn start(app: &mut RustGisApp, asked: Asked, p: Value) -> Result<Value, String> {
-    // Picked on this thread, so a bug in the picking must not take the app down: it reads here.
-    let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reads::read_ahead(&app.session, asked.command, &p)));
-    let Ok(Some(ahead)) = picked else {
-        let r = app.run(asked.command, p);
-        return answered(app, asked.then, r);
+fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, String> {
+    let Some(ahead) = asked.ahead.take() else {
+        return complete_here(app, asked, p, Err(tl!("This read was already started").to_string()));
     };
     let name = ahead.name;
     let control = Control::stoppable();
+    if !ahead.reads() {
+        let read = ahead.run(&control);
+        return complete_here(app, asked, p, read);
+    }
     let (ctl, slot) = (control.clone(), crate::Slot::default());
     let out = slot.clone();
-    // A streamed layer's source read on the thread keeps its requests in the session's diagnostics.
+    // Retain the admitted operation if the OS cannot start its worker: the synchronous
+    // fallback must use that same owner, rather than dispatching a new native User command.
+    let held = crate::Slot::default();
+    *held.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ahead);
+    let work = held.clone();
     let diagnostics = app.session.diagnostics.capture();
     let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
         let _diagnostics = diagnostics.enter();
-        let read = ahead.run(&ctl);
-        // Filled even when its lock is poisoned, or the read would show as running forever.
+        let ahead = work.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let read = ahead.ok_or_else(|| tl!("This read was already started").to_string()).and_then(|ahead| ahead.run(&ctl));
         *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
     });
     if let Err(e) = spawned {
         log::warn!("{name} reads here: its thread didn't start: {e}");
-        let r = app.run(asked.command, p);
-        return answered(app, asked.then, r);
+        let read = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| tl!("This read was already started").to_string())
+            .and_then(|ahead| ahead.run(&control));
+        return complete_here(app, asked, p, read);
     }
     app.reads.job = Some(ReadJob { asked, gone: None, name, control, slot });
     Ok(json!({"started": name}))
+}
+
+/// Completes the admitted read, then calls its callback with the actual outcome.
+/// A pre-dispatch failure is reported once even when a queued start discards its error.
+fn complete_here(app: &mut RustGisApp, asked: Asked, p: Value, done: Result<reads::Read, String>) -> Result<Value, String> {
+    let read = match done {
+        Ok(read) => read,
+        Err(error) => {
+            let notice_mark = app.session.notice_mark();
+            app.command_failed(asked.command, &error, notice_mark);
+            not_run(app, asked.then, error.clone());
+            return Err(error);
+        }
+    };
+    let r = app.run_read(asked.command, p, read);
+    answered(app, asked.then, r)
 }
 
 /// Runs the command a read was for once it's done (or says why it wasn't), then starts the next
@@ -280,36 +336,9 @@ pub fn land(app: &mut RustGisApp) -> bool {
                         not_run(app, asked.then, left_too.clone());
                     }
                 } else {
-                    match done {
-                        Ok(read) => {
-                            read.placed(&mut app.session);
-                            // A failure is said by the command.
-                            let r = app.run(job.asked.command, p);
-                            let _ = answered(app, job.asked.then, r);
-                            app.session.drop_read();
-                            app.map.invalidate();
-                        }
-                        // A bug in a model's or script's run on a copy of the session: it runs here,
-                        // as it would have.
-                        Err(e) if matches!(job.asked.command, "model.run" | "script.run") => {
-                            app.session.notify(
-                                crate::i18n::fmt(
-                                    "{tool} couldn't work in the background ({e}): it ran here",
-                                    &[("tool", tl_raw!(job.name)), ("e", &e)],
-                                ),
-                                false,
-                            );
-                            let r = app.run(job.asked.command, p);
-                            let _ = answered(app, job.asked.then, r);
-                            app.map.invalidate();
-                        }
-                        // A bug in a reader: said, and the next goes on.
-                        Err(e) => {
-                            let said = crate::i18n::fmt("{what}: {e}", &[("what", &job.asked.what), ("e", &e)]);
-                            app.session.notify(said.clone(), true);
-                            not_run(app, job.asked.then, said);
-                        }
-                    }
+                    // The engine consumes the original owner before the callback sees its result.
+                    let _ = complete_here(app, job.asked, p, done);
+                    app.map.invalidate();
                 }
             }
         }
@@ -327,7 +356,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
         }
     }
     // Those left, one notice for each reason, with a count, naming the first.
-    for why in [Gone::Project, Gone::Map, Gone::Layer, Gone::Source] {
+    for why in [Gone::Project, Gone::Map, Gone::Layer, Gone::Source, Gone::Data] {
         let of: Vec<&String> = left.iter().filter(|(_, w)| *w == why).map(|(what, _)| what).collect();
         let reason = why.to_string();
         match of.as_slice() {
@@ -522,6 +551,133 @@ mod tests {
         app.session.map().layer(id).unwrap().source.as_ref().unwrap().info().unwrap().extent.center().x
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn editable_reload_fixture() -> (tempfile::TempDir, egui_kittest::Harness<'static, RustGisApp>, u32) {
+        use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value, raster::Crs, source::gpkg};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("places.gpkg");
+        let mut data = Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        data.push(Some(Geometry::Point(Coord::new(1.0, 20.0))), vec![Value::Text("original".into())]);
+        gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let id = app.run("gpkg.addLayer", json!({"path": path, "table": "places"})).unwrap()["layer"].as_u64().unwrap() as u32;
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        app.run("edit.setValue", json!({"layer": id, "row": 0, "field": "name", "value": "pending"})).unwrap();
+        app.reads_off_frame = true;
+        let mut fonts = false;
+        let h = egui_kittest::Harness::builder().with_size(egui::vec2(700.0, 500.0)).with_max_steps(64).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                // Drive the real confirmation without landing reads on the harness's frames.
+                // The tests hold the worker's completion slot and land explicitly below.
+                if app.dialogs.open == Some("reloadData") {
+                    crate::reloaddata::show(app, ui.ctx());
+                }
+            },
+            app,
+        );
+        (dir, h, id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn confirm_reload(h: &mut egui_kittest::Harness<'_, RustGisApp>, id: u32) {
+        use egui_kittest::kittest::Queryable;
+        h.state_mut().run("ui.reloadData", json!({"layer": id})).unwrap();
+        h.run_steps(3);
+        h.get_by_label("Inserts: 0; updates: 1; deletes: 0.");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Discard Edits and Reload").click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialogs.open, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn edited_value(app: &RustGisApp, id: u32) -> rustgis_engine::data::Value {
+        app.session.map().layer(id).unwrap().dataset.features[0].attrs[0].clone()
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn queued_reload_retains_confirmed_rows_schema_and_edit_baseline() {
+        use rustgis_engine::data::Value as DataValue;
+        for change in ["unchanged", "value", "schema", "baseline"] {
+            let (dir, mut h, id) = editable_reload_fixture();
+            // A real failed read occupies the queue without introducing an unrelated undo step.
+            let blocker = dir.path().join("blocked.geojson");
+            std::fs::write(&blocker, b"not GeoJSON").unwrap();
+            assert_eq!(run(h.state_mut(), "layer.addData", json!({"path": blocker})).unwrap()["started"], "Add Data");
+            let slot = h.state().reads.job.as_ref().unwrap().slot.clone();
+            let held = slot.lock().unwrap();
+            confirm_reload(&mut h, id);
+            assert_eq!(h.state().reads.waiting.len(), 1);
+            let counts = h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap();
+            match change {
+                "value" => {
+                    h.state_mut().run("edit.setValue", json!({"layer": id, "row": 0, "field": "name", "value": "later"})).unwrap();
+                }
+                "schema" => h.state_mut().session.map_mut().layer_mut(id).unwrap().dataset.fields[0].name = "renamed".into(),
+                "baseline" => {
+                    let edit = h.state_mut().session.map_mut().layer_mut(id).unwrap().gpkg.as_mut().unwrap();
+                    // Equal baseline values with a new COW identity must also invalidate consent.
+                    edit.versions = edit.versions.iter().collect();
+                }
+                "unchanged" => {}
+                _ => panic!("unexpected reload scenario"),
+            }
+            assert_eq!(h.state_mut().run("gpkg.pendingEdits", json!({"layer": id})).unwrap(), counts, "{change}");
+            let before = h.state().session.undo_label().map(str::to_string);
+            drop(held);
+            landed(h.state_mut(), 60);
+            if change == "unchanged" {
+                assert_eq!(edited_value(h.state(), id), DataValue::Text("original".into()));
+                h.state_mut().run("edit.undo", Value::Null).unwrap();
+                assert_eq!(edited_value(h.state(), id), DataValue::Text("pending".into()), "one reload undo step");
+                continue;
+            }
+            let expected = if change == "value" { "later" } else { "pending" };
+            assert_eq!(edited_value(h.state(), id), DataValue::Text(expected.into()), "{change}");
+            assert_eq!(h.state().session.undo_label(), before.as_deref(), "refusal adds no reload undo step: {change}");
+            assert!(
+                h.state().session.notices.iter().any(|n| n.text.contains("its data or pending edits changed; confirm Reload Data again")),
+                "{change}"
+            );
+            if change == "value" {
+                h.state_mut().run("edit.undo", Value::Null).unwrap();
+                assert_eq!(edited_value(h.state(), id), DataValue::Text("pending".into()), "the later edit is still the latest undo step");
+                h.state_mut().run("edit.redo", Value::Null).unwrap();
+                assert_eq!(edited_value(h.state(), id), DataValue::Text("later".into()));
+            }
+            // The rejected request does not poison a new, explicit confirmation.
+            confirm_reload(&mut h, id);
+            landed(h.state_mut(), 60);
+            assert_eq!(edited_value(h.state(), id), DataValue::Text("original".into()), "{change}");
+            h.state_mut().run("edit.undo", Value::Null).unwrap();
+            assert_eq!(edited_value(h.state(), id), DataValue::Text(expected.into()), "one retry reload undo step: {change}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn running_reload_cannot_discard_a_later_same_count_edit() {
+        use rustgis_engine::data::Value as DataValue;
+        let (_dir, mut h, id) = editable_reload_fixture();
+        confirm_reload(&mut h, id);
+        let slot = h.state().reads.job.as_ref().unwrap().slot.clone();
+        let held = slot.lock().unwrap();
+        h.state_mut().run("edit.setValue", json!({"layer": id, "row": 0, "field": "name", "value": "later"})).unwrap();
+        let before = h.state().session.undo_label().map(str::to_string);
+        drop(held);
+        landed(h.state_mut(), 60);
+        assert_eq!(edited_value(h.state(), id), DataValue::Text("later".into()));
+        assert_eq!(h.state().session.undo_label(), before.as_deref());
+        confirm_reload(&mut h, id);
+        landed(h.state_mut(), 60);
+        assert_eq!(edited_value(h.state(), id), DataValue::Text("original".into()));
+    }
+
     #[test]
     fn reload_lands_once_and_cancel_retains_the_current_layer() {
         let (_dir, mut app, id, path) = reload_fixture();
@@ -562,11 +718,21 @@ mod tests {
     }
 
     #[test]
-    fn load_all_after_reload_is_not_coalesced_with_the_reload() {
+    fn queued_load_all_after_reload_is_refused_until_requested_for_the_new_source() {
         let (_dir, mut app, id, path) = reload_fixture();
         publish_point(&path, 9.0);
+        let original = app.session.map().layer(id).unwrap().source.clone().unwrap();
         app.run("ui.reloadData", json!({"layer": id})).unwrap();
         assert_eq!(run(&mut app, "layer.loadAll", json!({"layer": id})).unwrap()["waiting"], 1);
+        landed(&mut app, 60);
+        let layer = app.session.map().layer(id).unwrap();
+        assert!(layer.is_streamed(), "the queued Load All cannot silently retarget the new source");
+        let reloaded = layer.source.clone().unwrap();
+        assert!(!reloaded.same_opening(&original));
+        assert_eq!(source_x(&app, id), 9.0);
+        assert_eq!(app.session.undo_label(), Some("Reload Data"), "the stale Load All creates no undo step");
+        assert!(app.session.notices.iter().any(|n| n.text.contains("source changed")));
+        run(&mut app, "layer.loadAll", json!({"layer": id})).unwrap();
         landed(&mut app, 60);
         let layer = app.session.map().layer(id).unwrap();
         assert!(!layer.is_streamed());

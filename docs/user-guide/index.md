@@ -96,7 +96,8 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   and closes it when it is. **Pane Sets** keep the tabs open.
 - **Status bar**: the scale (type one, or pick from the list), the zoom level, bearing and pitch
   (click them to face north and look straight down again), the pointer's coordinates (click them
-  to switch between decimal degrees and DMS), the coordinate system (click it to change the
+  to step through decimal degrees, DMS, UTM and MGRS; see [Coordinate readouts](maps.md#coordinate-readouts)),
+  the coordinate system (click it to change the
   projection), the selection count (with a button to clear it), the latest notice (click to open
   **Diagnostics**), a **Diagnostics** button, the last draw time, the frame rate and a **GPU**/**CPU**
   renderer switch. While agents control the desktop app, it also shows the MCP relay or file bridge.
@@ -238,6 +239,8 @@ GDAL/DuckDB file-backed layers and editable local GeoPackage tables. GDAL-linked
 Geodatabases and Zarr folders can be reloaded manually. **This is manual reload only**:
 RustGIS does not detect or notify about changes on disk. Folder sources are not monitored;
 use Reload Data even when the folder's timestamp has not changed.
+Saved GDAL/DuckDB links reread their original selected table if the private converted copy
+has been cleaned up, including compatible empty tables; they do not revive an older conversion.
 
 Reload does not turn snapshots into live links. Embedded uploads, generated layers, ordinary
 imports without linked provenance, arbitrary SQL results and layers detached by **Load All
@@ -253,9 +256,9 @@ Close an already-open dialog before opening the discard confirmation; Reload Dat
 discard another dialog's unfinished input.
 
 The desktop UI prepares the read or conversion in the background, with running status and
-Cancel in the status bar. Cancel installs nothing. If the source is repaired or the target is replaced,
-or GeoPackage edits change after confirmation while the read is running, the result is refused
-rather than applied to the changed target; review the current state and retry.
+Cancel in the status bar. Cancel installs nothing. If the source is repaired or the target is
+replaced, or GeoPackage edits change after confirmation while a reload is waiting or running,
+the reload is refused; review the current state and confirm again.
 
 Reload checks a fresh candidate before replacing the layer. Incompatible geometry, missing
 fields, incompatible numeric fields used by presentation settings, invalidated configured
