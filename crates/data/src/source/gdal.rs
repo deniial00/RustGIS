@@ -201,12 +201,17 @@ pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Ve
     convert_in(&dir, src, layer, crs)
 }
 
-fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Vec<Converted>, Vec<String>)> {
+fn check_crs(crs: Option<&str>) -> Result<()> {
     if let Some(c) = crs
         && (c.len() > 64 || c.starts_with('-') || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || ":_.".contains(ch)))
     {
         return Err(DataError::Format(format!("crs '{c}': give a code such as EPSG:2263")));
     }
+    Ok(())
+}
+
+fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Vec<Converted>, Vec<String>)> {
+    check_crs(crs)?;
     if !available() {
         return Err(missing());
     }
@@ -311,6 +316,7 @@ pub fn convert_one_fresh(src: &Path, layer: &str, family: Option<Family>, crs: O
 }
 
 fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<FreshConverted> {
+    check_crs(crs)?;
     let workspace = external::reload_workspace(dir)?;
     let all = list(src)?;
     let info = all
@@ -365,6 +371,7 @@ struct ConversionRequest<'a> {
 ///   `crs` given) is taken as it is, unprojected.
 fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionRequest<'_>) -> Result<Option<Conversion>> {
     let ConversionRequest { family, kind, crs, has_srs, fresh } = request;
+    check_crs(crs)?;
     // A name GDAL would take for an option (a file can name its own layers).
     if layer.starts_with('-') {
         return Err(DataError::Format(format!("layer '{layer}': a name starting with '-' isn't read")));
@@ -476,11 +483,43 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
             let count = counts.entry(line.to_string()).or_default();
             *count = count.saturating_add(1);
         }
-        counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect()
+        let mut notes: Vec<String> = counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect();
+        if let Some(family) = family {
+            let other = count_other_families(&full, layer, family)?;
+            if other > 0 {
+                notes.push(format!("GDAL: {other} features of another geometry type were left out"));
+            }
+        }
+        notes
     } else {
         Vec::new()
     };
     Ok(Some(Conversion { path: out, unprojected, notes, empty: !any }))
+}
+
+/// Count only the other supported geometry families, not geometry-less rows. Reuse exactly the
+/// filters used for conversion, so curves, surfaces and collections have the same classification.
+fn count_other_families(src: &Path, layer: &str, selected: Family) -> Result<u64> {
+    let (first, second) = match selected {
+        Family::Points => (Family::Lines, Family::Polygons),
+        Family::Lines => (Family::Points, Family::Polygons),
+        Family::Polygons => (Family::Points, Family::Lines),
+    };
+    let filter = format!("({}) OR ({})", first.filter(), second.filter());
+    let mut c = command(program("ogrinfo").ok_or_else(missing)?, drivers(src)?);
+    c.args(["-json", "-ro", "-so", "-nomd", "-where", &filter]).arg(src).arg(layer);
+    let out = output(c, LIST_TIMEOUT, "GDAL")?;
+    if !out.status.success() {
+        return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| DataError::Format(format!("GDAL: unreadable geometry count ({e})")))?;
+    json.get("layers")
+        .and_then(|layers| layers.as_array())
+        .and_then(|layers| layers.first())
+        .and_then(|layer| layer.get("featureCount"))
+        .and_then(|count| count.as_u64())
+        .ok_or_else(|| DataError::Format("GDAL: could not count features of other geometry types".into()))
 }
 
 /// The longest a conversion may run, and the longest a layer listing may.
@@ -726,5 +765,54 @@ mod tests {
         }
         assert!(convert_one_fresh_in(&cache, &path, "absent", None, Some("EPSG:4326")).is_err());
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0, "failed conversions must not retain workspaces");
+    }
+
+    #[test]
+    fn fresh_selected_family_reports_other_geometries_but_not_missing_or_matching_geometries() {
+        if !usable() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("survey.geojsonl");
+        let point = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[2,48]}}"#;
+        let line = r#"{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[2,48],[3,48]]}}"#;
+        let missing = r#"{"type":"Feature","properties":{},"geometry":null}"#;
+        for mixed in [true, false] {
+            let mut input = format!("{point}\n{missing}\n");
+            if mixed {
+                input.push_str(&format!("{line}\n{line}\n"));
+            }
+            std::fs::write(&path, input).unwrap();
+            let fresh = convert_one_fresh_in(&dir.path().join("cache"), &path, "survey", Some(Family::Points), None).unwrap();
+            let omitted = fresh.notes.iter().filter(|note| note.contains("another geometry type")).collect::<Vec<_>>();
+            if mixed {
+                assert_eq!(omitted, vec!["GDAL: 2 features of another geometry type were left out"]);
+            } else {
+                assert!(omitted.is_empty(), "{:?}", fresh.notes);
+                assert!(fresh.notes.is_empty(), "single-family input has no conversion losses: {:?}", fresh.notes);
+            }
+            let source = crate::source::open_path(&fresh.path, None).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            assert_eq!(batch.features.len(), 1);
+            assert_eq!(batch.features[0].geometry.as_ref().unwrap().kind(), GeometryType::Point);
+        }
+    }
+
+    #[test]
+    fn fresh_and_shared_conversion_refuse_crs_addresses_before_reading_or_converting() {
+        if !usable() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.geojsonl");
+        let cache = dir.path().join("cache");
+        let crs = Some("https://example.org/x");
+        let error = convert_one_fresh_in(&cache, &path, "survey", Some(Family::Points), crs).unwrap_err();
+        assert!(error.to_string().contains("crs 'https://example.org/x': give a code"), "{error}");
+        assert!(!cache.exists(), "invalid CRS must be refused before allocating or running a conversion");
+        let request = ConversionRequest { family: Some(Family::Points), kind: None, crs, has_srs: true, fresh: false };
+        let error = convert_one_in(&cache, &path, "survey", request).unwrap_err();
+        assert!(error.to_string().contains("crs 'https://example.org/x': give a code"), "{error}");
+        assert!(!cache.exists(), "the shared converter must reject invalid CRS before touching its output");
     }
 }

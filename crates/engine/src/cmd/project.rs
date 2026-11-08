@@ -148,15 +148,39 @@ pub(crate) fn reset_to(s: &mut Session, p: Project) {
     reset(s, p);
 }
 
-/// Says the saved conversions standing in for originals that couldn't be re-read: one notice,
-/// with the count and the first layer's failure. Called wherever saved layers are opened.
+/// Says fresh opening losses once per kind, and saved-conversion fallbacks once with the layer
+/// count and first failure. Ordinary source notes are not opening conversion diagnostics.
 pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
     let mut fallback: Option<(usize, String, String)> = None;
+    let mut losses = std::collections::BTreeMap::<(String, String), (usize, String, String)>::new();
     for l in s.project.maps.iter_mut().flat_map(|m| &mut m.layers) {
-        if let Some(note) = l.source.as_mut().and_then(|source| source.take_conversion_fallback()) {
+        let Some(source) = l.source.as_mut() else { continue };
+        if let Some(note) = source.take_conversion_fallback() {
             match &mut fallback {
                 Some((count, _, _)) => *count += 1,
                 None => fallback = Some((1, l.name.clone(), note)),
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for note in source.take_conversion_notes() {
+            // Source layer names and feature counts vary within a loss kind. Retain the first
+            // complete diagnostic, but count affected layers rather than diagnostic occurrences.
+            let kind = [
+                "Z or M coordinates",
+                "another geometry type",
+                "rows without a geometry",
+                "no declared coordinate system",
+                "rows could not be read while checking the replacement",
+                "Integer overflow",
+            ]
+            .into_iter()
+            .find(|kind| note.contains(*kind))
+            .unwrap_or(&note);
+            let provider = note.split_once(": ").map_or("", |(provider, _)| provider);
+            let key = (provider.to_owned(), kind.to_owned());
+            if seen.insert(key.clone()) {
+                let entry = losses.entry(key).or_insert_with(|| (0, l.name.clone(), note));
+                entry.0 += 1;
             }
         }
     }
@@ -166,6 +190,10 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
         } else {
             format!("{count} layers could not re-read their originals and are showing saved conversions; first: {name}: {note}")
         };
+        s.notify(text, false);
+    }
+    for (_, (count, name, note)) in losses {
+        let text = if count == 1 { format!("{name}: {note}") } else { format!("{count} layers: {note}; first: {name}") };
         s.notify(text, false);
     }
 }

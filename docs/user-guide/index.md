@@ -245,7 +245,10 @@ Saved GDAL/DuckDB links reread their original selected table when restoring a di
 converted copy, including compatible empty tables. If the original cannot be read, RustGIS
 does not borrow another session's temporary conversion. A durable saved conversion outside the
 current cache can still open as a fallback, with one notice naming the original and its read
-error (or the layer count and first failure when several layers fall back).
+error (or the layer count and first failure when several layers fall back). Losses found while
+converting a link again as a project opens (dropped Z or M values, clamped attributes) are
+reported once per kind, with a layer count. Temporary reload folders left by a crash are cleaned
+up later; folders RustGIS did not create are never removed, even in a shared cache folder.
 Reloading an existing DuckDB branch that has lost all its rows installs an empty layer of the
 same geometry family, even when rows of another family remain; the omitted rows are reported.
 

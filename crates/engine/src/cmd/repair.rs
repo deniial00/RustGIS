@@ -323,7 +323,11 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
             let moved = l.labels.in_order().map(|class| class.moved.len()).sum();
             l.labels.default.moved.clear();
             l.labels.classes.iter_mut().for_each(|class| class.moved.clear());
+            if l.dataset.geometry_type == rustgis_data::GeometryType::None && dataset.geometry_type != rustgis_data::GeometryType::None {
+                l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(dataset.geometry_type, id));
+            }
             l.dataset = dataset;
+            l.touch_replacement();
             l.gpkg = Some(edit);
             l.selection.clear();
             l.touch_geometry();

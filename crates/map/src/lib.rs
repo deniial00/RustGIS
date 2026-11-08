@@ -241,6 +241,9 @@ pub struct Layer {
     /// Process-local identity, preserved by snapshots but never stored in a project.
     #[serde(skip, default = "next_layer_instance")]
     instance_id: u64,
+    /// Process-local replacement identity; ordinary geometry edits leave chosen vertices valid.
+    #[serde(skip)]
+    replacement_rev: u64,
     /// Shared, like the features: an undo snapshot or other copy of the layer doesn't copy it.
     #[serde(skip)]
     projected: std::sync::Arc<Vec<Option<Geometry>>>,
@@ -293,6 +296,16 @@ impl Layer {
     /// Identifies this live layer, independently of its reusable map-local ID.
     pub fn instance_id(&self) -> u64 {
         self.instance_id
+    }
+
+    /// Identifies the current source contents independently of ordinary vertex edits.
+    pub fn replacement_revision(&self) -> u64 {
+        self.replacement_rev
+    }
+
+    /// Marks a wholesale data replacement, not an edit to the existing features.
+    pub fn touch_replacement(&mut self) {
+        self.replacement_rev = next_layer_instance();
     }
 
     /// Starts a distinct live instance after copying a layer or its owning map.
@@ -380,6 +393,9 @@ impl Layer {
         self.labels.classes.iter_mut().for_each(|class| class.moved.clear());
         src.reads = self.source.as_ref().map_or(0, |old| old.reads);
         if let Some(info) = src.info() {
+            if self.dataset.geometry_type == rustgis_data::GeometryType::None && info.geometry_type != rustgis_data::GeometryType::None {
+                self.renderer = Renderer::Single(Symbol::default_for(info.geometry_type, self.id));
+            }
             self.dataset.geometry_type = info.geometry_type;
             self.dataset.fields = info.fields.clone();
             self.dataset.crs = info.coordinate_system();
@@ -388,6 +404,7 @@ impl Layer {
         }
         self.dataset.source = src.linked_file().map(String::from);
         self.source = Some(src);
+        self.touch_replacement();
         self.install(Vec::new());
         moved
     }
@@ -405,6 +422,7 @@ impl Layer {
         Layer {
             id,
             instance_id: next_layer_instance(),
+            replacement_rev: 0,
             name: dataset.name.clone(),
             visible: true,
             labels: Labeling::default_for(&dataset),
@@ -2899,6 +2917,7 @@ impl Layer {
             view_memory: _,
             geometry_kinds: _,
             geometry_rev: _,
+            replacement_rev: _,
             diagram: _,
         } = self;
         let mut out = Vec::new();

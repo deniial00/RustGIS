@@ -62,6 +62,9 @@ pub struct SourceLayer {
     /// A successful saved-conversion fallback, consumed once when the project opens.
     #[serde(skip)]
     conversion_fallback: Option<String>,
+    /// Losses from a conversion actually performed while opening, consumed once by its caller.
+    #[serde(skip)]
+    conversion_notes_unsaid: Vec<String>,
     #[serde(skip)]
     window: Option<Window>,
     /// Whole-source thinning decisions shared by render snapshots, independent of view rows.
@@ -798,6 +801,7 @@ impl SourceLayer {
                 self.path = new.path;
                 self.handle = new.handle;
                 self.conversion_info = new.conversion_info;
+                self.conversion_notes_unsaid = self.conversion_info.as_ref().map(|info| info.notes.clone()).unwrap_or_default();
                 self.opening = None;
                 self.reset();
                 self.error = None;
@@ -816,6 +820,7 @@ impl SourceLayer {
     /// the frame: `Ok` while it is (see [`SourceLayer::is_pending`]), open once it has landed.
     pub fn open(&mut self) -> Result<(), String> {
         self.conversion_fallback = None;
+        self.conversion_notes_unsaid.clear();
         rustgis_data::source::remote::check_still(&rustgis_data::source::remote::current_still())?;
         if self.reconnect_required {
             self.error = Some(RECONNECT_REQUIRED.into());
@@ -1065,6 +1070,11 @@ impl SourceLayer {
     /// Takes the original-read failure once, only when a saved conversion opened instead.
     pub fn take_conversion_fallback(&mut self) -> Option<String> {
         self.conversion_fallback.take()
+    }
+
+    /// Takes diagnostics only from a fresh conversion performed by [`Self::open`].
+    pub fn take_conversion_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.conversion_notes_unsaid)
     }
 
     /// Every feature of the source, up to the read limit (a source by its web address fetching
@@ -1431,6 +1441,7 @@ impl SourceLayer {
             reads: _,
             conversion_info: _,
             conversion_fallback: _,
+            conversion_notes_unsaid: _,
             gdal,
             duckdb,
             postgis,
@@ -1499,6 +1510,18 @@ mod tests {
         assert!(restored.take_conversion_fallback().is_none());
         assert_eq!(source.take_conversion_fallback().as_deref(), Some(note));
         assert!(source.take_conversion_fallback().is_none());
+    }
+
+    #[test]
+    fn opening_conversion_notes_are_runtime_only_and_taken_once() {
+        let note = "GDAL: 2 features of another geometry type were left out";
+        let mut source = super::SourceLayer { conversion_notes_unsaid: vec![note.into()], ..Default::default() };
+        let saved = serde_json::to_value(&source).unwrap();
+        assert!(saved.get("conversion_notes_unsaid").is_none());
+        let mut restored: super::SourceLayer = serde_json::from_value(saved).unwrap();
+        assert!(restored.take_conversion_notes().is_empty());
+        assert_eq!(source.take_conversion_notes(), vec![note]);
+        assert!(source.take_conversion_notes().is_empty());
     }
 
     /// A later frame's whole-file fallback owns the opening's carrier through send and landing.

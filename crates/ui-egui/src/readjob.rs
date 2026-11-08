@@ -618,7 +618,7 @@ mod tests {
             assert!(crate::vertexedit::drag_start(&mut app, rect, from));
             assert!(app.map.vertex_drag_owner.is_some());
         } else {
-            app.map.vertex = Some((id, 0, VertexId::new(0, 0, 1)));
+            crate::vertexedit::choose(&mut app, Some((id, 0, VertexId::new(0, 0, 1))));
         }
         assert_eq!(app.map.vertex, Some((id, 0, VertexId::new(0, 0, 1))));
         (dir, app, id, path)
@@ -656,11 +656,91 @@ mod tests {
 
                 let other = app.run("gpkg.addLayer", json!({"path": path, "table": "roads"})).unwrap()["layer"].as_u64().unwrap() as u32;
                 let chosen = Some((other, 0, VertexId::new(0, 0, 1)));
-                app.map.vertex = chosen;
+                crate::vertexedit::choose(&mut app, chosen);
                 app.run("ui.reloadData", json!({"layer": id})).unwrap();
                 landed(&mut app, 60);
                 assert_eq!(app.map.vertex, chosen, "reloading another layer keeps this layer's chosen vertex");
             }
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn nested_and_direct_reload_cannot_retarget_a_chosen_vertex_or_drag() {
+        use rustgis_engine::data::{Coord, Dataset, Geometry, GeometryType, raster::Crs, source::gpkg};
+        for dispatch in ["script", "session-delete", "session-frame", "discard"] {
+            for off_frame in [false, true] {
+                for dragging in [false, true] {
+                    let (dir, mut app, id, path) = chosen_vertex_reload_fixture(off_frame, dragging);
+                    let replacement = Geometry::Line(vec![vec![Coord::new(10.0, 0.0), Coord::new(11.0, 0.0), Coord::new(12.0, 1.0)]]);
+                    let mut data = Dataset::new("roads", GeometryType::Polyline, vec![]);
+                    data.push(Some(replacement.clone()), vec![]);
+                    let fresh = dir.path().join("replacement.gpkg");
+                    gpkg::write_in(&data, &fresh, Crs::LonLat).unwrap();
+                    std::fs::copy(fresh, &path).unwrap();
+                    if dispatch == "script" {
+                        let script = format!("layer.reloadData {}", json!({"layer": id}));
+                        app.run("script.run", json!({"script": script})).unwrap();
+                        if off_frame {
+                            landed(&mut app, 60);
+                        }
+                        assert!(app.map.vertex.is_none(), "a script's reload clears its chosen vertex on landing");
+                        assert!(app.map.vertex_drag.is_none());
+                    } else if dispatch == "discard" {
+                        app.run("gpkg.discardEdits", json!({"layer": id})).unwrap();
+                        assert!(app.map.vertex.is_none(), "discarding edits also replaces row identities");
+                        assert!(app.map.vertex_drag.is_none());
+                    } else {
+                        app.session.run("layer.reloadData", &json!({"layer": id})).unwrap();
+                    }
+                    // Selection can return before the UI epilogue or the next frame; Delete must
+                    // still recognize the replacement rather than editing the new row's vertex.
+                    app.session.run("select.rows", &json!({"layer": id, "rows": [0]})).unwrap();
+                    if dispatch == "session-frame" {
+                        crate::vertexedit::cancel_stale_drag(&mut app);
+                        assert!(app.map.vertex.is_none(), "the frame's ownership check sees direct session replacements");
+                        assert!(app.map.vertex_drag.is_none());
+                    }
+                    let undo = app.session.undo_label().map(str::to_string);
+                    assert!(!crate::vertexedit::delete_chosen(&mut app));
+                    assert!(app.map.vertex.is_none());
+                    assert!(app.map.vertex_owner.is_none());
+                    assert!(app.map.vertex_drag.is_none());
+                    assert!(app.map.vertex_drag_owner.is_none());
+                    crate::vertexedit::drag_stop(&mut app);
+                    assert_eq!(app.session.map().layer(id).unwrap().dataset.features[0].geometry, Some(replacement));
+                    assert_eq!(app.session.undo_label(), undo.as_deref(), "stale Delete and release create no edit");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ordinary_vertex_move_keeps_the_chosen_vertex() {
+        use rustgis_engine::data::Coord;
+        for dispatch in ["ui", "session", "drag"] {
+            let (_dir, mut app, id, _path) = chosen_vertex_reload_fixture(false, dispatch == "drag");
+            let chosen = app.map.vertex;
+            let revision = app.session.map().layer(id).unwrap().replacement_revision();
+            if dispatch == "drag" {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0));
+                let to = crate::mapview::lonlat_to_screen(&app, rect, Coord::new(1.25, 0.25)).unwrap();
+                crate::vertexedit::drag_to(&mut app, rect, to);
+                crate::vertexedit::drag_stop(&mut app);
+            } else {
+                let p = json!({"layer": id, "row": 0, "action": "move", "part": 0, "ring": 0, "index": 1, "lon": 1.25, "lat": 0.25});
+                if dispatch == "ui" {
+                    app.run("edit.vertex", p).unwrap();
+                } else {
+                    app.session.run("edit.vertex", &p).unwrap();
+                }
+            }
+            crate::vertexedit::cancel_stale_drag(&mut app);
+            assert_eq!(app.map.vertex, chosen, "ordinary moves keep the chosen vertex for {dispatch}");
+            assert!(app.map.vertex_owner.is_some());
+            assert_eq!(app.session.map().layer(id).unwrap().replacement_revision(), revision);
+            assert!(crate::vertexedit::delete_chosen(&mut app), "the moved vertex remains usable");
         }
     }
 

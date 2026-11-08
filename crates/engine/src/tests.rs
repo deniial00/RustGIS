@@ -34649,3 +34649,83 @@ fn bundled_ca_roots_are_said_once_a_session() {
     other.say_bundled_roots(true);
     assert_eq!(said(&other), 1);
 }
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn reload_streamed_unknown_geometry_gets_a_visible_default_and_known_geometry_keeps_style() {
+    use rustgis_data::GeometryType;
+    use rustgis_map::{Renderer, Symbol};
+    for known in [false, true] {
+        let dir = std::env::temp_dir().join(format!("rustgis-reload-empty-stream-{}-{known}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("points.geojson");
+        let points = json!({
+            "type": "FeatureCollection", "features": [{
+                "type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [1, 2]}
+            }]
+        });
+        let initial = if known { points.clone() } else { json!({"type": "FeatureCollection", "features": []}) };
+        std::fs::write(&path, initial.to_string()).unwrap();
+        let mut s = Session::new(Project::default());
+        let id = s.run("layer.addData", &json!({"path": path, "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let layer = s.map_mut().layer_mut(id).unwrap();
+        assert!(layer.is_streamed());
+        assert_eq!(layer.dataset.geometry_type, if known { GeometryType::Point } else { GeometryType::None });
+        let mut custom = Symbol::default_for(layer.dataset.geometry_type, id);
+        custom.size = 31.0;
+        layer.renderer = Renderer::Single(custom);
+        let revision = layer.replacement_revision();
+        std::fs::write(&path, points.to_string()).unwrap();
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        let layer = s.map().layer(id).unwrap();
+        assert_eq!(layer.dataset.geometry_type, GeometryType::Point);
+        assert_ne!(layer.replacement_revision(), revision);
+        let expected = if known { custom } else { Symbol::default_for(GeometryType::Point, id) };
+        assert_eq!(layer.renderer, Renderer::Single(expected));
+        assert!(expected.size > 0.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn reload_editable_unknown_geometry_gets_a_visible_default_and_known_geometry_keeps_style() {
+    use rustgis_data::{Coord, Dataset, Geometry, GeometryType, raster::Crs, source::gpkg};
+    use rustgis_map::{Renderer, Symbol};
+    for known in [false, true] {
+        let dir = std::env::temp_dir().join(format!("rustgis-reload-empty-editable-{}-{known}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("points.gpkg");
+        let mut data = Dataset::new("points", GeometryType::Point, vec![]);
+        if known {
+            data.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![]);
+        }
+        gpkg::write_in(&data, &path, Crs::LonLat).unwrap();
+        if !known {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("UPDATE gpkg_geometry_columns SET geometry_type_name = 'GEOMETRY' WHERE table_name = 'points'", []).unwrap();
+        }
+        let mut s = Session::new(Project::default());
+        let id = s.run("gpkg.addLayer", &json!({"path": path, "table": "points"})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let layer = s.map_mut().layer_mut(id).unwrap();
+        assert_eq!(layer.dataset.geometry_type, if known { GeometryType::Point } else { GeometryType::None });
+        let mut custom = Symbol::default_for(layer.dataset.geometry_type, id);
+        custom.size = 31.0;
+        layer.renderer = Renderer::Single(custom);
+        let revision = layer.replacement_revision();
+        data.push(Some(Geometry::Point(Coord::new(3.0, 4.0))), vec![]);
+        let replacement = dir.join("replacement.gpkg");
+        gpkg::write_in(&data, &replacement, Crs::LonLat).unwrap();
+        std::fs::copy(replacement, &path).unwrap();
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        let layer = s.map().layer(id).unwrap();
+        assert_eq!(layer.dataset.geometry_type, GeometryType::Point);
+        assert_ne!(layer.replacement_revision(), revision);
+        let expected = if known { custom } else { Symbol::default_for(GeometryType::Point, id) };
+        assert_eq!(layer.renderer, Renderer::Single(expected));
+        assert!(expected.size > 0.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

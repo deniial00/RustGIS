@@ -2292,16 +2292,9 @@ impl RustGisApp {
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
         }
-        // A successful reload replaces row identities on both direct dispatch and read landing.
-        // A chosen vertex or held preview must not act on the replacement feature at that row.
-        if id == "layer.reloadData"
-            && let Ok(result) = &r
-            && let Some(layer) = result.get("layer").and_then(Value::as_u64)
-            && (self.map.vertex.is_some_and(|(id, _, _)| u64::from(id) == layer)
-                || self.map.vertex_drag.is_some_and(|drag| u64::from(drag.layer) == layer))
-        {
-            self.map.cancel_vertex_drag();
-        }
+        // Nested commands (including scripts) can replace rows too; never retarget a chosen
+        // vertex or held gesture to the replacement feature at the same row.
+        crate::vertexedit::cancel_stale_drag(self);
         if let Err(e) = &r {
             self.command_failed(id, e, notice_mark);
         }
@@ -2360,7 +2353,7 @@ impl RustGisApp {
         // fields stay with the old one.
         layoutview::follow_project(self);
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
-            self.map.vertex = None;
+            crate::vertexedit::choose(self, None);
             if let Some(before) = steps_before
                 && task_steps(self).is_none_or(|now| now != before)
             {

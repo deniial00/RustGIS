@@ -64,17 +64,6 @@ pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<R
             let lock_path = path.join("owner.lock");
             let lock = match std::fs::File::options().read(true).write(true).open(&lock_path) {
                 Ok(lock) => lock,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // A creator may not have installed its lock yet. Only legacy or abandoned
-                    // directories older than an hour can be reclaimed without one.
-                    if !age.is_some_and(|age| age >= std::time::Duration::from_secs(3600)) {
-                        continue;
-                    }
-                    let Ok(lock) = std::fs::File::options().read(true).write(true).create_new(true).open(&lock_path) else {
-                        continue;
-                    };
-                    lock
-                }
                 Err(_) => continue,
             };
             if lock.try_lock().is_ok() {
@@ -301,17 +290,21 @@ mod tests {
     }
 
     #[test]
-    fn reload_collection_keeps_missing_lock_hour_grace_and_locked_old_workspaces() {
+    fn reload_collection_keeps_old_lockless_directories_intact_and_locked_workspaces() {
         let cache = tempfile::tempdir().unwrap();
         let missing = cache.path().join("reload-no-lock");
         std::fs::create_dir(&missing).unwrap();
+        let contents = missing.join("not-rustgis.txt");
+        std::fs::write(&contents, b"unrelated data").unwrap();
         age_directory(&missing, 61);
         let live = reload_workspace(cache.path()).unwrap();
-        assert!(missing.exists(), "an uninstalled lock retains its longer one-hour grace");
+        assert_eq!(std::fs::read(&contents).unwrap(), b"unrelated data");
+        assert!(!missing.join("owner.lock").exists(), "a collector must not claim an unowned directory");
         age_directory(live.path(), 3601);
         age_directory(&missing, 3601);
         let _next = reload_workspace(cache.path()).unwrap();
-        assert!(!missing.exists(), "an hour-old missing lock can be reclaimed");
+        assert_eq!(std::fs::read(&contents).unwrap(), b"unrelated data", "age does not establish RustGIS ownership");
+        assert!(!missing.join("owner.lock").exists(), "old lockless directories must remain untouched");
         assert!(live.path().exists(), "even an old workspace belongs to its locked owner");
     }
 

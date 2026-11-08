@@ -886,7 +886,9 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     let mut reopened = session();
     reopened.run("project.open", &json!({"path": project})).unwrap();
     assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("showing the saved conversion")));
-    assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("Z or M coordinates")));
+    let losses = reopened.notices_since(0).iter().filter(|n| n.text.contains("Z or M coordinates")).collect::<Vec<_>>();
+    assert_eq!(losses.len(), 1, "{losses:?}");
+    assert!(losses[0].text.starts_with("Survey: "), "{}", losses[0].text);
     assert_eq!(reopened.map().layers.len(), 1);
     assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
     let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
@@ -1201,12 +1203,8 @@ fn two_saved_conversion_fallbacks_report_one_notice_with_layer_count_and_first_f
     assert!(notice.text.starts_with("2 layers "), "{}", notice.text);
     assert!(notice.text.contains("showing saved conversions"), "{}", notice.text);
     // The first in the map's layer order is named, with its own original.
-    let named = [("First conversion", first_original.clone()), ("Second conversion", f.file("removed.duckdb"))];
-    assert!(
-        named.iter().any(|(layer, original)| notice.text.contains(layer) && notice.text.contains(original.to_str().unwrap())),
-        "{}",
-        notice.text
-    );
+    assert!(notice.text.contains("Second conversion"), "{}", notice.text);
+    assert!(notice.text.contains(f.file("removed.duckdb").to_str().unwrap()), "{}", notice.text);
     assert!(notice.text.contains("failed ("), "{}", notice.text);
     assert!(!notice.error);
     for layer in &mut reopened.map_mut().layers {
@@ -1371,4 +1369,82 @@ fn direct_export_after_empty_duckdb_reload_is_a_point_geopackage() {
     let exported = io::read_path(&output).unwrap().0;
     assert!(exported.features.is_empty());
     assert_eq!(exported.geometry_type, GeometryType::Point, "a direct export must keep the layer's declared geometry type");
+}
+
+#[test]
+fn project_open_reports_fresh_conversion_losses_once_per_kind_but_not_clean_conversions() {
+    use rustgis_engine::{
+        data::source::{Family, gdal},
+        map::source::{GdalOrigin, SourceLayer},
+    };
+    if !gdal::usable() {
+        return;
+    }
+    for layer_count in [1, 2] {
+        for lossy in [true, false] {
+            let f = Fixture::new("restore-fresh-conversion-notices");
+            let mut saved = session();
+            let mut originals = Vec::new();
+            let mut workspaces = Vec::new();
+            for index in 0..layer_count {
+                let path = f.file(&format!("survey{index}.geojsonl"));
+                let publish = |coordinates: &str| {
+                    std::fs::write(
+                        &path,
+                        format!(r#"{{"type":"Feature","properties":{{}},"geometry":{{"type":"Point","coordinates":{coordinates}}}}}"#),
+                    )
+                    .unwrap();
+                };
+                publish("[2,48]");
+                let seed = f.file(&format!("seed{index}.fgb"));
+                io::write_path(&points(&[], Some(2.0)), &seed).unwrap();
+                let handle = rustgis_engine::data::source::open_path(&seed, None).unwrap();
+                let mut source = SourceLayer::from_path(seed.to_str().unwrap(), None, handle);
+                source.gdal = Some(GdalOrigin {
+                    path: path.to_str().unwrap().into(),
+                    layer: format!("survey{index}"),
+                    family: Some(Family::Points),
+                    crs: None,
+                });
+                let source = source.relinked(path.to_str().unwrap(), None).unwrap();
+                assert!(source.info().unwrap().notes.is_empty(), "the saved conversion itself was clean");
+                workspaces.push(std::path::PathBuf::from(source.path.as_ref().unwrap()).parent().unwrap().to_path_buf());
+                saved.map_mut().add_streamed(format!("Survey {index}"), source);
+                publish(if lossy { "[8,48,100]" } else { "[8,48]" });
+                originals.push(path);
+            }
+            let project = f.file("survey.rgis");
+            saved.run("project.saveAs", &json!({"path": project})).unwrap();
+            drop(saved);
+            assert!(workspaces.iter().all(|path| !path.exists()), "saved disposable workspaces must be gone before reopening");
+            assert!(originals.iter().all(|path| path.exists()));
+
+            let mut reopened = session();
+            let mark = reopened.notice_mark();
+            reopened.run("project.open", &json!({"path": project})).unwrap();
+            let notices = reopened.notices_since(mark);
+            let losses = notices.iter().filter(|notice| notice.text.contains("Z or M coordinates")).collect::<Vec<_>>();
+            if lossy {
+                assert_eq!(losses.len(), 1, "{notices:?}");
+                let first = format!("Survey {}", layer_count - 1);
+                if layer_count == 1 {
+                    assert!(losses[0].text.starts_with(&format!("{first}: ")), "{}", losses[0].text);
+                } else {
+                    assert!(losses[0].text.starts_with("2 layers: "), "{}", losses[0].text);
+                    assert!(losses[0].text.ends_with(&format!("first: {first}")), "{}", losses[0].text);
+                }
+                assert!(losses[0].text.contains("1 source feature(s)"), "{}", losses[0].text);
+                assert!(!losses[0].error);
+            } else {
+                assert!(losses.is_empty(), "{notices:?}");
+                assert_eq!(notices.len(), 1, "clean conversions only report that the project opened: {notices:?}");
+            }
+            for layer in &mut reopened.map_mut().layers {
+                let source = layer.source.as_mut().unwrap();
+                assert_eq!(source.info().unwrap().zm_dropped, lossy);
+                assert!(source.take_conversion_notes().is_empty(), "opening consumed conversion diagnostics exactly once");
+                assert_eq!(first_point(&layer.load_all().unwrap()), Coord::new(8.0, 48.0));
+            }
+        }
+    }
 }

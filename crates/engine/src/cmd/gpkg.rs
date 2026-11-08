@@ -382,6 +382,7 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
         l.gpkg = Some(baseline);
         l.selection.clear();
         l.touch_geometry();
+        l.touch_replacement();
         for note in notes {
             s.notify(format!("{name}: {note}"), false);
         }
