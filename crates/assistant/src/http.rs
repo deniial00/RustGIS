@@ -78,12 +78,12 @@ fn send_with(req: &HttpRequest, timeout: std::time::Duration, mut on_chunk: Opti
     Ok(HttpResponse { status, body, headers })
 }
 
-/// The scheme and host of a URL (errors never repeat a path that might carry a key).
-fn host(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    // Never the user name or password.
-    format!("{scheme}://{}", authority.rsplit('@').next().unwrap_or(""))
+/// The scheme and authority of an already-sanitized address, without its omission suffix.
+fn host(shown: &str) -> &str {
+    let url = shown.strip_suffix("[query omitted]").unwrap_or(shown);
+    let Some((scheme, rest)) = url.split_once("://") else { return url };
+    let end = rest.find('/').map_or(url.len(), |at| scheme.len() + 3 + at + 1);
+    url.get(..end).unwrap_or(url)
 }
 
 /// Only connection failures can be replayed. Timeouts may already have consumed a long request.
@@ -101,7 +101,13 @@ fn transport_error(e: &ureq::Error, url: &str) -> Error {
     // Establish known-address boundaries before applying the stricter host-only display policy.
     // Replacing raw text first could match a prefix of another address's longer credential.
     let message = diagnostics::message_with_address(url, &e.to_string());
-    let message = message.replace(&diagnostics::address_in_message(url), &host(url));
+    let shown = diagnostics::address_in_message(url);
+    let message = if shown.starts_with("https://") || shown.starts_with("http://") {
+        let host = host(&shown);
+        if host == shown { message } else { message.replace(&shown, host) }
+    } else {
+        message
+    };
     Error::transport(kind, format!("couldn't reach {message}"))
 }
 
@@ -134,6 +140,29 @@ mod tests {
         for hidden in ["user", "password", "private-key", "secret", "value"] {
             assert!(!error.contains(hidden), "{error}");
         }
+    }
+
+    #[test]
+    fn omitted_userinfo_is_not_restored_by_host_projection() {
+        for url in ["https://alice:hidden/x@models.test/private", "https://alice/x:hidden@models.test/private"] {
+            let cause = ureq::Error::Io(std::io::Error::other(format!("request {url}: connection closed")));
+            let error = transport_error(&cause, url).to_string();
+            for secret in ["alice", "hidden", "private"] {
+                assert!(!error.contains(secret), "{url} -> {error}");
+            }
+            assert!(error.contains("connection closed"), "{error}");
+            assert_eq!(diagnostics::redact(&diagnostics::redact(&error)), error);
+        }
+    }
+
+    #[test]
+    fn host_only_addresses_keep_the_host_after_repeated_redaction() {
+        let url = "https://models.test?token=hidden value";
+        let cause = ureq::Error::Io(std::io::Error::other("connection closed"));
+        let error = transport_error(&cause, url).to_string();
+        let error = diagnostics::redact(&diagnostics::redact(&error));
+        assert!(error.contains("https://models.test") && error.contains("connection closed"), "{error}");
+        assert!(!error.contains("hidden") && !error.contains("value"), "{error}");
     }
 
     #[test]

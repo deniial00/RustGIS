@@ -28,7 +28,8 @@ fragment are omitted, including values with unescaped spaces. For an unknown URL
 free text, a secret-named query or fragment still omits the rest of that text: those later
 words might be part of the credential, not an explanation. Copied history errors use the same
 conservative rule. Ambiguous slash-containing userinfo is omitted rather than guessed to be
-a host, port and path.
+a host, port and path. A root address is shown with `/` before an omission marker or reason,
+so repeated redaction keeps its host.
 
 Copied run parameters are sanitized as data, without blanket-omitting JSON/XML syntax.
 Public request parameters remain available for replay; credential fields and secret URL
