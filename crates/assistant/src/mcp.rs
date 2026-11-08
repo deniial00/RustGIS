@@ -88,6 +88,98 @@ pub(crate) fn request_key(root: &str, position: usize) -> String {
     format!("{root}/{position}")
 }
 
+/// A relay message paused at an admitted standalone archive command. Batch positions and
+/// one-use permits remain owned here; no suffix entry runs until the actual command lands.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct ArchiveBatch {
+    server: Server,
+    scope: Scope,
+    permits: Vec<(String, Permit)>,
+    request: String,
+    messages: std::vec::IntoIter<Value>,
+    position: usize,
+    batch: bool,
+    replies: Vec<Value>,
+    pending: Option<(Value, tools::CommandCompletion)>,
+    ahead: Option<rustgis_engine::cmd::reads::ReadAhead>,
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum ArchiveStep {
+    Done(Option<String>),
+    Read(Box<ArchiveBatch>),
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl ArchiveBatch {
+    pub(crate) fn take_read(&mut self) -> Option<rustgis_engine::cmd::reads::ReadAhead> {
+        self.ahead.take()
+    }
+    /// The command's reply reports changes made from the moment it actually runs, not from its
+    /// admission: the queue may run user work or other reads first.
+    pub(crate) fn begin_landing(&mut self, s: &Session) {
+        if let Some((_, completion)) = &mut self.pending {
+            *completion = tools::CommandCompletion::capture(s);
+        }
+    }
+    pub(crate) fn finish(mut self, s: &mut Session, result: Result<Value, String>) -> ArchiveStep {
+        if let Some((id, completion)) = self.pending.take() {
+            self.replies.push(archive_reply(id, completion.finish(s, result)));
+        }
+        self.advance(s)
+    }
+    fn advance(mut self, s: &mut Session) -> ArchiveStep {
+        while let Some(msg) = self.messages.next() {
+            let request = request_key(&self.request, self.position);
+            self.position += 1;
+            let archive = (|| {
+                let id = msg.get("id")?;
+                if !matches!(id, Value::String(_) | Value::Number(_)) || msg.get("method").and_then(Value::as_str) != Some("tools/call") {
+                    return None;
+                }
+                let (name, args) = tool_request(msg.get("params")?).ok()?;
+                if name != "run_command"
+                    || !matches!(args.get("command").and_then(Value::as_str), Some("map.reloadTiles" | "map.repairTiles"))
+                {
+                    return None;
+                }
+                Some((id.clone(), ToolCall { id: request.clone(), name: name.into(), args }))
+            })();
+            if let Some((id, call)) = archive {
+                let permit = self.permits.iter().position(|(key, _)| key == &request).map(|i| self.permits.remove(i).1);
+                let completion = tools::CommandCompletion::capture(s);
+                let admitted = tools::policy_call(&call)
+                    .and_then(|call| call.ok_or_else(|| "missing archive adapter".to_string()))
+                    .and_then(|call| s.start_scoped_archive_read(self.scope.clone(), &call, permit));
+                match admitted {
+                    Ok(ahead) => {
+                        self.pending = Some((id, completion));
+                        self.ahead = Some(ahead);
+                        return ArchiveStep::Read(Box::new(self));
+                    }
+                    Err(error) => self.replies.push(archive_reply(id, completion.finish(s, Err(error)))),
+                }
+            } else if let Some(reply) = self.server.handle_value(s, &msg, &self.scope, &mut self.permits, &request) {
+                self.replies.push(reply);
+            }
+        }
+        let reply = if self.replies.is_empty() {
+            None
+        } else if self.batch {
+            Some(Value::Array(self.replies).to_string())
+        } else {
+            self.replies.pop().map(|reply| reply.to_string())
+        };
+        ArchiveStep::Done(reply)
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn archive_reply(id: Value, result: Result<String, String>) -> Value {
+    let (text, failed) = match result {
+        Ok(text) => (text, false),
+        Err(error) => (error, true),
+    };
+    json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":failed}})
+}
+
 impl Server {
     /// A server with the built-in skills. `rustgis-cli mcp` and the desktop's relay replace them
     /// with the skills switched on (`skills::installed`): the user's, the plugins' and shared ones.
@@ -99,6 +191,37 @@ impl Server {
     /// a response.
     pub fn handle(&self, s: &mut Session, message: &str) -> Option<String> {
         self.handle_scoped(s, message, self.scope(s), Vec::new(), "")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Desktop relay ingress; only direct archive commands pause. Scripts and other transports
+    /// retain their synchronous contract, and malformed messages keep normal JSON-RPC handling.
+    pub(crate) fn start_archive_batch(
+        self,
+        s: &mut Session,
+        message: &str,
+        scope: Scope,
+        permits: Vec<(String, Permit)>,
+        request: &str,
+    ) -> ArchiveStep {
+        let parsed = serde_json::from_str::<Value>(message);
+        let (messages, batch) = match parsed {
+            Ok(Value::Array(batch)) if !batch.is_empty() && batch.len() <= MAX_BATCH => (batch, true),
+            Ok(msg) if !msg.is_array() => (vec![msg], false),
+            _ => return ArchiveStep::Done(self.handle_scoped(s, message, scope, permits, request)),
+        };
+        ArchiveBatch {
+            server: self,
+            scope,
+            permits,
+            request: request.into(),
+            messages: messages.into_iter(),
+            position: 0,
+            batch,
+            replies: Vec::new(),
+            pending: None,
+            ahead: None,
+        }
+        .advance(s)
     }
     /// Named relay/file-bridge ingress; permits are engine plans stored when approval was shown.
     pub(crate) fn handle_scoped(

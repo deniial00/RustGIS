@@ -230,6 +230,25 @@ pub fn run_with_budget(s: &mut Session, call: &ToolCall, tokens: usize, scope: S
     run_with_budget_inner(s, call, tokens, scope, permit).map_err(|e| public_error(&e))
 }
 
+/// Adapter-owned presentation state for one already-admitted archive command. Execution
+/// authority stays in the engine's ReadAhead/Read, never in this result formatter.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct CommandCompletion {
+    before: Vec<(String, Vec<u32>)>,
+    mark: u64,
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl CommandCompletion {
+    pub(crate) fn capture(s: &Session) -> Self {
+        Self { before: layer_snap(s), mark: s.notice_mark() }
+    }
+    pub(crate) fn finish(self, s: &mut Session, result: Result<Value, String>) -> Result<String, String> {
+        result
+            .map(|value| command_result(s, value, &self.before, self.mark, DEFAULT_OUTPUT_TOKENS))
+            .map_err(|e| public_error(&error_with_notices(e, s, self.mark)))
+    }
+}
+
 /// Retains the initiating scope and one-use permit while assembling ordinary tool results.
 fn run_with_budget_inner(s: &mut Session, call: &ToolCall, tokens: usize, scope: Scope, permit: Option<Permit>) -> Result<String, String> {
     if matches!(call.name.as_str(), "run_command" | "run_tool") {

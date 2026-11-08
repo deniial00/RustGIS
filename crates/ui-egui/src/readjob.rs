@@ -41,6 +41,8 @@ struct Asked {
     archive: Option<(usize, rustgis_engine::map::TileLayer)>,
     /// Given what the command answered when it runs, or why it didn't (cancelled, or left).
     then: Option<Then>,
+    /// A direct relay archive call owns its real completion, rather than a Native callback.
+    relay: Option<rustgis_assistant::relay::Relay>,
 }
 
 /// What a caller does once the command lands (ModelBuilder shows its run).
@@ -128,6 +130,7 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then:
         layer: layer.map(|(instance, _)| instance),
         archive,
         then,
+        relay: None,
     };
     if busy(app) {
         app.reads.waiting.push_back(asked);
@@ -140,6 +143,47 @@ pub fn run_then(app: &mut RustGisApp, command: &'static str, mut p: Value, then:
             not_run(app, then, why.clone());
             Err(why)
         }
+    }
+}
+
+/// Queues an archive read already admitted by the relay, without dispatching another command.
+pub fn admitted(app: &mut RustGisApp, ahead: reads::ReadAhead, relay: rustgis_assistant::relay::Relay) {
+    let Some((command, params)) = ahead.command() else {
+        relay.finish_archive_read(&mut app.session, Err(tl!("This read was already started").to_string()));
+        return;
+    };
+    let params = params.clone();
+    let archive = reads::archive_target(&app.session, &params);
+    let what = archive.as_ref().map(|(_, tile)| tile.name.clone()).unwrap_or_default();
+    let asked = Asked {
+        command,
+        params,
+        ahead: Some(ahead),
+        what,
+        opened: app.session.opened,
+        map: app.session.map().instance_id(),
+        layer: None,
+        archive,
+        then: None,
+        relay: Some(relay),
+    };
+    if busy(app) {
+        app.reads.waiting.push_back(asked);
+    } else {
+        match placed(app, &asked) {
+            Ok(p) => {
+                let _ = start(app, asked, p);
+            }
+            Err(why) => not_run_asked(app, &asked, why.to_string()),
+        }
+    }
+}
+
+fn not_run_asked(app: &mut RustGisApp, asked: &Asked, why: String) {
+    not_run(app, asked.then, why.clone());
+    if let Some(relay) = &asked.relay {
+        relay.begin_archive_landing(&app.session);
+        relay.finish_archive_read(&mut app.session, Err(why));
     }
 }
 
@@ -161,7 +205,7 @@ fn not_run(app: &mut RustGisApp, then: Option<Then>, why: String) {
 /// `asked` left for `why`: its `then` told now, and kept in `left` for the notice.
 fn leave(app: &mut RustGisApp, left: &mut Vec<(String, Gone)>, asked: &Asked, why: Gone) {
     let what = called(asked.command, &asked.what).to_string();
-    not_run(app, asked.then, crate::i18n::fmt("{what} was left: {why}", &[("what", &what), ("why", &why.to_string())]));
+    not_run_asked(app, asked, crate::i18n::fmt("{what} was left: {why}", &[("what", &what), ("why", &why.to_string())]));
     left.push((what, why));
 }
 
@@ -260,7 +304,7 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
                 &[("error", &e.to_string())],
             );
             app.session.notify(why.clone(), true);
-            not_run(app, asked.then, why.clone());
+            not_run_asked(app, &asked, why.clone());
             return Err(why);
         }
         log::warn!("{name} reads here: its thread didn't start: {e}");
@@ -284,10 +328,13 @@ fn complete_here(app: &mut RustGisApp, asked: Asked, p: Value, done: Result<read
         Err(error) => {
             let notice_mark = app.session.notice_mark();
             app.command_failed(asked.command, &error, notice_mark);
-            not_run(app, asked.then, error.clone());
+            not_run_asked(app, &asked, error.clone());
             return Err(error);
         }
     };
+    if let Some(relay) = &asked.relay {
+        relay.begin_archive_landing(&app.session);
+    }
     let r = app.run_read(asked.command, p, read);
     if asked.command == "map.repairTiles"
         && let Ok(answer) = &r
@@ -296,6 +343,9 @@ fn complete_here(app: &mut RustGisApp, asked: Asked, p: Value, done: Result<read
     {
         let text = crate::i18n::fmt("Repaired {name}", &[("name", &tile.name)]);
         app.session.notify(text, false);
+    }
+    if let Some(relay) = &asked.relay {
+        relay.finish_archive_read(&mut app.session, r.clone());
     }
     answered(app, asked.then, r)
 }
@@ -330,7 +380,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
                         crate::i18n::fmt("{tool} of {what} was cancelled", &[("tool", tl_raw!(job.name)), ("what", &job.asked.what)])
                     };
                     app.session.notify(said.clone(), false);
-                    not_run(app, job.asked.then, said);
+                    not_run_asked(app, &job.asked, said);
                     let waiting = std::mem::take(&mut app.reads.waiting);
                     let n = waiting.len();
                     let left_too = match n {
@@ -341,7 +391,7 @@ pub fn land(app: &mut RustGisApp) -> bool {
                         app.session.notify(left_too.clone(), false);
                     }
                     for asked in waiting {
-                        not_run(app, asked.then, left_too.clone());
+                        not_run_asked(app, &asked, left_too.clone());
                     }
                 } else {
                     // The engine consumes the original owner before the callback sees its result.
@@ -543,6 +593,65 @@ mod tests {
         };
         let bytes = pmtiles::write(vec![(0, 0, 0, mvt::encode(&mvt::Tile { layers: Vec::new() }))], &metadata).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn direct_relay_archive_joins_existing_read_queue_and_answers_only_after_landing() {
+        use rustgis_assistant::relay::{Relay, read_token_file};
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpStream;
+        let _turn = crate::fetching::turn();
+        let dir = std::env::temp_dir().join(format!("rustgis-relay-read-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.pmtiles");
+        let replacement = dir.join("replacement.pmtiles");
+        let csv = dir.join("first.csv");
+        archive(&original, "Original");
+        archive(&replacement, "Replacement");
+        std::fs::write(&csv, "name,x,y\nA,8,47\n").unwrap();
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("map.addTiles", json!({"url":original,"name":"Linked","overlay":true})).unwrap();
+        app.reads_off_frame = true;
+        run(&mut app, "layer.addData", json!({"path":csv})).unwrap();
+        let relay = Relay::start(0).unwrap();
+        let grant = relay.grant_reviewed(false).unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", relay.port())).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let token = read_token_file(grant.token_file()).unwrap();
+        writeln!(client, "{}", json!({"jsonrpc":"2.0","method":"rustgis/attach","params":{"token":token,"access":true}})).unwrap();
+        writeln!(client, "{}", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"map.repairTiles","params":{"index":0,"path":replacement}}}})).unwrap();
+        client.flush().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            relay.poll(&mut app.session);
+            if let Some(approval) = grant.pending().first() {
+                grant.decide(approval.id, true);
+            }
+            if let Some(ahead) = relay.take_archive_read() {
+                admitted(&mut app, ahead, relay.clone());
+                break;
+            }
+            assert!(std::time::Instant::now() < end, "relay never admitted the archive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.reads.waiting.len(), 1, "the relay must reuse the one existing worker queue");
+        assert_eq!(app.session.map().tiles[0].url, original.to_str().unwrap());
+        client.set_nonblocking(true).unwrap();
+        assert_eq!(client.peek(&mut [0u8; 1]).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        client.set_nonblocking(false).unwrap();
+        landed(&mut app, 60);
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("replacement") || text.contains("Repaired"), "the agent's own change is reported: {text}");
+        assert!(!text.contains("layersAdded") && !text.contains("first"), "the queued user read is not the agent's change: {text}");
+        assert_eq!(app.session.map().tiles[0].url, replacement.to_str().unwrap());
+        assert_eq!(app.session.map().layers.len(), 1);
+        assert!(app.session.undo_actor().flatten().is_some_and(|actor| actor.starts_with("agent 1 (relay run ")));
+        relay.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -45,6 +45,13 @@ pub struct ReadAhead {
 }
 
 impl ReadAhead {
+    /// The immutable registered invocation retained by this read, for queue presentation only.
+    pub fn command(&self) -> Option<(&'static str, &Value)> {
+        match self.op.op() {
+            CommandOp::Registered { spec, params } => Some((spec.id, params)),
+            _ => None,
+        }
+    }
     /// Whether this command has a read to make before it lands; otherwise landing runs it inline.
     pub fn reads(&self) -> bool {
         self.work.is_some()
