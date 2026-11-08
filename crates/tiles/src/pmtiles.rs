@@ -245,7 +245,7 @@ pub struct NewArchive {
     pub gzipped_tiles: bool,
     /// Longitude/latitude bounds: west, south, east, north.
     pub bounds: [f64; 4],
-    /// The JSON metadata (`vector_layers`, `attribution`, `name`…).
+    /// The JSON metadata object (`vector_layers`, `attribution`, `name`…); use `{}` when absent.
     pub metadata: Value,
 }
 
@@ -253,6 +253,9 @@ pub struct NewArchive {
 /// stored once, its directories uncompressed, in leaf directories when the root would pass the
 /// first 16 KB. Tiles given twice keep the last.
 pub fn write(tiles: Vec<(u8, u32, u32, Vec<u8>)>, a: &NewArchive) -> Result<Vec<u8>, String> {
+    if !a.metadata.is_object() {
+        return Err("PMTiles metadata must be a JSON object".into());
+    }
     // A tile outside its zoom would take the id of another zoom's; readers stop at zoom 30.
     if let Some((z, x, y, _)) = tiles.iter().find(|(z, x, y, _)| *z > 30 || u64::from(*x) >= 1u64 << z || u64::from(*y) >= 1u64 << z) {
         return Err(format!("{z}/{x}/{y} isn't a tile (zoom 0–30, x and y below 2^zoom)"));
@@ -874,12 +877,13 @@ impl IndexBudget {
     }
 }
 
-/// A completed directory's height and greatest exclusive tile-run end, including descendants.
-/// Recheck both on every shared reference: its parent may impose a tighter depth or tile boundary.
+/// A completed directory's height and descendant tile bounds; empty subtrees have no minimum.
+/// Recheck these on every shared reference: its parent may impose a tighter depth or tile boundary.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Default)]
 struct DirectorySummary {
     height: usize,
+    tile_start: Option<u64>,
     tile_end: u64,
 }
 
@@ -908,6 +912,7 @@ fn validate_directories(
             if e.length > MAX_BYTES as u64 {
                 return Err(format!("{} bytes is too large to read from an archive", e.length));
             }
+            summary.tile_start = Some(summary.tile_start.map_or(e.tile_id, |start| start.min(e.tile_id)));
             summary.tile_end = summary.tile_end.max(tile_end);
             continue;
         }
@@ -946,6 +951,9 @@ fn validate_directories(
             seen.insert(key, Some(child_summary));
             child_summary
         };
+        if child_summary.tile_start.is_some_and(|start| start < e.tile_id) {
+            return Err("a PMTiles leaf directory contains tiles below its pointer".into());
+        }
         if dir.get(i + 1).is_some_and(|next| child_summary.tile_end > next.tile_id) {
             return Err("overlapping PMTiles tile runs".into());
         }
@@ -954,6 +962,9 @@ fn validate_directories(
             return Err("PMTiles directories nested too deep".into());
         }
         summary.height = summary.height.max(subtree);
+        if let Some(start) = child_summary.tile_start {
+            summary.tile_start = Some(summary.tile_start.map_or(start, |current| current.min(start)));
+        }
         summary.tile_end = summary.tile_end.max(child_summary.tile_end);
     }
     Ok(summary)
@@ -1357,7 +1368,7 @@ pub(crate) mod tests {
         std::fs::write(&path, bad).unwrap();
         assert_eq!(read_info_local(source).unwrap_err(), "a truncated directory");
 
-        let first = write_dir(&[Entry { tile_id: 0, offset: 0, length: 3, run_length: 1 }]);
+        let first = write_dir(&[]);
         let second = write_dir(&[Entry { tile_id: 1, offset: 0, length: 3, run_length: 1 }]);
         let root = [
             Entry { tile_id: 0, offset: 0, length: first.len() as u64, run_length: 0 },
@@ -1370,12 +1381,12 @@ pub(crate) mod tests {
         assert!(read_info_local(source).is_ok());
         // Exactly enough for the root and two unique leaves; the repeated range costs no work.
         let bytes = (write_dir(&root).len() + leaves.len()) as u64;
-        let exact = IndexBudget { stored: bytes, decoded: bytes, entries: 5, directories: 3 };
+        let exact = IndexBudget { stored: bytes, decoded: bytes, entries: 4, directories: 3 };
         assert!(read_info_local_bounded(source, exact).is_ok());
         for budget in [
             IndexBudget { stored: bytes - 1, ..exact },
             IndexBudget { decoded: bytes - 1, ..exact },
-            IndexBudget { entries: 4, ..exact },
+            IndexBudget { entries: 3, ..exact },
             IndexBudget { directories: 2, ..exact },
         ] {
             assert_eq!(read_info_local_bounded(source, budget).unwrap_err(), "PMTiles index exceeds validation budget");
@@ -1485,6 +1496,67 @@ pub(crate) mod tests {
             }
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fresh_local_validation_checks_descendant_tiles_against_pointer_lower_bounds() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-pointer-lower-bounds-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        for nested in [false, true] {
+            for tile_id in [0, 5] {
+                for pointer_id in [0, 5, 6] {
+                    let mut leaves = write_dir(&[Entry { tile_id, offset: 0, length: 3, run_length: 1 }]);
+                    let mut pointer = Entry { tile_id: 0, offset: 0, length: leaves.len() as u64, run_length: 0 };
+                    if nested {
+                        let directory = write_dir(&[pointer]);
+                        pointer.offset = leaves.len() as u64;
+                        pointer.length = directory.len() as u64;
+                        leaves.extend(directory);
+                    }
+                    pointer.tile_id = pointer_id;
+                    std::fs::write(&path, indexed_archive(&[pointer], leaves)).unwrap();
+                    let result = read_info_local(source);
+                    if pointer_id > tile_id {
+                        assert_eq!(
+                            result.unwrap_err(),
+                            "a PMTiles leaf directory contains tiles below its pointer",
+                            "nested={nested}, pointer_id={pointer_id}, tile_id={tile_id}"
+                        );
+                    } else {
+                        assert!(result.is_ok(), "nested={nested}, pointer_id={pointer_id}, tile_id={tile_id}: {result:?}");
+                    }
+                }
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn memoized_directory_rechecks_pointer_lower_bounds_without_io_or_budget() {
+        let path = std::env::temp_dir().join(format!("rustgis-pmtiles-memo-lower-bounds-{}.pmtiles", std::process::id()));
+        let source = path.to_str().unwrap();
+        let leaf = write_dir(&[Entry { tile_id: 5, offset: 0, length: 3, run_length: 1 }]);
+        let pointer = Entry { tile_id: 0, offset: 0, length: leaf.len() as u64, run_length: 0 };
+        let bytes = indexed_archive(&[pointer], leaf.clone());
+        let (info, _, _) = parse_head(&bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut budget = IndexBudget { stored: leaf.len() as u64, decoded: leaf.len() as u64, entries: 1, directories: 1 };
+        let mut seen = HashMap::new();
+        validate_directories(source, &info, &[pointer], 0, &mut budget, &mut seen).unwrap();
+        assert_eq!((budget.stored, budget.decoded, budget.entries, budget.directories), (0, 0, 0, 0));
+        std::fs::remove_file(&path).unwrap();
+        // The same completed subtree is legal below its first tile and at equality, but not above.
+        for tile_id in [0, 5, 6] {
+            let result = validate_directories(source, &info, &[Entry { tile_id, ..pointer }], 0, &mut budget, &mut seen);
+            if tile_id > 5 {
+                assert_eq!(result.unwrap_err(), "a PMTiles leaf directory contains tiles below its pointer");
+            } else {
+                assert!(result.is_ok(), "pointer_id={tile_id}: {result:?}");
+            }
+            assert_eq!((budget.stored, budget.decoded, budget.entries, budget.directories), (0, 0, 0, 0));
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1779,8 +1851,12 @@ pub(crate) mod tests {
             tile_type,
             gzipped_tiles: false,
             bounds: [-10.0, -5.0, 10.0, 5.0],
-            metadata: serde_json::json!({"vector_layers": [{"id": "roads"}]}),
+            metadata: serde_json::json!({"vector_layers": [{"id": "roads"}], "attribution": "Written credits"}),
         };
+        for metadata in [Value::Null, serde_json::json!([]), serde_json::json!("credits"), serde_json::json!(1), serde_json::json!(true)] {
+            let invalid = NewArchive { metadata, ..new(TileType::Mvt) };
+            assert_eq!(write(vec![(0, 0, 0, b"tile".to_vec())], &invalid).unwrap_err(), "PMTiles metadata must be a JSON object");
+        }
         // A few tiles, one given twice and two alike (stored once).
         let small =
             vec![(0u8, 0u32, 0u32, b"old".to_vec()), (1, 0, 0, b"same".to_vec()), (1, 0, 1, b"same".to_vec()), (0, 0, 0, b"zero".to_vec())];
@@ -1799,6 +1875,9 @@ pub(crate) mod tests {
         assert_eq!(get(&format!("pmtiles:1/0/0@{a}")).unwrap(), b"same");
         assert_eq!(get(&format!("pmtiles:1/0/1@{a}")).unwrap(), b"same");
         assert!(get(&format!("pmtiles:1/1/1@{a}")).unwrap().is_empty());
+        assert_eq!(info_blocking(&a, std::time::Duration::from_secs(10)).unwrap().attribution(), "Written credits");
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(read_info_local(&a).unwrap().attribution(), "Written credits");
         // Every tile to zoom 7, each different: too many for the root, so in leaves.
         let many: Vec<(u8, u32, u32, Vec<u8>)> = (0..=7u8)
             .flat_map(|z| (0..1u32 << z).flat_map(move |x| (0..1u32 << z).map(move |y| (z, x, y, format!("{z}/{x}/{y}").into_bytes()))))

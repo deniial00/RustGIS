@@ -126,11 +126,29 @@ impl ArchiveBatch {
         }
     }
     pub(crate) fn finish(mut self, s: &mut Session, result: Result<Value, String>) -> ArchiveStep {
+        self.finish_pending(s, result);
+        self.advance(s)
+    }
+    /// A changed project or map invalidates the suffix, not the command's actual result.
+    /// Complete every remaining request without dispatching even a read-only tool.
+    pub(crate) fn cancel_remaining(mut self, s: &mut Session, result: Result<Value, String>) -> ArchiveStep {
+        self.finish_pending(s, result);
+        for msg in self.messages.by_ref() {
+            match request_identity(&msg) {
+                Ok(Some((_, id))) => {
+                    self.replies.push(error_value(&id, -32000, "archive batch context changed; remaining request cancelled"));
+                }
+                Ok(None) => {}
+                Err(reply) => self.replies.push(reply),
+            }
+        }
+        self.done()
+    }
+    fn finish_pending(&mut self, s: &mut Session, result: Result<Value, String>) {
         self.picked = false;
         if let Some((id, completion)) = self.pending.take() {
             self.replies.push(archive_reply(id, completion.finish(s, result)));
         }
-        self.advance(s)
     }
     fn advance(mut self, s: &mut Session) -> ArchiveStep {
         while let Some(msg) = self.messages.next() {
@@ -173,6 +191,9 @@ impl ArchiveBatch {
                 self.replies.push(reply);
             }
         }
+        self.done()
+    }
+    fn done(mut self) -> ArchiveStep {
         let reply = if self.replies.is_empty() {
             None
         } else if self.batch {
@@ -281,22 +302,12 @@ impl Server {
         permits: &mut Vec<(String, Permit)>,
         request: &str,
     ) -> Option<Value> {
-        let Some(obj) = msg.as_object() else {
-            return Some(error_value(&Value::Null, INVALID_REQUEST, "expected a JSON-RPC object"));
+        let (method, id) = match request_identity(msg) {
+            Ok(Some(request)) => request,
+            Ok(None) => return None,
+            Err(reply) => return Some(reply),
         };
-        let id = obj.get("id").cloned();
-        let Some(method) = obj.get("method").and_then(Value::as_str) else {
-            // A response to a request of ours (we send none), or junk.
-            return id
-                .filter(|_| !obj.contains_key("result") && !obj.contains_key("error"))
-                .map(|id| error_value(&id, INVALID_REQUEST, "expected a method"));
-        };
-        // Notifications (no id) get no reply.
-        let id = id?;
-        if !matches!(id, Value::String(_) | Value::Number(_)) {
-            return Some(error_value(&Value::Null, INVALID_REQUEST, "id must be a string or a number"));
-        }
-        let params = obj.get("params").cloned().unwrap_or(Value::Null);
+        let params = msg.get("params").cloned().unwrap_or(Value::Null);
         Some(match self.call(s, method, &params, scope, permits, request) {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err((code, message)) => error_value(&id, code, &message),
@@ -671,6 +682,27 @@ pub fn expects_reply(message: &str) -> bool {
         // Not JSON: the server answers with a parse error.
         Err(_) => true,
     }
+}
+
+/// Applies JSON-RPC identity rules without executing a request.
+fn request_identity(msg: &Value) -> Result<Option<(&str, Value)>, Value> {
+    let Some(obj) = msg.as_object() else {
+        return Err(error_value(&Value::Null, INVALID_REQUEST, "expected a JSON-RPC object"));
+    };
+    let id = obj.get("id").cloned();
+    let Some(method) = obj.get("method").and_then(Value::as_str) else {
+        // A response to a request of ours (we send none), or junk.
+        return match id.filter(|_| !obj.contains_key("result") && !obj.contains_key("error")) {
+            Some(id) => Err(error_value(&id, INVALID_REQUEST, "expected a method")),
+            None => Ok(None),
+        };
+    };
+    // Notifications (no id) get no reply.
+    let Some(id) = id else { return Ok(None) };
+    if !matches!(id, Value::String(_) | Value::Number(_)) {
+        return Err(error_value(&Value::Null, INVALID_REQUEST, "id must be a string or a number"));
+    }
+    Ok(Some((method, id)))
 }
 
 /// Projects generated RPC error text while retaining the exact correlation id and code.

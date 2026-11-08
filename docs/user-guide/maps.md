@@ -328,9 +328,12 @@ The layer keeps its name, visibility, opacity, blend, drawing order, source-laye
 style and other presentation settings; the map's view stays where it is. Undo cannot restore
 file contents that another program has overwritten.
 
-On the desktop, reload and repair validate on a background worker; the status bar shows the work
-and **Cancel**. Only one read runs at a time. If its project, map, archive or presentation changes
-before it lands, the result is left unapplied: retry on the intended target.
+On the desktop, menu actions and direct attached MCP `run_command` calls validate reload and
+repair on a background worker; the status bar shows the work and **Cancel**. Only one read runs
+at a time. If its project, map, archive or presentation changes before it lands, the result is
+left unapplied: retry on the intended target. A paused attached batch also rejects its remaining
+commands if the project or selected map changes. Attached MCP `run` scripts and file-bridge
+scripts validate inline, without reload status or cancellation during validation.
 
 Approval binds the selected archive's owning map, stack position and source route, not just its
 name or index. Retargeting or reordering it requires reviewing the operation again.

@@ -742,40 +742,83 @@ fn archive_observation_begins_in_worker_not_when_work_is_queued() {
     }
 }
 
+/// Move the writer's uncompressed root index into a leaf and optionally add an intermediate
+/// directory. All pointer fields are small fixture constants; tile payloads remain unchanged.
+fn pmtiles_with_leaf_pointer(bytes: &[u8], pointer_id: u8, nested: bool) -> Vec<u8> {
+    let at = |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+    assert_eq!(bytes[97], 1, "fixture directories must be uncompressed");
+    assert_eq!(at(48), 0, "fixture must start with no leaf directories");
+    let mut leaves = bytes[at(8)..at(8) + at(16)].to_vec();
+    let leaf_length = u8::try_from(leaves.len()).unwrap();
+    let mut root = vec![1, pointer_id, 0, leaf_length, 1];
+    if nested {
+        root[3] = 5;
+        root[4] = leaf_length + 1;
+        leaves.extend([1, 0, 0, leaf_length, 1]);
+    }
+    let metadata = &bytes[at(24)..at(24) + at(32)];
+    let data = &bytes[at(56)..at(56) + at(64)];
+    let mut head = bytes[..127].to_vec();
+    let metadata_at = 127 + root.len() as u64;
+    let leaf_at = metadata_at + metadata.len() as u64;
+    let data_at = leaf_at + leaves.len() as u64;
+    for (offset, value) in [(8, 127), (16, root.len() as u64), (24, metadata_at), (40, leaf_at), (48, leaves.len() as u64), (56, data_at)] {
+        head[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    [head, root, metadata.to_vec(), leaves, data.to_vec()].concat()
+}
+
 #[test]
-fn overlapping_pmtiles_runs_reject_reload_and_repair_without_losing_retained_data() {
+fn unreachable_pmtiles_runs_reject_reload_and_repair_without_losing_retained_data() {
     for command in ["map.reloadTiles", "map.repairTiles"] {
-        let f = Scoped::new(&format!("archive-overlapping-runs-{command}"));
-        let linked = f.file("linked.pmtiles");
-        let replacement = f.file("replacement.pmtiles");
-        write_archive(&linked, [255, 0, 0, 255], "Retained credits");
-        let mut s = session();
-        s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
-        let tile = s.map().tiles[0].clone();
-        let retained = vec![retain_archive(&tile)];
-        s.style_view = Some((tile.clone(), s.map().camera, s.map().instance_id()));
-        let archive = pmtiles::NewArchive {
-            tile_type: pmtiles::TileType::Png,
-            gzipped_tiles: false,
-            bounds: [-180.0, -85.0, 180.0, 85.0],
-            metadata: json!({"attribution":"Valid adjacent runs"}),
-        };
-        let valid = pmtiles::write(vec![(0, 0, 0, picture([0, 255, 0, 255])), (1, 0, 0, picture([0, 0, 255, 255]))], &archive).unwrap();
-        assert_eq!(&valid[127..132], &[2, 0, 1, 1, 1], "fixture must contain two adjacent single-tile runs");
-        let mut overlapping = valid.clone();
-        overlapping[130] = 2; // First [0,1) run becomes [0,2), overlapping the next entry.
-        let mut params = json!({"index":0});
-        let path = if command == "map.repairTiles" {
-            params["path"] = json!(replacement);
-            &replacement
-        } else {
-            &linked
-        };
-        std::fs::write(path, overlapping).unwrap();
-        let read = archive_read(&mut s, command, &params);
-        assert!(reject_stale_archive(&mut s, read, &retained).contains("overlapping PMTiles tile runs"));
-        std::fs::write(path, valid).unwrap();
-        s.run(command, &params).unwrap();
-        assert_color(&decoded(&s.map().tiles[0]), [0, 255, 0, 255]);
+        for defect in ["overlap", "direct lower bound", "nested lower bound"] {
+            let f = Scoped::new(&format!("archive-unreachable-runs-{command}-{defect}"));
+            let linked = f.file("linked.pmtiles");
+            let replacement = f.file("replacement.pmtiles");
+            write_archive(&linked, [255, 0, 0, 255], "Retained credits");
+            let mut s = session();
+            s.run("map.addTiles", &json!({"url":linked,"overlay":true})).unwrap();
+            s.run("map.setTiles", &json!({"index":0,"opacity":0.4})).unwrap();
+            let tile = s.map().tiles[0].clone();
+            let retained = vec![retain_archive(&tile)];
+            s.style_view = Some((tile.clone(), s.map().camera, s.map().instance_id()));
+            let archive = pmtiles::NewArchive {
+                tile_type: pmtiles::TileType::Png,
+                gzipped_tiles: false,
+                bounds: [-180.0, -85.0, 180.0, 85.0],
+                metadata: json!({"attribution":"Valid reachable runs"}),
+            };
+            let valid = pmtiles::write(vec![(0, 0, 0, picture([0, 255, 0, 255])), (1, 0, 0, picture([0, 0, 255, 255]))], &archive).unwrap();
+            assert_eq!(&valid[127..132], &[2, 0, 1, 1, 1], "fixture must contain two adjacent single-tile runs");
+            let (invalid, corrected, expected) = if defect == "overlap" {
+                let mut overlapping = valid.clone();
+                overlapping[130] = 2; // First [0,1) run becomes [0,2), overlapping the next entry.
+                (overlapping, valid, "overlapping PMTiles tile runs")
+            } else {
+                let nested = defect == "nested lower bound";
+                (
+                    pmtiles_with_leaf_pointer(&valid, 5, nested),
+                    pmtiles_with_leaf_pointer(&valid, 0, nested),
+                    "a PMTiles leaf directory contains tiles below its pointer",
+                )
+            };
+            let mut params = json!({"index":0});
+            let path = if command == "map.repairTiles" {
+                params["path"] = json!(replacement);
+                &replacement
+            } else {
+                &linked
+            };
+            std::fs::write(path, invalid).unwrap();
+            let read = archive_read(&mut s, command, &params);
+            assert!(reject_stale_archive(&mut s, read, &retained).contains(expected));
+            std::fs::write(path, corrected).unwrap();
+            s.run(command, &params).unwrap();
+            let mut expected_tile = tile;
+            expected_tile.url = path.display().to_string();
+            assert_eq!(s.map().tiles[0], expected_tile, "retry must preserve presentation and update only the repaired path");
+            assert_color(&decoded(&s.map().tiles[0]), [0, 255, 0, 255]);
+            assert!(style(&s.map().tiles[0]).attribution.iter().any(|a| a.contains("Valid reachable runs")));
+        }
     }
 }

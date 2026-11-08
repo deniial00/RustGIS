@@ -408,3 +408,166 @@ fn failed_or_unexecuted_selection_does_not_own_a_layer_at_archive_pause() {
     assert_eq!(s.active_layer, Some(b));
     relay.stop();
 }
+
+#[test]
+fn archive_batch_rejects_changed_context_before_agent_reentry_at_every_pause() {
+    for second_pause in [false, true] {
+        for replace_project in [false, true] {
+            for completion in ["stale", "cancelled", "success"] {
+                let (_root, mut s, _, _) = fixture();
+                let (a, _) = layers(&mut s);
+                let map_a = s.map().name.clone();
+                let renderer_a = s.map().layer(a).unwrap().renderer.clone();
+                s.run("map.new", &json!({"name":"Other"})).unwrap();
+                let (other, user) = layers(&mut s);
+                assert_eq!(a, other, "layer IDs are map-local");
+                s.run("map.activate", &json!({"name":map_a})).unwrap();
+                let relay = Relay::start(0).unwrap();
+                let grant = relay.grant(true).unwrap();
+                let mut batch = vec![command(1, "layer.select", json!({"layer":a}))];
+                if second_pause {
+                    batch.push(command(2, "map.reloadTiles", json!({"index":0})));
+                }
+                batch.extend([
+                    command(7, "map.reloadTiles", json!({"index":0})),
+                    command(7, "layer.color", json!({"color":"#123456"})),
+                    json!({"jsonrpc":"2.0","id":"observer","method":"ping"}),
+                    json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_command","arguments":{"command":"layer.color","params":{"color":"#654321"}}}}),
+                    json!({"jsonrpc":"2.0","id":"response","result":{}}),
+                    command(9, "map.reloadTiles", json!({"index":0})),
+                ]);
+                let (_, rx) = queue(&relay, &grant, json!(batch));
+                assert_eq!(relay.poll(&mut s), 0);
+                if second_pause {
+                    let done = worker(relay.take_archive_read().unwrap());
+                    finish(&relay, &mut s, done);
+                    assert!(rx.try_recv().is_err());
+                }
+                let done = worker(relay.take_archive_read().unwrap());
+                if replace_project {
+                    let opened = s.opened;
+                    s.run("project.new", &json!({"name":"Replacement"})).unwrap();
+                    assert_ne!(s.opened, opened);
+                    let (replacement, _) = layers(&mut s);
+                    assert_eq!(replacement, a);
+                } else {
+                    s.run("map.activate", &json!({"name":"Other"})).unwrap();
+                }
+                s.run("layer.select", &json!({"layer":user})).unwrap();
+                s.actor = Some("current user".into());
+                let before = serde_json::to_value(&s.project).unwrap();
+                let agent_active = lock(&relay.owner.shared.agents).get(&grant.token).unwrap().active;
+                relay.begin_archive_landing(&s);
+                let result = match completion {
+                    "stale" => done.and_then(|read| reads::read_land(&mut s, read)),
+                    "cancelled" => Err("Cancelled archive fixture".into()),
+                    _ => Ok(json!({"archive":"actual successful result"})),
+                };
+                let failed = result.is_err();
+                let expected = result.as_ref().err().cloned().unwrap_or_else(|| "actual successful result".into());
+                relay.finish_archive_read(&mut s, result);
+                let answer = reply(&rx);
+                let replies = answer.as_array().unwrap();
+                let pending = if second_pause { 2 } else { 1 };
+                assert_eq!(replies.len(), pending + 4, "{answer}");
+                assert_eq!(answer[0]["id"], 1);
+                assert_eq!(answer[0]["result"]["isError"], false, "{answer}");
+                if second_pause {
+                    assert_eq!(answer[1]["id"], 2);
+                    assert_eq!(answer[1]["result"]["isError"], false, "{answer}");
+                }
+                assert_eq!(answer[pending]["id"], 7);
+                assert_eq!(answer[pending]["result"]["isError"], failed, "{answer}");
+                assert!(answer[pending]["result"]["content"][0]["text"].as_str().unwrap().contains(&expected), "{answer}");
+                for (reply, id) in replies[pending + 1..].iter().zip([json!(7), json!("observer"), json!(9)]) {
+                    assert_eq!(reply["id"], id, "{answer}");
+                    assert!(reply.get("error").is_some() || reply["result"]["isError"] == true, "{answer}");
+                    assert!(reply.to_string().contains("context changed"), "{answer}");
+                }
+                assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "no suffix command may mutate either map");
+                if !replace_project {
+                    assert_eq!(s.project.maps[0].layer(a).unwrap().renderer, renderer_a);
+                    assert_eq!(s.map().name, "Other");
+                }
+                assert_eq!(s.active_layer, Some(user));
+                assert_eq!(s.actor.as_deref(), Some("current user"));
+                assert_eq!(lock(&relay.owner.shared.agents).get(&grant.token).unwrap().active, agent_active);
+                assert!(relay.take_archive_read().is_none(), "the suffix's second archive command must not dispatch");
+                relay.finish_archive_read(&mut s, Err("duplicate completion".into()));
+                assert!(rx.try_recv().is_err(), "one terminal reply only");
+                relay.stop();
+            }
+        }
+    }
+}
+
+#[test]
+fn archive_batch_allows_explicit_map_changes_between_pauses() {
+    let (_root, mut s, original, _) = fixture();
+    let (a, _) = layers(&mut s);
+    let map_a = s.map().name.clone();
+    let before_a = s.map().layer(a).unwrap().renderer.clone();
+    s.run("map.new", &json!({"name":"Other"})).unwrap();
+    s.run("map.addTiles", &json!({"url":original,"name":"Other archive","overlay":true})).unwrap();
+    let (b, _) = layers(&mut s);
+    let before_b = s.map().layer(b).unwrap().renderer.clone();
+    s.run("map.activate", &json!({"name":map_a})).unwrap();
+    let relay = Relay::start(0).unwrap();
+    let grant = relay.grant(true).unwrap();
+    let (_, rx) = queue(
+        &relay,
+        &grant,
+        json!([
+            command(1, "map.reloadTiles", json!({"index":0})),
+            command(2, "map.activate", json!({"name":"Other"})),
+            command(3, "layer.select", json!({"layer":b})),
+            command(4, "map.reloadTiles", json!({"index":0})),
+            command(5, "layer.color", json!({"color":"#123456"})),
+        ]),
+    );
+    assert_eq!(relay.poll(&mut s), 0);
+    let done = worker(relay.take_archive_read().unwrap());
+    finish(&relay, &mut s, done);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(s.map().name, "Other");
+    let done = worker(relay.take_archive_read().unwrap());
+    finish(&relay, &mut s, done);
+    let answer = reply(&rx);
+    let replies = answer.as_array().unwrap();
+    assert_eq!(replies.len(), 5, "{answer}");
+    assert!(replies.iter().all(|reply| reply["result"]["isError"] == false), "{answer}");
+    assert_eq!(s.project.maps[0].layer(a).unwrap().renderer, before_a);
+    assert_ne!(s.map().layer(b).unwrap().renderer, before_b);
+    assert_eq!(s.map().name, "Other");
+    relay.stop();
+}
+
+#[test]
+fn archive_batch_resumes_same_context_after_validation_failure_or_cancellation() {
+    for error in ["Archive validation failed", "Cancelled"] {
+        let (_root, mut s, _, _) = fixture();
+        let (a, _) = layers(&mut s);
+        let before = s.map().layer(a).unwrap().renderer.clone();
+        let relay = Relay::start(0).unwrap();
+        let grant = relay.grant(true).unwrap();
+        let (_, rx) = queue(
+            &relay,
+            &grant,
+            json!([
+                command(1, "layer.select", json!({"layer":a})),
+                command(2, "map.reloadTiles", json!({"index":0})),
+                command(3, "layer.color", json!({"color":"#123456"})),
+            ]),
+        );
+        assert_eq!(relay.poll(&mut s), 0);
+        drop(relay.take_archive_read().unwrap());
+        relay.begin_archive_landing(&s);
+        relay.finish_archive_read(&mut s, Err(error.into()));
+        let answer = reply(&rx);
+        assert_eq!(answer[1]["result"]["isError"], true, "{answer}");
+        assert!(answer[1]["result"]["content"][0]["text"].as_str().unwrap().contains(error), "{answer}");
+        assert_eq!(answer[2]["result"]["isError"], false, "{answer}");
+        assert_ne!(s.map().layer(a).unwrap().renderer, before);
+        relay.stop();
+    }
+}

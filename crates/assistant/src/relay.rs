@@ -234,6 +234,9 @@ struct Archive {
     req: Request,
     batch: Box<crate::mcp::ArchiveBatch>,
     started: Instant,
+    /// The project and selected map at this pause, after the preceding batch segment ran.
+    opened: u64,
+    map: u64,
 }
 
 impl Shared {
@@ -743,23 +746,32 @@ impl Relay {
     }
 
     /// Completes the real archive command before running its batch suffix or issuing its reply
-    /// and audit. The engine has already checked the original owner at worker start and landing.
+    /// and audit. A suffix may resume only in the project and map selected at its latest pause.
     pub fn finish_archive_read(&self, s: &mut Session, result: Result<Value, String>) {
         let Some(archive) = lock(&self.owner.shared.archive).take() else { return };
-        let Archive { req, batch, started, .. } = archive;
-        let layers = self.enter_agent(s, &req.token);
-        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (*batch).finish(s, result)))
-            .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line)), false));
+        let Archive { req, batch, started, opened, map } = archive;
+        // Check before entering the agent: its remembered layer ID is only map-local, and a
+        // stale continuation must not change the current actor, selection or stored agent state.
+        let same_context = s.opened == opened && s.map().instance_id() == map;
+        let layers = same_context.then(|| self.enter_agent(s, &req.token));
+        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if same_context { (*batch).finish(s, result) } else { (*batch).cancel_remaining(s, result) }
+        }))
+        .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line)), false));
         let (out, picked) = match step {
             crate::mcp::ArchiveStep::Read(batch) => {
-                self.leave_agent(s, &req.token, layers, batch.picked());
-                *lock(&self.owner.shared.archive) = Some(Archive { req, batch, started });
+                if let Some(layers) = layers {
+                    self.leave_agent(s, &req.token, layers, batch.picked());
+                }
+                *lock(&self.owner.shared.archive) = Some(Archive { req, batch, started, opened: s.opened, map: s.map().instance_id() });
                 self.owner.shared.notify();
                 return;
             }
             crate::mcp::ArchiveStep::Done(out, picked) => (out, picked),
         };
-        self.leave_agent(s, &req.token, layers, picked);
+        if let Some(layers) = layers {
+            self.leave_agent(s, &req.token, layers, picked);
+        }
         self.audit(&req.line, out.as_deref(), started.elapsed());
         if let Some(action) = action(&req.line, out.as_deref()) {
             *lock(&self.owner.last) = Some(action);
@@ -1011,7 +1023,7 @@ impl Relay {
                 crate::mcp::ArchiveStep::Done(out, picked) => (out, picked),
                 crate::mcp::ArchiveStep::Read(batch) => {
                     self.leave_agent(s, &req.token, layers, batch.picked());
-                    *lock(&self.owner.shared.archive) = Some(Archive { req, batch, started });
+                    *lock(&self.owner.shared.archive) = Some(Archive { req, batch, started, opened: s.opened, map: s.map().instance_id() });
                     let mut queue = lock(&self.owner.shared.requests);
                     for rest in pending.rev() {
                         queue.push_front(rest);
