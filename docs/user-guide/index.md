@@ -244,7 +244,8 @@ use Reload Data even when the folder's timestamp has not changed.
 Saved GDAL/DuckDB links reread their original selected table when restoring a disposable
 converted copy, including compatible empty tables. If the original cannot be read, RustGIS
 does not borrow another session's temporary conversion. A durable saved conversion outside the
-current cache can still open as a fallback, with a notice naming the original and its read error.
+current cache can still open as a fallback, with one notice naming the original and its read
+error (or the layer count and first failure when several layers fall back).
 Reloading an existing DuckDB branch that has lost all its rows installs an empty layer of the
 same geometry family, even when rows of another family remain; the omitted rows are reported.
 

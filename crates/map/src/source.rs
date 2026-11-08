@@ -59,6 +59,9 @@ pub struct SourceLayer {
     /// Runtime metadata from a fresh provenance conversion, including its loader diagnostics.
     #[serde(skip)]
     conversion_info: Option<SourceInfo>,
+    /// A successful saved-conversion fallback, consumed once when the project opens.
+    #[serde(skip)]
+    conversion_fallback: Option<String>,
     #[serde(skip)]
     window: Option<Window>,
     /// Whole-source thinning decisions shared by render snapshots, independent of view rows.
@@ -812,6 +815,7 @@ impl SourceLayer {
     /// Opens the source again (after a project loads). A source by its web address is opened off
     /// the frame: `Ok` while it is (see [`SourceLayer::is_pending`]), open once it has landed.
     pub fn open(&mut self) -> Result<(), String> {
+        self.conversion_fallback = None;
         rustgis_data::source::remote::check_still(&rustgis_data::source::remote::current_still())?;
         if self.reconnect_required {
             self.error = Some(RECONNECT_REQUIRED.into());
@@ -899,12 +903,8 @@ impl SourceLayer {
                 self.conversion_info = None;
                 self.handle = Some(Arc::from(s));
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(note) = saved_conversion_note
-                    && let Some(info) = self.info()
                 {
-                    let mut info = info.clone();
-                    info.notes.push(note);
-                    self.conversion_info = Some(info);
+                    self.conversion_fallback = saved_conversion_note;
                 }
                 self.window = None;
                 self.error = None;
@@ -1060,6 +1060,11 @@ impl SourceLayer {
 
     pub fn info(&self) -> Option<&SourceInfo> {
         self.conversion_info.as_ref().or_else(|| self.handle.as_deref().map(|h| h.info()))
+    }
+
+    /// Takes the original-read failure once, only when a saved conversion opened instead.
+    pub fn take_conversion_fallback(&mut self) -> Option<String> {
+        self.conversion_fallback.take()
     }
 
     /// Every feature of the source, up to the read limit (a source by its web address fetching
@@ -1425,6 +1430,7 @@ impl SourceLayer {
             limit: _,
             reads: _,
             conversion_info: _,
+            conversion_fallback: _,
             gdal,
             duckdb,
             postgis,
@@ -1483,6 +1489,18 @@ impl SourceLayer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversion_fallback_is_runtime_only_and_taken_once() {
+        let note = "re-reading original failed (missing); showing the saved conversion";
+        let mut source = super::SourceLayer { conversion_fallback: Some(note.into()), ..Default::default() };
+        let saved = serde_json::to_value(&source).unwrap();
+        assert!(saved.get("conversion_fallback").is_none());
+        let mut restored: super::SourceLayer = serde_json::from_value(saved).unwrap();
+        assert!(restored.take_conversion_fallback().is_none());
+        assert_eq!(source.take_conversion_fallback().as_deref(), Some(note));
+        assert!(source.take_conversion_fallback().is_none());
+    }
+
     /// A later frame's whole-file fallback owns the opening's carrier through send and landing.
     #[test]
     fn permission_policy_opening_fallback_retains_owner_outside_ambient_context() {

@@ -880,6 +880,7 @@ fn saved_gdal_conversion_restores_fresh_data_and_loss_notes_despite_an_unchanged
     let mut reopened = session();
     reopened.run("project.open", &json!({"path": project})).unwrap();
     assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("showing the saved conversion")));
+    assert!(reopened.notices_since(0).iter().all(|n| !n.text.contains("Z or M coordinates")));
     assert_eq!(reopened.map().layers.len(), 1);
     assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
     let restored = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
@@ -1079,6 +1080,105 @@ fn duckdb_repair_refuses_other_family_only_tables_while_reload_installs_an_empty
 }
 
 #[test]
+fn project_open_does_not_repeat_ordinary_source_conversion_notes() {
+    use rustgis_engine::map::source::SourceLayer;
+
+    let f = Fixture::new("restore-source-notes");
+    let path = f.file("survey.geojson");
+    std::fs::write(
+        &path,
+        r#"{"type":"FeatureCollection","features":[
+            {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[8,48]}},
+            {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":["bad",48]}}
+        ]}"#,
+    )
+    .unwrap();
+    let handle = rustgis_engine::data::source::open_path(&path, None).unwrap();
+    let source = SourceLayer::from_path(path.to_str().unwrap(), None, handle);
+    assert!(source.info().unwrap().notes.iter().any(|note| note.contains("1 features had unreadable geometry")));
+    let mut s = session();
+    let id = s.map_mut().add_streamed("Survey", source);
+    let project = f.file("survey.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    drop(s);
+
+    let mut reopened = session();
+    let mark = reopened.notice_mark();
+    reopened.run("project.open", &json!({"path": project})).unwrap();
+    let notes = &reopened.map().layer(id).unwrap().source.as_ref().unwrap().info().unwrap().notes;
+    assert!(notes.iter().any(|note| note.contains("1 features had unreadable geometry")));
+    let notices = reopened.notices_since(mark);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].text.starts_with("Opened "), "{notices:?}");
+    assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
+}
+
+#[test]
+fn two_saved_conversion_fallbacks_report_one_notice_with_layer_count_and_first_failure() {
+    use rustgis_engine::{
+        data::source::Family,
+        map::source::{DuckdbOrigin, GdalOrigin, SourceLayer},
+    };
+
+    let f = Fixture::new("restore-grouped-conversions");
+    let mut s = session();
+    let first_original = f.file("removed.gdb");
+    for duckdb in [false, true] {
+        let original = if duckdb { f.file("removed.duckdb") } else { first_original.clone() };
+        let converted = f.file(if duckdb { "converted.parquet" } else { "converted.fgb" });
+        io::write_path(&points(&["rank"], Some(8.0)), &converted).unwrap();
+        let handle = rustgis_engine::data::source::open_path(&converted, None).unwrap();
+        let mut source = SourceLayer::from_path(converted.to_str().unwrap(), None, handle);
+        if duckdb {
+            source.duckdb = Some(DuckdbOrigin {
+                sql: None,
+                database: Some(original.to_str().unwrap().into()),
+                table: Some("survey".into()),
+                crs: None,
+                family: Family::Points,
+            });
+        } else {
+            source.gdal = Some(GdalOrigin {
+                path: original.to_str().unwrap().into(),
+                layer: "survey".into(),
+                family: Some(Family::Points),
+                crs: None,
+            });
+        }
+        s.map_mut().add_streamed(if duckdb { "Second conversion" } else { "First conversion" }, source);
+    }
+    let project = f.file("survey.rgis");
+    s.run("project.saveAs", &json!({"path": project})).unwrap();
+    drop(s);
+
+    let mut reopened = session();
+    let mark = reopened.notice_mark();
+    reopened.run("project.open", &json!({"path": project})).unwrap();
+    let notices = reopened.notices_since(mark);
+    let fallbacks = notices.iter().filter(|n| n.text.contains("saved conversion")).collect::<Vec<_>>();
+    assert_eq!(fallbacks.len(), 1, "{notices:?}");
+    let notice = fallbacks[0];
+    assert!(notice.text.starts_with("2 layers "), "{}", notice.text);
+    assert!(notice.text.contains("showing saved conversions"), "{}", notice.text);
+    // The first in the map's layer order is named, with its own original.
+    let named = [("First conversion", first_original.clone()), ("Second conversion", f.file("removed.duckdb"))];
+    assert!(
+        named.iter().any(|(layer, original)| notice.text.contains(layer) && notice.text.contains(original.to_str().unwrap())),
+        "{}",
+        notice.text
+    );
+    assert!(notice.text.contains("failed ("), "{}", notice.text);
+    assert!(!notice.error);
+    for layer in &mut reopened.map_mut().layers {
+        let source = layer.source.as_mut().unwrap();
+        assert!(source.error.is_none(), "{:?}", source.error);
+        assert!(source.take_conversion_fallback().is_none(), "project reset consumed each fallback once");
+        assert!(source.info().unwrap().notes.iter().all(|note| !note.contains("saved conversion")));
+        assert_eq!(first_point(&layer.load_all().unwrap()), Coord::new(8.0, 48.0));
+    }
+}
+
+#[test]
 fn saved_durable_conversion_outside_current_cache_reopens_with_one_original_source_failure_notice() {
     use rustgis_engine::{
         data::source::Family,
@@ -1121,6 +1221,7 @@ fn saved_durable_conversion_outside_current_cache_reopens_with_one_original_sour
         let source = reopened.map().layer(id).unwrap().source.as_ref().unwrap();
         assert!(source.error.is_none(), "{:?}", source.error);
         assert_eq!(source.path.as_deref(), converted.to_str());
+        assert!(source.info().unwrap().notes.iter().all(|note| !note.contains("saved conversion")));
         assert_eq!(first_point(&loaded(&reopened, id)), Coord::new(8.0, 48.0));
         let notices = reopened.notices_since(mark);
         let fallbacks = notices.iter().filter(|n| n.text.contains("showing the saved conversion")).collect::<Vec<_>>();
