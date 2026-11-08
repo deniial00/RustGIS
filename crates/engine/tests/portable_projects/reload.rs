@@ -19,7 +19,14 @@ fn points(fields: &[&str], x: Option<f64>) -> Dataset {
 }
 
 // Atomically publish a complete replacement rather than exposing a partially written source.
+// A GeoPackage is updated in place, in one transaction, as GIS tools do: the open layer holds the
+// file, which Windows won't let another file be renamed over.
 fn replace_points(path: &Path, ds: &Dataset) {
+    if path.extension().is_some_and(|e| e == "gpkg") {
+        let target = io::GpkgTable { mode: io::GpkgMode::ReplaceTable, name: Some(ds.name.clone()) };
+        rustgis_engine::data::source::gpkg::write_table_in(ds, path, Crs::LonLat, &target).unwrap();
+        return;
+    }
     let next = path.with_file_name("replacement").with_extension(path.extension().unwrap());
     io::write_path(ds, &next).unwrap();
     std::fs::rename(next, path).unwrap();
