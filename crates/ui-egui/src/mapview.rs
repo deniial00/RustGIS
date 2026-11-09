@@ -8,7 +8,9 @@ use rustgis_engine::analysis::{
     network::{radius_boundary_point, radius_distance_m},
     selection::MAX_POINTS,
 };
-use rustgis_engine::geom::{Coord, Extent, geodesic_length_m, geodesic_ring_area_m2, wgs84_length_m, wgs84_ring_perimeter_area_m2};
+use rustgis_engine::geom::{
+    Coord, Extent, geodesic_length_m, geodesic_ring_area_m2, geodesic_ring_perimeter_m, wgs84_length_m, wgs84_ring_perimeter_area_m2,
+};
 use rustgis_engine::map::layout::TextAlign;
 use rustgis_engine::map::projection::Flat;
 use rustgis_engine::map::{Camera, Globe, Projection};
@@ -227,6 +229,8 @@ struct SelectionGesture {
 }
 
 pub struct MapView {
+    /// The project whose frames and reported tile errors are kept here.
+    project: Option<u64>,
     texture: Option<egui::TextureHandle>,
     key: Option<Key>,
     /// A preview is attempted once for each frame key, including when drawing fails.
@@ -282,6 +286,8 @@ pub struct MapView {
     pub split_mode: bool,
     /// The vertex chosen with the Edit Vertices tool (layer, row, vertex): Delete removes it.
     pub vertex: Option<(u32, usize, rustgis_engine::data::VertexId)>,
+    /// Source replacement identity captured when the vertex was chosen.
+    pub(crate) vertex_owner: Option<crate::vertexedit::VertexOwner>,
     /// The vertex being dragged with the Edit Vertices tool.
     pub vertex_drag: Option<crate::vertexedit::VertexDrag>,
     /// Non-owning source identity for the held vertex gesture; never persisted with the project.
@@ -302,6 +308,9 @@ pub struct MapView {
     /// A map or layout waiting for the user to confirm its deletion.
     pub deleting: Option<Deletion>,
     pub pointer_lonlat: Option<Coord>,
+    /// The last pointer position seen over a map, kept for the status bar readout after the
+    /// pointer leaves the map; with the map's instance and the session's `opened` it belongs to.
+    kept_lonlat: Option<(Coord, u64, u64)>,
     /// Where the map's context menu was opened: the pointer leaves the map for the menu.
     pub menu_lonlat: Option<Coord>,
     /// The text graphic the context menu was opened on (layer id, row), for Edit Text.
@@ -393,6 +402,7 @@ impl Default for MapView {
             sketch_done: false,
             split_mode: false,
             vertex: None,
+            vertex_owner: None,
             vertex_drag: None,
             vertex_drag_owner: None,
             move_shared_vertices: false,
@@ -403,6 +413,7 @@ impl Default for MapView {
             popup_rev: 0,
             deleting: None,
             pointer_lonlat: None,
+            kept_lonlat: None,
             menu_lonlat: None,
             menu_text: None,
             coord_format: crate::CoordReadout::Decimal,
@@ -416,6 +427,7 @@ impl Default for MapView {
             picture: None,
             attribution: Vec::new(),
             tile_errors: std::collections::HashSet::new(),
+            project: None,
             last_render: -10.0,
             drape: Default::default(),
             tilt_drape: Default::default(),
@@ -437,6 +449,41 @@ impl Default for MapView {
 }
 
 impl MapView {
+    /// Retire old drawings before any of them can report errors for a replacement project.
+    fn follow_project(&mut self, opened: u64) {
+        if self.project.is_some_and(|p| p != opened) {
+            self.invalidate();
+            self.texture = None;
+            self.split = None;
+            self.split_gpu = None;
+            self.live_rev = None;
+            self.gpu_turn_declined = None;
+            self.labels.clear();
+            self.label_lonlat.clear();
+            self.label_map.clear();
+            self.callout_lonlat.clear();
+            self.callout_map.clear();
+            self.attribution.clear();
+            self.tile_errors.clear();
+            self.drape = Default::default();
+            self.tilt_drape = Default::default();
+            self.filling = false;
+        }
+        self.project = Some(opened);
+    }
+
+    /// The position the status bar shows: the last one over this map, kept while the pointer is
+    /// elsewhere. A position from another map or project no longer applies, so it is dropped.
+    pub fn kept_pointer_lonlat(&mut self, map_instance: u64, opened: u64) -> Option<Coord> {
+        match self.kept_lonlat {
+            Some((c, m, o)) if m == map_instance && o == opened => Some(c),
+            _ => {
+                self.kept_lonlat = None;
+                None
+            }
+        }
+    }
+
     /// Whether an exact frame is being composed off the UI thread, or the frame shown waits for
     /// tile pictures still to be drawn.
     pub fn drawing(&self) -> bool {
@@ -524,6 +571,7 @@ impl MapView {
     /// alone. The chosen node is cleared because its row/address may now belong to another shape.
     pub(crate) fn cancel_vertex_drag(&mut self) {
         self.vertex = None;
+        self.vertex_owner = None;
         self.vertex_drag = None;
         self.vertex_drag_owner = None;
         if self.drag.is_some_and(|(_, kind)| kind == DragKind::Vertex) {
@@ -542,6 +590,7 @@ fn now(ui: &Ui) -> f64 {
 /// Shows the active map workspace, discarding stale node gestures after map-tab changes and
 /// before rendering their overlays or consuming pointer releases.
 pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
+    app.map.follow_project(app.session.opened);
     let t = Tokens::get(ui.ctx());
     crate::modelbuilder::follow_view(app);
     view_tabs(app, ui, &t);
@@ -1170,7 +1219,12 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         // In a picture, for the camera it was drawn for: the picture moves them with the rest (a
         // basemap zoomed in past what f32 holds is such a picture, under the tiles).
         let (live_frame, live_pending) = match gf.live_frame(if picture { app.map.tex_camera } else { cam }) {
-            Some((f, pending, declined)) => {
+            Some((mut f, pending, declined)) => {
+                for error in f.tile_errors.drain(..) {
+                    if app.map.tile_errors.insert(error.clone()) {
+                        app.session.notify(error, true);
+                    }
+                }
                 // A layer no longer drawn live (its style turned out to draw more than raster
                 // tiles): the map is drawn again, as tiles arriving would draw it.
                 if declined && app.map.live_rev.take().is_some() {
@@ -1522,6 +1576,16 @@ struct MovingLabel {
 /// what the Move Label tool grabs, as it is drawn now. Labels not of a layer's features aren't;
 /// nor any while a moving globe or tilted map draws them from where they were placed.
 fn label_at(app: &RustGisApp, rect: Rect, p: Pos2) -> Option<PlacedLabel> {
+    label_at_where(app, rect, p, |_| true)
+}
+
+/// The topmost moved label under the pointer, even beneath one never moved (Show all labels).
+fn pinned_label_at(app: &RustGisApp, rect: Rect, p: Pos2) -> Option<PlacedLabel> {
+    label_at_where(app, rect, p, |l| l.collide.pinned)
+}
+
+/// The topmost label under the pointer that `keep` accepts.
+fn label_at_where(app: &RustGisApp, rect: Rect, p: Pos2, keep: impl Fn(&PlacedLabel) -> bool) -> Option<PlacedLabel> {
     if app.map.key.is_none_or(|key| key.rev != app.session.revision || key.sources != rustgis_engine::map::source::generation()) {
         return None;
     }
@@ -1541,7 +1605,7 @@ fn label_at(app: &RustGisApp, rect: Rect, p: Pos2) -> Option<PlacedLabel> {
         return None;
     }
     let at = p - rect.min;
-    app.map.labels.iter().rev().filter(|l| l.collide.source.is_some() && !l.text.is_empty()).find_map(|l| {
+    app.map.labels.iter().rev().filter(|l| l.collide.source.is_some() && !l.text.is_empty() && keep(l)).find_map(|l| {
         let mut l = l.clone();
         // Where it is drawn now: its text at its own size, its callout's feature where it is.
         (l.x, l.y) = (shift.x + l.x * s, shift.y + l.y * s);
@@ -2257,6 +2321,9 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     let time = now(ui);
     let hover = resp.hover_pos();
     app.map.pointer_lonlat = hover.and_then(|p| screen_to_lonlat(app, rect, p));
+    if let Some(c) = app.map.pointer_lonlat.filter(|c| c.is_finite()) {
+        app.map.kept_lonlat = Some((c, app.session.map().instance_id(), app.session.opened));
+    }
     let tool = app.session.tool;
     cancel_changed_selection(app, rect);
 
@@ -2706,8 +2773,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             // Labels move by dragging them; Shift-clicking a moved one puts it back.
             Tool::MoveLabel => {
                 if shift
-                    && let Some((layer, feature, class)) =
-                        label_at(app, rect, p).filter(|l| l.collide.pinned).and_then(|l| l.collide.source)
+                    && let Some((layer, feature, class)) = pinned_label_at(app, rect, p).and_then(|l| l.collide.source)
                     && let Some(name) = label_class_name(app, layer, class)
                     && let Err(error) = app.run("labels.move", json!({"layer": layer, "class": name, "feature": feature, "to": null}))
                 {
@@ -3140,7 +3206,7 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
                 if body.is_earth() {
                     wgs84_ring_perimeter_area_m2(ring)
                 } else {
-                    (body.length(geodesic_length_m(ring)), body.area(geodesic_ring_area_m2(ring)))
+                    (body.length(geodesic_ring_perimeter_m(ring)), body.area(geodesic_ring_area_m2(ring)))
                 }
             };
             let text = if tool == Tool::Measure {
@@ -3158,13 +3224,20 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
                     ring.push(f);
                 }
                 let (perimeter, area) = measure_ring(&ring);
-                crate::i18n::fmt(
-                    "Area {area}   ·   Perimeter {perimeter}",
-                    &[
-                        ("area", &crate::measure_units::area(area, app.ui.measurement_imperial)),
-                        ("perimeter", &crate::measure_units::distance(perimeter, app.ui.measurement_imperial)),
-                    ],
-                )
+                if rustgis_engine::geom::ring_area_is_ambiguous(&ring) {
+                    crate::i18n::fmt(
+                        "Area cannot be measured: ring winds beyond one whole surface · Perimeter {perimeter}",
+                        &[("perimeter", &crate::measure_units::distance(perimeter, app.ui.measurement_imperial))],
+                    )
+                } else {
+                    crate::i18n::fmt(
+                        "Area {area}   ·   Perimeter {perimeter}",
+                        &[
+                            ("area", &crate::measure_units::area(area, app.ui.measurement_imperial)),
+                            ("perimeter", &crate::measure_units::distance(perimeter, app.ui.measurement_imperial)),
+                        ],
+                    )
+                }
             };
             let anchor = pos2(rect.center().x, rect.min.y + 22.0);
             let galley = p.layout_no_wrap(text, semibold(12.5), t.text);
@@ -4141,6 +4214,36 @@ mod tile_redraw_tests {
     }
 
     #[test]
+    fn replacing_a_project_retires_frames_and_allows_its_tile_notices_again() {
+        let mut app = crate::RustGisApp::with_sample();
+        let ctx = egui::Context::default();
+        // Showing another workspace still retires old map frames before the map is opened.
+        app.ws.catalog_view = true;
+        let draw = |app: &mut crate::RustGisApp| {
+            let mut pass = ctx.run_ui(Default::default(), |ui| super::show(app, ui));
+            pass.textures_delta.clear();
+        };
+        draw(&mut app);
+        let (saved, _) = app.session.project.saved_text(None).unwrap();
+        for params in [serde_json::json!({"text":saved}), serde_json::json!({})] {
+            let error = "Tiles: missing source".to_owned();
+            assert!(app.map.tile_errors.insert(error.clone()));
+            app.map.key = Some(key(0));
+            app.map.texture = Some(ctx.load_texture("old map", egui::ColorImage::filled([1, 1], egui::Color32::RED), Default::default()));
+            draw(&mut app);
+            assert!(!app.map.tile_errors.insert(error.clone()), "reported once within the same project");
+            assert!(app.map.texture.is_some() && app.map.key.is_some());
+            // Direct engine ingress also covers an assistant, script or peer opening a project.
+            let cmd = if params.get("text").is_some() { "project.openText" } else { "project.new" };
+            app.session.run(cmd, &params).unwrap();
+            draw(&mut app);
+            assert!(app.map.key.is_none() && app.map.texture.is_none() && app.map.gpu_frame.is_none());
+            assert!(app.map.tile_errors.insert(error), "reopening the same or another project reports the notice again");
+            app.map.tile_errors.clear();
+        }
+    }
+
+    #[test]
     fn tiles_arriving_are_held_briefly_after_a_frame() {
         // Shown a moment ago: the new tiles wait; a while ago, they are drawn.
         assert_eq!(held_tiles(key(28), None, Some(key(0)), 0.1), Some(0));
@@ -4607,6 +4710,13 @@ mod tests {
         let pinned = h.state().map.labels.iter().find(|l| l.collide.pinned).map(|l| rect.min + vec2(l.x, l.y));
         let shift = egui::Modifiers { shift: true, ..none };
         let at = pinned.expect("the moved label drawn");
+        // A label never moved drawn over the moved one doesn't hide it from Shift-click.
+        let mut over = h.state().map.labels.iter().find(|l| l.collide.pinned).cloned().expect("the moved label");
+        (over.collide.pinned, over.text) = (false, "Over".into());
+        h.state_mut().map.labels.push(over);
+        assert_eq!(label_at(h.state(), rect, at).map(|l| l.text), Some("Over".into()), "the unmoved label is on top");
+        assert!(pinned_label_at(h.state(), rect, at).is_some_and(|l| l.collide.pinned), "the moved one is still found");
+        // Clicked with the unmoved label still on top: the moved one is put back.
         selection_pointer(&mut h, at, None, shift);
         selection_pointer(&mut h, at, Some(true), shift);
         selection_pointer(&mut h, at, Some(false), shift);

@@ -203,8 +203,8 @@ impl SourceInfo {
         self.notes.push(format!("{n} column{} {what}: {}{more}", if n == 1 { "" } else { "s" }, named.join(", ")));
     }
 
-    /// The source's coordinate system, when it isn't longitude/latitude and is known by its EPSG
-    /// code.
+    /// The source's coordinate system, when it isn't longitude/latitude: one known by its EPSG
+    /// code or a custom one without. `None` also when `crs` isn't one RustGIS can parse.
     pub fn coordinate_system(&self) -> Option<Crs> {
         Crs::parse(&self.crs).ok().filter(|c| *c != Crs::LonLat)
     }
@@ -829,6 +829,12 @@ pub(crate) fn gpkg_reproject(srs_id: i64, row: Option<GpkgSrs>, notes: &mut Vec<
         Some(_) => None,
     };
     if let Some(crs) = epsg.and_then(Crs::from_epsg) {
+        if let Some(note) = definition.and_then(|d| crate::raster::wkt::projection_compatibility_note(d, crs)) {
+            notes.push(format!(
+                "its coordinate system (srs_id {srs_id}): using EPSG:{} parameters in preference to the WKT definition; {note}",
+                crs.epsg()
+            ));
+        }
         return Ok(Reproject::from_crs(crs, notes));
     }
     let what = format!("its coordinate system (srs_id {srs_id})");
