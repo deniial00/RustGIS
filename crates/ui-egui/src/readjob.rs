@@ -470,13 +470,32 @@ pub fn land(app: &mut RustGisApp) -> bool {
 }
 
 /// Cancels the read under way, and what waits, and waits up to `wait` for its thread to stop.
+/// Each one that never ran is told so, the one under way first and then those waiting in the
+/// order asked: its `then`, and a relay's agent, whose batch is ended unrun rather than resumed.
 pub fn stop(app: &mut RustGisApp, wait: std::time::Duration) {
-    app.reads.waiting.clear();
-    let Some(job) = app.reads.job.take() else { return };
-    job.control.cancel();
-    let end = std::time::Instant::now() + wait;
-    while job.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() && std::time::Instant::now() < end {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    let why = tl!("RustGIS is closing").to_string();
+    let job = app.reads.job.take();
+    let waiting: Vec<Asked> = app.reads.waiting.drain(..).collect();
+    if let Some(job) = job {
+        job.control.cancel();
+        let end = std::time::Instant::now() + wait;
+        while job.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        abandon_asked(app, &job.asked, why.clone());
+    }
+    for asked in &waiting {
+        abandon_asked(app, asked, why.clone());
+    }
+}
+
+/// `asked` will never run: its `then` is told, and a relay's agent is answered with `why` for the
+/// command and everything after it in its message, none of which runs.
+fn abandon_asked(app: &mut RustGisApp, asked: &Asked, why: String) {
+    not_run(app, asked.then, why.clone());
+    if let Some(relay) = &asked.relay {
+        relay.begin_archive_landing(&app.session);
+        relay.abandon_archive_read(&mut app.session, why);
     }
 }
 
@@ -866,6 +885,94 @@ mod tests {
         assert_eq!(app.session.map().tiles[0].url, replacement.to_str().unwrap());
         assert_eq!(app.session.map().layers.len(), 1);
         assert!(app.session.undo_actor().flatten().is_some_and(|actor| actor.starts_with("agent 1 (relay run ")));
+        relay.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    thread_local! {
+        static TOLD: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record(tag: &str, landed: Landed) {
+        TOLD.with(|told| {
+            told.borrow_mut().push(match landed {
+                Landed::NotRun(why) => format!("{tag}: {why}"),
+                Landed::Ran(_) => format!("{tag}: ran"),
+            });
+        });
+    }
+
+    fn told_running(_: &mut RustGisApp, landed: Landed) {
+        record("running", landed);
+    }
+
+    fn told_waiting(_: &mut RustGisApp, landed: Landed) {
+        record("waiting", landed);
+    }
+
+    #[test]
+    fn stopping_ends_the_relay_batch_unrun_and_tells_the_reads_that_never_ran_in_order() {
+        use std::io::{BufRead, BufReader, Write};
+        let _turn = crate::fetching::turn();
+        TOLD.with(|told| told.borrow_mut().clear());
+        let dir = std::env::temp_dir().join(format!("rustgis-relay-read-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.pmtiles");
+        let replacement = dir.join("replacement.pmtiles");
+        let csv = dir.join("first.csv");
+        archive(&original, "Original");
+        archive(&replacement, "Replacement");
+        std::fs::write(&csv, "name,x,y\nA,8,47\n").unwrap();
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("map.addTiles", json!({"url":original,"name":"Linked","overlay":true})).unwrap();
+        app.reads_off_frame = true;
+        // One read under way and one waiting, each with a callback.
+        assert_eq!(run_then(&mut app, "layer.addData", json!({"path":csv}), Some(told_running)).unwrap()["started"], "Add Data");
+        assert_eq!(run_then(&mut app, "layer.addData", json!({"path":csv}), Some(told_waiting)).unwrap()["waiting"], 1);
+        // The agent's batch: two archive commands, then a command that changes the map.
+        let batch = json!([
+            relay_command(1, "map.repairTiles", json!({"index":0,"path":replacement})),
+            relay_command(2, "map.reloadTiles", json!({"index":0})),
+            relay_command(3, "layer.template", json!({"template":"points","name":"Mutated"})),
+        ]);
+        let (relay, _grant, client, ahead) = paused_relay(&mut app, batch);
+        admitted(&mut app, ahead, relay.clone());
+        assert_eq!(app.reads.waiting.len(), 2);
+        let layers = app.session.map().layers.len();
+        // User work said after admission belongs to the user, not to the agent's closing error.
+        app.session.notify("Unrelated user notice after admission".to_string(), false);
+        stop(&mut app, Duration::from_secs(10));
+        assert!(!busy(&app));
+        let why = tl!("RustGIS is closing").to_string();
+        assert_eq!(TOLD.with(|told| told.borrow().clone()), [format!("running: {why}"), format!("waiting: {why}")]);
+        let mut client = BufReader::new(client);
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply[0]["result"]["isError"], true, "{reply}");
+        assert!(!reply[0].to_string().contains("Unrelated user notice"), "the agent's error carries only its own notices: {reply}");
+        for rest in [1, 2] {
+            assert_eq!(reply[rest]["error"]["message"], why.as_str(), "{reply}");
+        }
+        assert_eq!(app.session.map().tiles[0].url, original.to_str().unwrap(), "the repair never ran");
+        assert_eq!(app.session.map().layers.len(), layers, "the batch's later commands never ran");
+        assert!(app.session.map().layer_by_name("Mutated").is_none());
+        assert!(relay.take_archive_read().is_none(), "the second archive command was never admitted");
+        // The relay is not left holding the batch: the agent's next call is served.
+        writeln!(client.get_mut(), "{}", relay_command(4, "map.tiles", json!({}))).unwrap();
+        client.get_mut().flush().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        // Short waits, so each wait for the reply is followed by another poll.
+        client.get_ref().set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        line.clear();
+        let next = loop {
+            relay.poll(&mut app.session);
+            match client.read_line(&mut line) {
+                Ok(n) if n > 0 => break serde_json::from_str::<Value>(&line).unwrap(),
+                _ => assert!(std::time::Instant::now() < end, "the relay never answered the next call"),
+            }
+        };
+        assert_eq!(next["result"]["isError"], false, "{next}");
         relay.stop();
         let _ = std::fs::remove_dir_all(dir);
     }

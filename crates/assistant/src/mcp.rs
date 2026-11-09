@@ -129,14 +129,15 @@ impl ArchiveBatch {
         self.finish_pending(s, result);
         self.advance(s)
     }
-    /// A changed project or map invalidates the suffix, not the command's actual result.
-    /// Complete every remaining request without dispatching even a read-only tool.
-    pub(crate) fn cancel_remaining(mut self, s: &mut Session, result: Result<Value, String>) -> ArchiveStep {
+    /// A changed project or map invalidates the suffix, not the command's actual result; so does
+    /// the app closing. Complete every remaining request with `remaining` as its error, without
+    /// dispatching even a read-only tool.
+    pub(crate) fn cancel_remaining(mut self, s: &mut Session, result: Result<Value, String>, remaining: &str) -> ArchiveStep {
         self.finish_pending(s, result);
         for msg in self.messages.by_ref() {
             match request_identity(&msg) {
                 Ok(Some((_, id))) => {
-                    self.replies.push(error_value(&id, -32000, "archive batch context changed; remaining request cancelled"));
+                    self.replies.push(error_value(&id, -32000, remaining));
                 }
                 Ok(None) => {}
                 Err(reply) => self.replies.push(reply),

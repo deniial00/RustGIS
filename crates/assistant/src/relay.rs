@@ -748,14 +748,29 @@ impl Relay {
     /// Completes the real archive command before running its batch suffix or issuing its reply
     /// and audit. A suffix may resume only in the project and map selected at its latest pause.
     pub fn finish_archive_read(&self, s: &mut Session, result: Result<Value, String>) {
+        self.complete_archive_read(s, result, None);
+    }
+
+    /// Ends the admitted archive command for good because RustGIS is closing: `why` answers it
+    /// and every remaining request of its message, none of which runs, and the slot is cleared.
+    pub fn abandon_archive_read(&self, s: &mut Session, why: String) {
+        self.complete_archive_read(s, Err(why.clone()), Some(&why));
+    }
+
+    /// [`Relay::finish_archive_read`], or with `abandon` set the suffix is cancelled with that error.
+    fn complete_archive_read(&self, s: &mut Session, result: Result<Value, String>, abandon: Option<&str>) {
         let Some(archive) = lock(&self.owner.shared.archive).take() else { return };
         let Archive { req, batch, started, opened, map } = archive;
         // Check before entering the agent: its remembered layer ID is only map-local, and a
         // stale continuation must not change the current actor, selection or stored agent state.
-        let same_context = s.opened == opened && s.map().instance_id() == map;
+        let same_context = abandon.is_none() && s.opened == opened && s.map().instance_id() == map;
         let layers = same_context.then(|| self.enter_agent(s, &req.token));
         let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if same_context { (*batch).finish(s, result) } else { (*batch).cancel_remaining(s, result) }
+            if same_context {
+                (*batch).finish(s, result)
+            } else {
+                (*batch).cancel_remaining(s, result, abandon.unwrap_or("archive batch context changed; remaining request cancelled"))
+            }
         }))
         .unwrap_or_else(|_| crate::mcp::ArchiveStep::Done(Some(internal_error(&req.line)), false));
         let (out, picked) = match step {
