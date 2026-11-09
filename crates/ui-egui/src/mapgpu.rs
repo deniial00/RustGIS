@@ -1011,7 +1011,7 @@ pub(crate) struct SceneBuffers {
     /// A turned or tilted scene: the camera it was drawn for, its sky and fog.
     pub tilt: Option<SceneTilt>,
     /// Its live raster tile layers, in order, placed for each frame shown ([`LiveFrame`]).
-    pub live: Vec<(rustgis_engine::render::rustgis_tiles::Spec, f32)>,
+    pub live: Vec<(String, rustgis_engine::render::rustgis_tiles::Spec, f32)>,
     /// The archive revision of the scene that owns the live layers' attribution.
     live_archive_revision: u64,
     /// Every tile layer of the scene is live: a tile arriving needs no new scene.
@@ -1026,6 +1026,8 @@ pub(crate) struct LiveFrame {
     pub camera: Camera,
     /// Per live layer, its tiles from the camera's centre, bottom first.
     pub layers: Vec<Vec<TileQuad>>,
+    /// Placement diagnostics, prefixed with their layer's name as in a full scene.
+    pub tile_errors: Vec<String>,
 }
 
 impl SceneBuffers {
@@ -1039,11 +1041,11 @@ impl SceneBuffers {
         let revision = || {
             use rustgis_engine::render::rustgis_tiles::{Kind, cache};
             cache::archive_revision(
-                self.live.iter().filter_map(|(spec, _)| matches!(spec.kind, Kind::PmTiles | Kind::MbTiles).then_some(spec.url.as_str())),
+                self.live.iter().filter_map(|(_, spec, _)| matches!(spec.kind, Kind::PmTiles | Kind::MbTiles).then_some(spec.url.as_str())),
             )
         };
         if revision() != self.live_archive_revision {
-            return Some((LiveFrame { camera, layers: Vec::new() }, false, true));
+            return Some((LiveFrame { camera, layers: Vec::new(), tile_errors: Vec::new() }, false, true));
         }
         let view = rustgis_engine::render::View {
             width: self.size[0],
@@ -1053,12 +1055,16 @@ impl SceneBuffers {
             sky: false,
         };
         let (mut pending, mut declined) = (false, false);
+        let mut tile_errors = Vec::new();
         let layers = self
             .live
             .iter()
-            .map(|(spec, opacity)| match rustgis_engine::render::live_tiles(spec, *opacity, &view) {
+            .map(|(name, spec, opacity)| match rustgis_engine::render::live_tiles(spec, *opacity, &view) {
                 Some(l) => {
                     pending |= l.pending;
+                    if let Some(error) = l.error {
+                        tile_errors.push(format!("{name}: {error}"));
+                    }
                     l.quads
                 }
                 None => {
@@ -1068,9 +1074,9 @@ impl SceneBuffers {
             })
             .collect();
         if revision() != self.live_archive_revision {
-            return Some((LiveFrame { camera, layers: Vec::new() }, false, true));
+            return Some((LiveFrame { camera, layers: Vec::new(), tile_errors: Vec::new() }, false, true));
         }
-        Some((LiveFrame { camera, layers }, pending, declined))
+        Some((LiveFrame { camera, layers, tile_errors }, pending, declined))
     }
 }
 
@@ -1353,9 +1359,9 @@ impl SceneBuffers {
                     draws.push(SceneDraw::Image { bind, _texture: texture });
                     has_images = true;
                 }
-                DrawCmd::LiveTiles { spec, opacity, archive_revision } => {
+                DrawCmd::LiveTiles { name, spec, opacity, archive_revision } => {
                     draws.push(SceneDraw::LiveTiles { n: live.len() });
-                    live.push((spec.clone(), *opacity));
+                    live.push((name.clone(), spec.clone(), *opacity));
                     live_archive_revision = live_archive_revision.max(*archive_revision);
                 }
                 DrawCmd::Tiles { origin, tiles } => {
@@ -1729,7 +1735,7 @@ mod tests {
             has_images: false,
             has_tiles: false,
             tilt: None,
-            live: vec![(render::tile_spec(&layer), 1.0)],
+            live: vec![(layer.name.clone(), render::tile_spec(&layer), 1.0)],
             tiles_live: true,
             reach: 0.0,
             live_archive_revision: revision,
