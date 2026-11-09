@@ -35383,6 +35383,32 @@ fn reload_streamed_unknown_geometry_gets_a_visible_default_and_known_geometry_ke
     }
 }
 
+/// A layer copied or added from a layer file gets a new id but keeps its renderer: an untouched
+/// no-geometry default seeded by its old id still becomes a visible default on reload.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn reload_gives_a_visible_default_to_an_untyped_layer_whose_default_came_from_another_id() {
+    use rustgis_data::GeometryType;
+    use rustgis_map::{Renderer, Symbol};
+    let dir = std::env::temp_dir().join(format!("rustgis-reload-reid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("points.geojson");
+    std::fs::write(&path, json!({"type": "FeatureCollection", "features": []}).to_string()).unwrap();
+    let mut s = Session::new(Project::default());
+    let id = s.run("layer.addData", &json!({"path": path, "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let old_seed = id + 3;
+    s.map_mut().layer_mut(id).unwrap().renderer = Renderer::Single(Symbol::default_for(GeometryType::None, old_seed));
+    let points = json!({"type": "FeatureCollection", "features": [{
+        "type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [1, 2]}
+    }]});
+    std::fs::write(&path, points.to_string()).unwrap();
+    s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+    let layer = s.map().layer(id).unwrap();
+    assert_eq!(layer.renderer, Renderer::Single(Symbol::default_for(GeometryType::Point, old_seed)));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn reload_editable_unknown_geometry_gets_a_visible_default_and_known_geometry_keeps_style() {

@@ -396,9 +396,10 @@ impl Layer {
         if let Some(info) = src.info() {
             if self.dataset.geometry_type == rustgis_data::GeometryType::None
                 && info.geometry_type != rustgis_data::GeometryType::None
-                && self.renderer == Renderer::Single(Symbol::default_for(rustgis_data::GeometryType::None, self.id))
+                && let Renderer::Single(sym) = &self.renderer
+                && let Some(seed) = sym.default_seed(rustgis_data::GeometryType::None)
             {
-                self.renderer = Renderer::Single(Symbol::default_for(info.geometry_type, self.id));
+                self.renderer = Renderer::Single(Symbol::default_for(info.geometry_type, seed));
             }
             self.dataset.geometry_type = info.geometry_type;
             self.dataset.fields = info.fields.clone();
