@@ -845,6 +845,43 @@ MIIE
     }
 
     #[test]
+    fn a_scheme_alone_in_prose_is_no_address() {
+        // Notices and errors go through the one diagnostic redactor: a supported scheme alone in
+        // prose names no address and is kept.
+        for text in [
+            "give an http://, https:// or s3:// address",
+            "needs an http:// or https:// address",
+            "uses unencrypted http://. Tick the confirmation",
+            "only http:// and https:// addresses are fetched",
+            "(http://) or \"https://\" or 's3://'",
+            "HTTP:// and Https://",
+        ] {
+            assert_eq!(crate::Session::redacted(text).as_str(), text);
+            // An error naming the address it refused keeps those words, and its key stays out.
+            let error = message_with_address("https://h.example/a?token=hidden", text);
+            assert_eq!(error, format!("https://h.example/a: {text}"));
+            assert_eq!(crate::Session::redacted(&error).as_str(), error);
+        }
+        // Anything after the scheme is an address: what can hold a credential goes. A hint's
+        // `https://…` is read as its scheme; other schemes are taken for addresses.
+        for (text, kept) in [
+            ("for example https://…", "for example https:"),
+            ("file:// and ftp://", "[address omitted] and [address omitted]"),
+            ("see https://user:pw@host/x, or http://", "see https://host/x, or http://"),
+            ("https://user:pw@", "https:"),
+            ("https://user:pw@…", "https:"),
+            ("https://:pw@ failed", "https: failed"),
+            ("https://?token=x", "[address omitted][query and the rest omitted]"),
+            ("https://#x", "https:"),
+            ("https://…?token=x", "[address omitted][query and the rest omitted]"),
+            ("http:///", "http:"),
+            ("s3://bucket/a.tif?X-Amz-Signature=s", "s3://bucket/a.tif[query and the rest omitted]"),
+        ] {
+            assert_eq!(crate::Session::redacted(text).as_str(), kept, "{text}");
+        }
+    }
+
+    #[test]
     fn recent_keeps_each_once_newest_first() {
         let mut s = Sources::default();
         for a in ["/a.geojson", "/b.geojson", "/a.geojson"] {
