@@ -747,9 +747,13 @@ pub fn redact_parameter(text: &str) -> String {
 /// fragment whose value may continue past whitespace. Address-only scrubbing cannot know where
 /// that value ends, so callers use this result instead of retaining the later words.
 pub fn secret_continuation_cut(text: &str) -> Option<String> {
-    // Detected before the output is bounded: a long prefix must not cut the marker away.
+    // Detected before the output is bounded: a long prefix must not cut the marker away. Text
+    // too long to scan can't be shown to end its addresses' values, so with an address in it
+    // the whole text goes, said.
     let mut strict = redact_scan(text, true);
-    if !strict.contains("[query and the rest omitted]") {
+    let cut = ["[query and the rest omitted]", "[address and the rest omitted]"].iter().any(|m| strict.contains(m))
+        || (text.len() > MAX_INPUT_BYTES && text.contains("://"));
+    if !cut {
         return None;
     }
     cut_with_ellipsis(&mut strict, MAX_DETAILS_BYTES);
@@ -912,7 +916,9 @@ fn redact_scan(text: &str, diagnostic: bool) -> String {
                         out.push_str("[query and the rest omitted]");
                         break;
                     }
-                    out.push_str("[query omitted]");
+                    // Said as what went: a query (always in a diagnostic), or only a fragment.
+                    let query_removed = diagnostic && address.split('#').next().unwrap_or("").contains('?');
+                    out.push_str(if query_removed { "[query omitted]" } else { "[fragment omitted]" });
                     if let Some(end) = address.chars().last().filter(|c| matches!(c, ':' | ',' | ';' | ')' | '.')) {
                         out.push(end);
                     }
@@ -1122,6 +1128,14 @@ mod tests {
             assert_eq!(redact_parameter(public), public);
             assert_eq!(redact(public), "[structured content omitted]");
         }
+        // A replay keeps a public query; only its fragment goes, and the marker says which.
+        let link = "see https://example.org/a?format=json#frag then";
+        let kept = redact_parameter(link);
+        assert_eq!(kept, "see https://example.org/a?format=json[fragment omitted] then");
+        assert_eq!(redact_parameter(&kept), kept);
+        assert_eq!(redact(link), "see https://example.org/a[query omitted] then");
+        assert_eq!(redact_parameter("see https://example.org/a#frag then"), "see https://example.org/a[fragment omitted] then");
+        assert_eq!(redact("see https://example.org/a#frag then"), "see https://example.org/a[fragment omitted] then");
         for private in [
             "<Password>hidden hidden-tail</Password> https://example.org",
             "<x:Password>hidden hidden-tail</x:Password> https://example.org",
@@ -1160,6 +1174,15 @@ mod tests {
         let long = format!("{} https://example.org/a?token=hidden hidden-tail", "word ".repeat(2000));
         let cut = secret_continuation_cut(&long).expect("the cut is seen past the output bound");
         assert!(!cut.contains("hidden") && cut.len() <= MAX_DETAILS_BYTES + '…'.len_utf8(), "{}", cut.len());
+        // An ambiguous address cuts as a secret query does.
+        let ambiguous = "run failed at https://u:123/w@h/x hidden-tail: HTTP 500";
+        assert_eq!(secret_continuation_cut(ambiguous).as_deref(), Some("run failed at [address and the rest omitted]"));
+        // Text too long to scan goes whole when it holds an address; without one it is left
+        // to the address scrubber, which has nothing to do.
+        let oversized = format!("{} https://example.org/a?token=hidden hidden-tail", "word ".repeat(4000));
+        assert_eq!(secret_continuation_cut(&oversized).as_deref(), Some("[oversized diagnostic omitted]"));
+        assert_eq!(secret_continuation_cut(&"word ".repeat(4000)), None);
+        assert_eq!(secret_continuation_cut("failed at https://example.org/a: HTTP 500"), None);
     }
 
     #[test]
