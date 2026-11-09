@@ -246,6 +246,7 @@ pub struct NewArchive {
     /// Longitude/latitude bounds: west, south, east, north.
     pub bounds: [f64; 4],
     /// The JSON metadata object (`vector_layers`, `attribution`, `name`…); use `{}` when absent.
+    /// Its serialized JSON must not exceed 16 MiB.
     pub metadata: Value,
 }
 
@@ -255,6 +256,10 @@ pub struct NewArchive {
 pub fn write(tiles: Vec<(u8, u32, u32, Vec<u8>)>, a: &NewArchive) -> Result<Vec<u8>, String> {
     if !a.metadata.is_object() {
         return Err("PMTiles metadata must be a JSON object".into());
+    }
+    let meta = serde_json::to_vec(&a.metadata).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_BYTES {
+        return Err("PMTiles metadata exceeds the 16 MiB limit".into());
     }
     // A tile outside its zoom would take the id of another zoom's; readers stop at zoom 30.
     if let Some((z, x, y, _)) = tiles.iter().find(|(z, x, y, _)| *z > 30 || u64::from(*x) >= 1u64 << z || u64::from(*y) >= 1u64 << z) {
@@ -310,7 +315,6 @@ pub fn write(tiles: Vec<(u8, u32, u32, Vec<u8>)>, a: &NewArchive) -> Result<Vec<
         root = write_dir(&index);
         per_leaf = per_leaf.checked_mul(2).ok_or("too many tiles")?;
     }
-    let meta = serde_json::to_vec(&a.metadata).map_err(|e| e.to_string())?;
     let root_at = 127u64;
     let meta_at = root_at + root.len() as u64;
     let leaf_at = meta_at + meta.len() as u64;
@@ -1857,6 +1861,26 @@ pub(crate) mod tests {
             let invalid = NewArchive { metadata, ..new(TileType::Mvt) };
             assert_eq!(write(vec![(0, 0, 0, b"tile".to_vec())], &invalid).unwrap_err(), "PMTiles metadata must be a JSON object");
         }
+        {
+            let mut bounded = NewArchive { metadata: serde_json::json!({"attribution": ""}), ..new(TileType::Mvt) };
+            let overhead = serde_json::to_vec(&bounded.metadata).unwrap().len();
+            for len in [MAX_BYTES, MAX_BYTES + 1] {
+                bounded.metadata["attribution"] = Value::String("x".repeat(len - overhead));
+                assert_eq!(serde_json::to_vec(&bounded.metadata).unwrap().len(), len);
+                let written = write(vec![(0, 0, 0, b"tile".to_vec())], &bounded);
+                if len == MAX_BYTES {
+                    let bytes = written.unwrap();
+                    let (_, _, meta_len) = parse_head(&bytes).unwrap();
+                    assert_eq!(meta_len, MAX_BYTES as u64);
+                    let p = dir.join("metadata-limit.pmtiles");
+                    std::fs::write(&p, &bytes).unwrap();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    assert_eq!(read_info_local(p.to_str().unwrap()).unwrap().metadata, bounded.metadata);
+                } else {
+                    assert_eq!(written.unwrap_err(), "PMTiles metadata exceeds the 16 MiB limit");
+                }
+            }
+        }
         // A few tiles, one given twice and two alike (stored once).
         let small =
             vec![(0u8, 0u32, 0u32, b"old".to_vec()), (1, 0, 0, b"same".to_vec()), (1, 0, 1, b"same".to_vec()), (0, 0, 0, b"zero".to_vec())];
@@ -1875,6 +1899,7 @@ pub(crate) mod tests {
         assert_eq!(get(&format!("pmtiles:1/0/0@{a}")).unwrap(), b"same");
         assert_eq!(get(&format!("pmtiles:1/0/1@{a}")).unwrap(), b"same");
         assert!(get(&format!("pmtiles:1/1/1@{a}")).unwrap().is_empty());
+        #[cfg(not(target_arch = "wasm32"))]
         assert_eq!(info_blocking(&a, std::time::Duration::from_secs(10)).unwrap().attribution(), "Written credits");
         #[cfg(not(target_arch = "wasm32"))]
         assert_eq!(read_info_local(&a).unwrap().attribution(), "Written credits");

@@ -278,9 +278,11 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
 
 Present PMTiles metadata must be complete, decodable and a JSON object; malformed metadata or a
 stored metadata section over **16 MiB** refuses ordinary loading, repair and reload rather than
-silently losing credits or source-layer information. This is a metadata limit, not a limit on the
-archive's total size; absent metadata remains supported. MBTiles metadata names and values must
-be text: unreadable or NULL metadata cells also produce an error rather than being silently skipped.
+silently losing credits or source-layer information. RustGIS's PMTiles writer enforces the same
+metadata limit. This is not a limit on the archive's total size; absent metadata remains supported.
+MBTiles metadata names and values must be text: unreadable or NULL metadata cells also produce an
+error rather than being silently skipped. Native MBTiles loading, repair and reload refuse more
+than **1,000 metadata rows** rather than silently omitting later rows.
 
 HTTPS tiles use [platform certificate trust](data.md#https-certificates) on desktop and the
 command line, including private CAs trusted by the operating system. The web app uses the browser.

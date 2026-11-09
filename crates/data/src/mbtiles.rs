@@ -427,10 +427,13 @@ mod file {
             .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'metadata' COLLATE NOCASE)", [], |r| r.get(0))
             .map_err(sql)?;
         if has_metadata {
-            let mut st = c.prepare("SELECT name, value FROM metadata LIMIT 1000").map_err(sql)?;
-            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(sql)?;
-            for row in rows {
-                meta.push(row.map_err(sql)?);
+            let mut st = c.prepare("SELECT name, value FROM metadata LIMIT 1001").map_err(sql)?;
+            let mut rows = st.query([]).map_err(sql)?;
+            while let Some(row) = rows.next().map_err(sql)? {
+                if meta.len() == 1000 {
+                    return Err(format!("{}: MBTiles metadata exceeds the 1000-row limit; refusing to omit metadata", path.display()));
+                }
+                meta.push((row.get::<_, String>(0).map_err(sql)?, row.get::<_, String>(1).map_err(sql)?));
             }
         }
         // That it is an MBTiles file: the tiles table (or view) has its columns. Nothing is read.
@@ -487,6 +490,51 @@ mod file {
     #[cfg(test)]
     mod reload_tests {
         use super::*;
+
+        #[test]
+        fn metadata_row_limit_is_explicit_and_retryable_for_both_readers() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-metadata-limit-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE metadata(name TEXT,value TEXT);
+                 CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);
+                 INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','0');",
+            )
+            .unwrap();
+            let tx = c.unchecked_transaction().unwrap();
+            {
+                let mut insert = tx.prepare("INSERT INTO metadata VALUES(?1,'unused')").unwrap();
+                for n in 0..996 {
+                    insert.execute([format!("unused-{n}")]).unwrap();
+                }
+            }
+            tx.execute("INSERT INTO metadata VALUES('attribution','last allowed attribution')", []).unwrap();
+            tx.commit().unwrap();
+
+            let assert_exact_limit = || {
+                let ordinary = open_path(&path).unwrap();
+                let (candidate, sample) = read_info_path(&path).unwrap();
+                for info in [&ordinary, &candidate] {
+                    assert_eq!(info.format, super::super::Format::Png);
+                    assert_eq!(info.attribution, "last allowed attribution", "the thousandth metadata row must survive");
+                }
+                assert!(sample.is_none(), "the fixture has no tiles");
+            };
+            assert_exact_limit();
+
+            c.execute("INSERT INTO metadata VALUES('json',?1)", [r#"{"vector_layers":[{"id":"overflow"}]}"#]).unwrap();
+            for error in [open_path(&path).unwrap_err(), read_info_path(&path).unwrap_err()] {
+                assert!(error.contains(&path.display().to_string()), "{error}");
+                assert!(error.contains("1000-row limit"), "{error}");
+            }
+            c.execute("DELETE FROM metadata WHERE name='json'", []).unwrap();
+            assert_exact_limit();
+
+            close(&path);
+            drop(c);
+            std::fs::remove_file(path).unwrap();
+        }
 
         #[test]
         fn ordinary_open_refuses_null_and_non_text_metadata_rows() {
