@@ -753,6 +753,7 @@ fn redact_scan(text: &str, diagnostic: bool) -> String {
                 REDACTED,
                 "[structured content omitted]",
                 "[oversized diagnostic omitted]",
+                "[address and the rest omitted]",
                 "[address omitted]",
                 "[oversized address omitted]",
             ]
@@ -827,7 +828,9 @@ fn redact_scan(text: &str, diagnostic: bool) -> String {
                     continue;
                 }
                 if ambiguous_userinfo(address.split(['?', '#']).next().unwrap_or("")) {
-                    out.push_str("[address omitted]");
+                    // Its password may run on past whitespace, as a secret query's may: the rest
+                    // goes too, and the marker says so.
+                    out.push_str("[address and the rest omitted]");
                     break;
                 }
                 let query = address.split_once(['?', '#']).map_or("", |(_, q)| q);
@@ -1112,6 +1115,10 @@ mod tests {
             let clean = redact(private);
             assert!(!clean.contains("hidden") && !clean.contains("123"), "{private} -> {clean}");
         }
+        // An ambiguous address in prose says the rest of the text went with it.
+        let clean = redact("upload https://u:123/w@h/x failed: HTTP 500");
+        assert_eq!(clean, "upload [address and the rest omitted]");
+        assert_eq!(redact(&clean), clean);
         // An attribute-only tag that names no credential is still plain markup.
         let public = r#"<span class="note"> https://example.org </span>"#;
         assert_eq!(redact_parameter(public), public);
