@@ -199,7 +199,7 @@ pub fn layers(src: &Path) -> Result<Vec<String>> {
 /// `crs` gives the coordinate system of a file that doesn't say (`EPSG:2263`; a DWG often doesn't).
 /// GDAL overrides accept `AUTH:CODE`: at least two ASCII letters for the authority and an ASCII
 /// alphanumeric code (also `.` and `_`), at most 64 bytes total; or the exact well-known geographic
-/// names `WGS84`, `WGS72`, `NAD27`, `NAD83`. Files, addresses, WKT and other aliases are refused.
+/// names `WGS84`, `WGS72`, `NAD27`, `NAD83` (in any case, as GDAL reads them). Files, addresses, WKT and other aliases are refused.
 /// Returns the converted layers, and the layers that couldn't be converted (with why), so a
 /// partial result is never mistaken for the whole file.
 pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Vec<Converted>, Vec<String>)> {
@@ -210,7 +210,7 @@ pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Ve
 
 fn check_crs(crs: Option<&str>) -> Result<()> {
     if let Some(c) = crs {
-        let valid = matches!(c, "WGS84" | "WGS72" | "NAD27" | "NAD83")
+        let valid = ["WGS84", "WGS72", "NAD27", "NAD83"].iter().any(|name| c.eq_ignore_ascii_case(name))
             || (c.len() <= 64
                 && c.split_once(':').is_some_and(|(authority, code)| {
                     authority.len() >= 2
@@ -899,7 +899,9 @@ mod tests {
 
     #[test]
     fn crs_overrides_require_authority_codes_and_accept_existing_epsg_codes() {
-        for crs in ["EPSG:2263", "EPSG:4326", "OGC:CRS84", "ESRI:102100", "AUTH:Code_1.2", "WGS84", "WGS72", "NAD27", "NAD83"] {
+        for crs in
+            ["EPSG:2263", "EPSG:4326", "OGC:CRS84", "ESRI:102100", "AUTH:Code_1.2", "WGS84", "WGS72", "NAD27", "NAD83", "wgs84", "Nad83"]
+        {
             assert!(check_crs(Some(crs)).is_ok(), "{crs}");
         }
         assert!(check_crs(None).is_ok());
@@ -911,10 +913,6 @@ mod tests {
             "c:/x.prj",
             "WGS84.prj",
             "wgs84x",
-            "wgs84",
-            "wgs72",
-            "nad27",
-            "nad83",
             "CRS84",
             "EPSG1:4326",
             "ÉPSG:4326",

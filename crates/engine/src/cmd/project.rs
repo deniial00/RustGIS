@@ -187,28 +187,34 @@ struct ConversionLoss {
     note: String,
     total: Option<u128>,
     unknown: bool,
+    /// The note whose wording the grouped notice uses: the first unknown one once any count is
+    /// unknown, so a definite "were left out" isn't claimed for layers that may have lost none.
+    wording: String,
 }
 
 impl ConversionLoss {
     fn new(first: &str, note: String) -> Self {
         let total = counted_conversion_loss(&note).and_then(|(_, count, _)| count);
         let unknown = note.contains("an unknown number of");
-        Self { layers: 1, first: first.into(), note, total, unknown }
+        Self { layers: 1, first: first.into(), wording: note.clone(), note, total, unknown }
     }
 
     fn add(&mut self, note: &str) {
         self.layers += 1;
         let amount = counted_conversion_loss(note).and_then(|(_, count, _)| count);
         self.total = self.total.zip(amount).and_then(|(total, amount)| total.checked_add(amount));
-        self.unknown |= note.contains("an unknown number of");
+        if note.contains("an unknown number of") && !self.unknown {
+            self.unknown = true;
+            self.wording = note.into();
+        }
     }
 
     fn notice(self) -> String {
-        let Self { layers, first, note, total, unknown } = self;
+        let Self { layers, first, note, total, unknown, wording } = self;
         if layers == 1 {
             return format!("{first}: {note}");
         }
-        let note = if let Some((provider, _, tail)) = counted_conversion_loss(&note)
+        let note = if let Some((provider, _, tail)) = counted_conversion_loss(if unknown { &wording } else { &note })
             && (total.is_some() || unknown)
         {
             let count = total.filter(|_| !unknown).map_or_else(|| "an unknown number of".into(), |n| n.to_string());
@@ -701,6 +707,7 @@ mod conversion_loss_tests {
             let notice = loss.notice();
             assert!(notice.starts_with("2 layers: GDAL: an unknown number of features of another geometry type"), "{notice}");
             assert!(!notice.contains("GDAL: 3 "), "{notice}");
+            assert!(notice.contains("may have been left out") && !notice.contains("were left out"), "{notice}");
         }
     }
 
