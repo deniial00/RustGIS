@@ -800,6 +800,9 @@ mod file {
                 )
                 .unwrap();
             }
+            // Another test's new path can clear the process-global pool when 16 are tracked: the
+            // other file is only expected to survive `close` if no clear happened around it.
+            let generation = pool().lock().unwrap().generation;
             assert_eq!(tile_path(&other, 0, 0, 0).unwrap(), Some(vec![1]));
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -815,7 +818,26 @@ mod file {
             });
             started_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             close(&path);
-            assert!(pool().lock().unwrap().connections.get(&other).is_some_and(|v| !v.is_empty()));
+            let mut kept = {
+                let all = pool().lock().unwrap();
+                (all.generation == generation).then(|| all.connections.get(&other).is_some_and(|v| !v.is_empty()))
+            };
+            for _ in 0..8 {
+                if kept.is_some() {
+                    break;
+                }
+                // The pool was cleared by a concurrent test: seed both files again and close
+                // `path` once more, so the retry still shows `close` drops only its own file.
+                let generation = pool().lock().unwrap().generation;
+                assert_eq!(tile_path(&other, 0, 0, 0).unwrap(), Some(vec![1]));
+                assert_eq!(tile_path(&path, 0, 0, 0).unwrap(), Some(vec![1]));
+                close(&path);
+                let all = pool().lock().unwrap();
+                kept = (all.generation == generation).then(|| {
+                    all.connections.get(&other).is_some_and(|v| !v.is_empty()) && all.connections.get(&path).is_none_or(Vec::is_empty)
+                });
+            }
+            assert_eq!(kept, Some(true), "closing one file must keep another file's connection");
             release_tx.send(()).unwrap();
             assert_eq!(worker.join().unwrap(), vec![1]);
             assert!(
