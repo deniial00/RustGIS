@@ -158,7 +158,7 @@ fn manual_archive_reload_reads_new_pixels_and_credits_without_touching_other_sou
         assert!(Arc::ptr_eq(&decoded(other_tile), &other_pixels));
         assert!(Arc::ptr_eq(&style(other_tile), &other_style));
         assert_render(&mut s, [0, 255, 0, 255], "New credits");
-        assert_eq!(s.undo_label(), Some("Reload Data"));
+        assert_eq!(s.undo_label(), Some("Reload Tile Archive"));
         s.run("edit.undo", &Value::Null).unwrap();
         assert_eq!(s.map().tiles, before);
         assert_color(&decoded(&before[i]), [0, 255, 0, 255]); // Undo is not file recovery.

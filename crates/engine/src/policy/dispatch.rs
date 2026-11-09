@@ -102,7 +102,7 @@ impl Session {
             })
         })
     }
-    /// Admits a file read before its picker, freezes Load All's selector, and seals its owner.
+    /// Admits a file read before its picker, freezes a layer selector, and seals its owner.
     pub(crate) fn start_read(&mut self, command: &str, params: &Value) -> Result<crate::cmd::reads::ReadAhead, String> {
         if self.depth > 0 || !self.policy.nodes.is_empty() || self.policy.cursor.is_some() {
             return Err("background reads can only start before handler dispatch".into());
@@ -140,11 +140,14 @@ impl Session {
     }
     /// Private pre-handler capture shared by native reads and the exact scoped archive entry.
     fn capture_read(&mut self, command: &str, params: &Value) -> Result<crate::cmd::reads::ReadAhead, String> {
-        if !matches!(command, "layer.addData" | "layer.loadAll" | "model.run" | "script.run" | "map.reloadTiles" | "map.repairTiles") {
-            return Err("only Add Data, Load All, models, scripts and local tile archives can prepare background work".into());
+        if !matches!(
+            command,
+            "layer.addData" | "layer.loadAll" | "layer.reloadData" | "model.run" | "script.run" | "map.reloadTiles" | "map.repairTiles"
+        ) {
+            return Err("only Add Data, Load All, Reload Data, models, scripts and local tile archives can prepare background work".into());
         }
         let mut params = params.as_object().cloned().ok_or("read parameters must be an object")?;
-        if command == "layer.loadAll" {
+        if matches!(command, "layer.loadAll" | "layer.reloadData") {
             let id = self.layer_id(&Value::Object(params.clone()))?;
             params.insert("layer".into(), json!(id));
         }
