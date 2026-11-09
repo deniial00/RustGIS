@@ -1102,6 +1102,9 @@ pub struct RustGisApp {
     /// to give its wake callback yet: `logic` installs the wake as soon as a context exists.
     #[cfg(not(target_arch = "wasm32"))]
     relay_wake_pending: bool,
+    /// Whether session plugins' programs ask for a repaint when they send a line.
+    #[cfg(not(target_arch = "wasm32"))]
+    plugin_wake_set: bool,
     /// Extra font faces installed with the interface fonts: (name, face, script). The current
     /// language's face comes right after the interface font (before it for Arabic script), so its
     /// glyph shapes win; the others are last-resort fallbacks. Faces are shared, so reinstalling
@@ -1306,6 +1309,8 @@ impl RustGisApp {
             frame_ctx: None,
             #[cfg(not(target_arch = "wasm32"))]
             relay_wake_pending: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_wake_set: false,
             extra_fonts: Vec::new(),
             installed_region: None,
             fonts_dirty: false,
@@ -5007,6 +5012,21 @@ impl RustGisApp {
                 }
             }
             relayshot::drive(self, ctx);
+            // Session plugins' programs: what they asked, and what changed on the map for them.
+            if !self.plugin_wake_set {
+                let ctx = ctx.clone();
+                rustgis_engine::plugins::session::set_wake(std::sync::Arc::new(move || ctx.request_repaint()));
+                self.plugin_wake_set = true;
+            }
+            let state = self.session.state();
+            if self.session.poll_plugin_sessions() > 0 && self.session.state() != state {
+                self.map.cancel_label_drag();
+            }
+            // A program that exits without a last line (something it left running holds its output
+            // open) wakes nothing: while one runs, the app looks at least once a second.
+            if !rustgis_engine::plugins::session::running().is_empty() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
             // A script an agent wrote to the file bridge.
             if let Some(bridge) = self.file_bridge.clone() {
                 if !bridge.has_wake() {
@@ -6320,10 +6340,13 @@ mod vertex_undo_tests {
         let id = app.session.map().layer_by_name("Paths").unwrap().id;
         let insert = json!({"layer": id, "row": row, "action": "insert", "index": 0, "lon": 0.5, "lat": 0});
         app.run("edit.vertex", insert).unwrap();
-        app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
+        let chosen = Some((id, row, VertexId::new(0, 0, 1)));
+        crate::vertexedit::choose(&mut app, chosen);
+        assert_eq!(app.map.vertex, chosen, "chosen before undo");
         app.run("edit.undo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "undo");
-        app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
+        crate::vertexedit::choose(&mut app, chosen);
+        assert_eq!(app.map.vertex, chosen, "chosen before redo");
         app.run("edit.redo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "redo");
     }

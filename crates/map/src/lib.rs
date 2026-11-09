@@ -384,8 +384,9 @@ impl Layer {
         })
     }
 
-    /// Installs a fresh source, retaining styling but clearing feature-specific state whose ids
-    /// may identify different features. Returns the number of saved label moves reset for a notice.
+    /// Installs a fresh source, retaining styling except an untouched no-geometry default.
+    /// Clears feature-specific state whose ids may identify different features, returning the
+    /// number of saved label moves reset for a notice.
     pub fn replace_source(&mut self, mut src: source::SourceLayer) -> usize {
         self.selection.clear();
         let moved = self.labels.in_order().map(|class| class.moved.len()).sum();
@@ -393,7 +394,10 @@ impl Layer {
         self.labels.classes.iter_mut().for_each(|class| class.moved.clear());
         src.reads = self.source.as_ref().map_or(0, |old| old.reads);
         if let Some(info) = src.info() {
-            if self.dataset.geometry_type == rustgis_data::GeometryType::None && info.geometry_type != rustgis_data::GeometryType::None {
+            if self.dataset.geometry_type == rustgis_data::GeometryType::None
+                && info.geometry_type != rustgis_data::GeometryType::None
+                && self.renderer == Renderer::Single(Symbol::default_for(rustgis_data::GeometryType::None, self.id))
+            {
                 self.renderer = Renderer::Single(Symbol::default_for(info.geometry_type, self.id));
             }
             self.dataset.geometry_type = info.geometry_type;

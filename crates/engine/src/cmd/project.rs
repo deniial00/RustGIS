@@ -34,7 +34,7 @@ pub fn commands() -> Vec<C> {
         // The session log (#797): read, written out, emptied, turned on or off. It sits outside
         // the project, so none of these changes the project or takes an undo step.
         C::new("project.log", "Session Log", "Project", log).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).view().params(
-            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries, a whole number (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis"}], "count": matching, "total": in the log, "on": bool}"#,
+            r#"{"since"?: milliseconds since 1970 (UTC), "until"?: milliseconds, "command"?: "a command id, or the start of one (layer.)", "failed"?: bool (true: only those that failed; false: only those that succeeded), "limit"?: entries, a whole number (default 100, the newest; 1 to 1000)} → {"entries": [{"at", "command", "params", "ok", "error"?, "millis", "project": the project open when it ran, "partial"?: true when params were cut or had secrets taken out, "plugin"?: the session plugin that asked for it between its commands}], "count": matching, "total": in the log, "on": bool}"#,
         ),
         C::new("project.exportLog", "Export Session Log", "Project", export_log).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
@@ -148,11 +148,22 @@ pub(crate) fn reset_to(s: &mut Session, p: Project) {
     reset(s, p);
 }
 
-/// Says fresh opening losses once per kind, and saved-conversion fallbacks once with the layer
-/// count and first failure. Ordinary source notes are not opening conversion diagnostics.
+/// A provider loss diagnostic whose first word is an integer feature or row count.
+fn counted_conversion_loss(note: &str) -> Option<(&str, u128, &str)> {
+    let (provider, body) = note.split_once(": ")?;
+    let (count, tail) = body.split_once(' ')?;
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((provider, count.parse().ok()?, tail))
+}
+
+/// Says fresh opening losses once per kind, summing leading provider counts across layers, and
+/// saved-conversion fallbacks once with the layer count and first failure. Ordinary source notes
+/// are not opening conversion diagnostics.
 pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
     let mut fallback: Option<(usize, String, String)> = None;
-    let mut losses = std::collections::BTreeMap::<(String, String), (usize, String, String)>::new();
+    let mut losses = std::collections::BTreeMap::<(String, String), (usize, String, String, Option<u128>)>::new();
     for l in s.project.maps.iter_mut().flat_map(|m| &mut m.layers) {
         let Some(source) = l.source.as_mut() else { continue };
         if let Some(note) = source.take_conversion_fallback() {
@@ -163,8 +174,8 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
         }
         let mut seen = std::collections::BTreeSet::new();
         for note in source.take_conversion_notes() {
-            // Source layer names and feature counts vary within a loss kind. Retain the first
-            // complete diagnostic, but count affected layers rather than diagnostic occurrences.
+            // Source layer names and feature counts vary within a loss kind. Count affected
+            // layers once each and total leading feature/row counts across those layers.
             let kind = [
                 "Z or M coordinates",
                 "another geometry type",
@@ -180,8 +191,10 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
             let provider = note.split_once(": ").map_or("", |(provider, _)| provider);
             let key = (provider.to_owned(), kind.to_owned());
             if seen.insert(key.clone()) {
-                let entry = losses.entry(key).or_insert_with(|| (0, l.name.clone(), note));
+                let amount = counted_conversion_loss(&note).map(|(_, count, _)| count);
+                let entry = losses.entry(key).or_insert_with(|| (0, l.name.clone(), note, Some(0)));
                 entry.0 += 1;
+                entry.3 = entry.3.zip(amount).and_then(|(total, amount)| total.checked_add(amount));
             }
         }
     }
@@ -193,8 +206,19 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
         };
         s.notify(text, false);
     }
-    for (_, (count, name, note)) in losses {
-        let text = if count == 1 { format!("{name}: {note}") } else { format!("{count} layers: {note}; first: {name}") };
+    for (_, (count, name, note, total)) in losses {
+        let text = if count == 1 {
+            format!("{name}: {note}")
+        } else {
+            let note = if let Some(total) = total
+                && let Some((provider, _, tail)) = counted_conversion_loss(&note)
+            {
+                format!("{provider}: {total} {tail}")
+            } else {
+                note
+            };
+            format!("{count} layers: {note}; first: {name}")
+        };
         s.notify(text, false);
     }
 }

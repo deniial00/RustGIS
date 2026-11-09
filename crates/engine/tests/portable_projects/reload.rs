@@ -1448,3 +1448,126 @@ fn project_open_reports_fresh_conversion_losses_once_per_kind_but_not_clean_conv
         }
     }
 }
+
+#[test]
+fn project_open_sums_counted_conversion_losses_across_layers_and_keeps_single_layer_wording() {
+    use rustgis_engine::{
+        data::source::{Family, gdal},
+        map::source::{GdalOrigin, SourceLayer},
+    };
+    if !gdal::usable() {
+        return;
+    }
+    for layer_count in [1, 2, 3] {
+        for lossy in [true, false] {
+            let f = Fixture::new("restore-counted-conversion-losses");
+            let mut saved = session();
+            for index in 0..layer_count {
+                let path = f.file(&format!("survey{index}.geojsonl"));
+                let point = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[2,48]}}"#;
+                let line = r#"{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[2,48],[3,48]]}}"#;
+                std::fs::write(&path, format!("{point}\n")).unwrap();
+                let seed = f.file(&format!("seed{index}.fgb"));
+                io::write_path(&points(&[], Some(2.0)), &seed).unwrap();
+                let handle = rustgis_engine::data::source::open_path(&seed, None).unwrap();
+                let mut source = SourceLayer::from_path(seed.to_str().unwrap(), None, handle);
+                source.gdal = Some(GdalOrigin {
+                    path: path.to_str().unwrap().into(),
+                    layer: format!("survey{index}"),
+                    family: Some(Family::Points),
+                    crs: None,
+                });
+                let source = source.relinked(path.to_str().unwrap(), None).unwrap();
+                assert!(source.info().unwrap().notes.is_empty(), "the saved conversion was clean");
+                saved.map_mut().add_streamed(format!("Survey {index}"), source);
+                let mut input = format!("{point}\n");
+                if lossy {
+                    for _ in 0..=index {
+                        input.push_str(line);
+                        input.push('\n');
+                    }
+                }
+                std::fs::write(&path, input).unwrap();
+            }
+            let project = f.file("survey.rgis");
+            saved.run("project.saveAs", &json!({"path": project})).unwrap();
+            drop(saved);
+            let mut reopened = session();
+            let mark = reopened.notice_mark();
+            reopened.run("project.open", &json!({"path": project})).unwrap();
+            let notices = reopened.notices_since(mark);
+            let losses = notices.iter().filter(|notice| notice.text.contains("another geometry type")).collect::<Vec<_>>();
+            if lossy {
+                let total = layer_count * (layer_count + 1) / 2;
+                let note = format!("GDAL: {total} features of another geometry type were left out");
+                let expected = if layer_count == 1 {
+                    format!("Survey 0: {note}")
+                } else {
+                    format!("{layer_count} layers: {note}; first: Survey {}", layer_count - 1)
+                };
+                assert_eq!(losses.len(), 1, "{notices:?}");
+                assert_eq!(losses[0].text, expected);
+                assert!(!losses[0].error);
+            } else {
+                assert!(losses.is_empty(), "{notices:?}");
+                assert_eq!(notices.len(), 1, "clean conversions only announce opening: {notices:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn reload_generic_gdal_layer_reports_selected_zm_loss_but_not_xy_or_other_families() {
+    use rustgis_engine::{
+        data::source::{Family, gdal},
+        map::source::{GdalOrigin, SourceLayer},
+    };
+    if !gdal::usable() {
+        return;
+    }
+    let f = Fixture::new("reload-gdal-generic-dimensions");
+    let path = f.file("survey.geojsonl");
+    let publish = |point_coordinates: &str, line_coordinates: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"Feature\",\"properties\":{{}},\"geometry\":{{\"type\":\"Point\",\"coordinates\":[2,48]}}}}\n\
+                 {{\"type\":\"Feature\",\"properties\":{{}},\"geometry\":{{\"type\":\"Point\",\"coordinates\":{point_coordinates}}}}}\n\
+                 {{\"type\":\"Feature\",\"properties\":{{}},\"geometry\":{{\"type\":\"LineString\",\"coordinates\":{line_coordinates}}}}}\n"
+            ),
+        )
+        .unwrap();
+    };
+    publish("[3,48]", "[[2,48],[3,48]]");
+    let original = gdal::convert_one(&path, "survey", Some(Family::Points), None).unwrap().unwrap();
+    let handle = rustgis_engine::data::source::open_path(&original, None).unwrap();
+    let mut source = SourceLayer::from_path(original.to_str().unwrap(), None, handle);
+    source.gdal = Some(GdalOrigin { path: path.to_str().unwrap().into(), layer: "survey".into(), family: Some(Family::Points), crs: None });
+    let mut s = session();
+    let id = s.map_mut().add_streamed("Generic survey", source);
+    for (point_coordinates, line_coordinates, lossy) in
+        [("[8,48,100]", "[[2,48],[3,48]]", true), ("[8,48]", "[[2,48],[3,48]]", false), ("[8,48]", "[[2,48,100],[3,48,100]]", false)]
+    {
+        publish(point_coordinates, line_coordinates);
+        let mark = s.notice_mark();
+        s.run("layer.reloadData", &json!({"layer": id})).unwrap();
+        let notices = s.notices_since(mark);
+        let losses = notices.iter().filter(|notice| notice.text.contains("Z or M coordinates")).collect::<Vec<_>>();
+        if lossy {
+            assert_eq!(losses.len(), 1, "{notices:?}");
+            assert!(losses[0].text.contains("Z or M coordinates on 1 source feature(s)"), "{}", losses[0].text);
+            assert!(!losses[0].error);
+        } else {
+            assert!(losses.is_empty(), "{notices:?}");
+        }
+        let source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+        assert_eq!(source.info().unwrap().zm_dropped, lossy);
+        assert_eq!(source.info().unwrap().notes.iter().any(|note| note.contains("Z or M coordinates")), lossy);
+        let dataset = loaded(&s, id);
+        assert_eq!(dataset.features.len(), 2);
+        assert_eq!(dataset.geometry_type, GeometryType::Point);
+        let mut xs = dataset.features.iter().map(|feature| feature.geometry.as_ref().unwrap().extent().center().x).collect::<Vec<_>>();
+        xs.sort_by(f64::total_cmp);
+        assert_eq!(xs, [2.0, 8.0]);
+    }
+}

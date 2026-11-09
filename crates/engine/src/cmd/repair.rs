@@ -79,9 +79,15 @@ fn reload_data(s: &mut Session, p: &Value) -> CmdResult {
             install(s, prepared)
         };
         result.map_err(|why: String| {
+            let layer = s.map().layer(id);
+            let hint = if layer.is_some_and(|l| l.gpkg.is_some()) {
+                "Correct the file and retry Reload Data, or add the table again with Add Data."
+            } else {
+                "Retry Reload Data or use Repair Data Source."
+            };
             format!(
-                "{} ({path}): reload failed; existing data and configuration retained. Retry Reload Data or use Repair Data Source. {why}",
-                s.map().layer(id).map_or("Layer", |l| l.name.as_str())
+                "{} ({path}): reload failed; existing data and configuration retained. {hint} {why}",
+                layer.map_or("Layer", |l| l.name.as_str())
             )
         })?;
         s.notify(format!("{}: data reloaded from {path}", s.map().layer(id).map_or("Layer", |l| l.name.as_str())), false);
@@ -323,7 +329,10 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
             let moved = l.labels.in_order().map(|class| class.moved.len()).sum();
             l.labels.default.moved.clear();
             l.labels.classes.iter_mut().for_each(|class| class.moved.clear());
-            if l.dataset.geometry_type == rustgis_data::GeometryType::None && dataset.geometry_type != rustgis_data::GeometryType::None {
+            if l.dataset.geometry_type == rustgis_data::GeometryType::None
+                && dataset.geometry_type != rustgis_data::GeometryType::None
+                && l.renderer == rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(rustgis_data::GeometryType::None, id))
+            {
                 l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(dataset.geometry_type, id));
             }
             l.dataset = dataset;

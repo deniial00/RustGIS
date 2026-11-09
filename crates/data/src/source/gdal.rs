@@ -123,6 +123,8 @@ pub fn cache_dir() -> Option<PathBuf> {
 #[derive(Clone, Debug, PartialEq)]
 struct LayerInfo {
     name: String,
+    /// SQLite's geometry column name; unnamed OGR geometry fields are exposed as `geometry`.
+    geometry_column: String,
     family: Option<Family>,
     count: Option<i64>,
     /// Whether the layer says its coordinate system.
@@ -181,7 +183,8 @@ fn list(src: &Path) -> Result<Vec<LayerInfo>> {
             let family = Family::of_ogr_type(geometry);
             let has_zm = geometry.ends_with(['Z', 'M']) || geometry.starts_with("3D ");
             let has_srs = geom.get("coordinateSystem").is_some_and(|c| !c.is_null());
-            Some(LayerInfo { name, family, count: l.get("featureCount").and_then(|c| c.as_i64()), has_srs, has_zm })
+            let geometry_column = geom.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).unwrap_or("geometry").to_string();
+            Some(LayerInfo { name, geometry_column, family, count: l.get("featureCount").and_then(|c| c.as_i64()), has_srs, has_zm })
         })
         .collect())
 }
@@ -194,18 +197,28 @@ pub fn layers(src: &Path) -> Result<Vec<String>> {
 /// Converts the dataset's layers (or just `layer`) to FlatGeobufs, reusing earlier conversions of
 /// the same file.
 /// `crs` gives the coordinate system of a file that doesn't say (`EPSG:2263`; a DWG often doesn't).
+/// GDAL overrides require `AUTH:CODE`: an ASCII-letter authority and an ASCII alphanumeric code
+/// (also `.` and `_`), at most 64 bytes total. Files, addresses, WKT and aliases like `WGS84` are refused.
 /// Returns the converted layers, and the layers that couldn't be converted (with why), so a
 /// partial result is never mistaken for the whole file.
 pub fn convert(src: &Path, layer: Option<&str>, crs: Option<&str>) -> Result<(Vec<Converted>, Vec<String>)> {
+    check_crs(crs)?;
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
     convert_in(&dir, src, layer, crs)
 }
 
 fn check_crs(crs: Option<&str>) -> Result<()> {
-    if let Some(c) = crs
-        && (c.len() > 64 || c.starts_with('-') || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || ":_.".contains(ch)))
-    {
-        return Err(DataError::Format(format!("crs '{c}': give a code such as EPSG:2263")));
+    if let Some(c) = crs {
+        let valid = c.len() <= 64
+            && c.split_once(':').is_some_and(|(authority, code)| {
+                !authority.is_empty()
+                    && authority.bytes().all(|b| b.is_ascii_alphabetic())
+                    && !code.is_empty()
+                    && code.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_'))
+            });
+        if !valid {
+            return Err(DataError::Format(format!("crs '{c}': give a code such as EPSG:2263")));
+        }
     }
     Ok(())
 }
@@ -270,7 +283,9 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
 
 /// Converts one layer (or one geometry family of it) into the cache; `None` when it has no
 /// features. The cache key covers the file's path, size and modification time.
+/// CRS overrides follow the authority-code-only contract of [`convert`].
 pub fn convert_one(src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<Option<PathBuf>> {
+    check_crs(crs)?;
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
     // The layer's own kind of geometry, and whether it says its coordinate system, as a fresh
     // listing tells. Its name is matched as `convert` matches it, ignoring case (the exact
@@ -310,7 +325,9 @@ struct Conversion {
 /// Converts only the selected layer afresh, without reusing or replacing a retained conversion.
 /// A declared empty layer is valid; a missing layer or incompatible declared family is not.
 /// Successful GDAL diagnostics are returned too, including features skipped by the driver.
+/// CRS overrides follow the authority-code-only contract of [`convert`].
 pub fn convert_one_fresh(src: &Path, layer: &str, family: Option<Family>, crs: Option<&str>) -> Result<FreshConverted> {
+    check_crs(crs)?;
     let dir = cache_dir().ok_or_else(|| DataError::Format("no cache folder for GDAL conversions".into()))?;
     convert_one_fresh_in(&dir, src, layer, family, crs)
 }
@@ -339,19 +356,28 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
     if converted.unprojected {
         converted.notes.push(format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"));
     }
-    if info.has_zm && !converted.empty {
+    let mut zm_dropped = info.has_zm && !converted.empty;
+    if zm_dropped {
         let count = info.count.filter(|n| *n >= 0).map_or_else(|| "an unknown number of".into(), |n| n.to_string());
         converted.notes.push(format!(
             "GDAL: '{layer}' declares Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
         ));
     }
-    Ok(FreshConverted {
-        path: converted.path,
-        notes: converted.notes,
-        empty: converted.empty,
-        zm_dropped: info.has_zm && !converted.empty,
-        workspace,
-    })
+    if !info.has_zm && info.family.is_none() && !converted.empty {
+        match count_zm_features(src, info, family) {
+            Ok(0) => {}
+            Ok(count) => {
+                zm_dropped = true;
+                converted.notes.push(format!(
+                    "GDAL: '{layer}' contains Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
+                ));
+            }
+            Err(_) => converted.notes.push(format!(
+                "GDAL: '{layer}': an unknown number of source feature(s) may have had Z or M coordinates dropped; conversion keeps only XY coordinates"
+            )),
+        }
+    }
+    Ok(FreshConverted { path: converted.path, notes: converted.notes, empty: converted.empty, zm_dropped, workspace })
 }
 
 struct ConversionRequest<'a> {
@@ -523,6 +549,39 @@ fn count_other_families(src: &Path, layer: &str, selected: Family) -> Result<u64
         .and_then(|layer| layer.get("featureCount"))
         .and_then(|count| count.as_u64())
         .ok_or_else(|| DataError::Format("GDAL: could not count features of other geometry types".into()))
+}
+
+/// Generic layers don't declare the dimensions of their features. Count the selected family's
+/// actual Z/M geometries that conversion flattens; SQLite's spatial functions aren't present in every
+/// GDAL build, so the caller reports possible loss if this diagnostic query fails.
+fn count_zm_features(src: &Path, layer: &LayerInfo, family: Option<Family>) -> Result<u64> {
+    let src = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    let geometry = format!("\"{}\"", layer.geometry_column.replace('"', "\"\""));
+    let name = format!("\"{}\"", layer.name.replace('"', "\"\""));
+    // ST_GeometryType includes a trailing ` Z`, ` M` or ` ZM`, unlike OGR_GEOMETRY.
+    // None of the supported base geometry names ends in a space, Z or M.
+    let filter = family.map_or_else(String::new, |f| {
+        format!(" AND ({})", f.filter().replace("OGR_GEOMETRY", &format!("rtrim(ST_GeometryType({geometry}), ' ZM')")))
+    });
+    let sql = format!("SELECT COUNT(*) AS zm_count FROM {name} WHERE (ST_Is3D({geometry}) = 1 OR ST_IsMeasured({geometry}) = 1){filter}");
+    let mut c = command(program("ogrinfo").ok_or_else(missing)?, drivers(&src)?);
+    c.args(["-json", "-ro", "-features", "-nomd", "-dialect", "SQLite", "-sql", &sql]).arg(&src);
+    let out = output(c, CONVERT_TIMEOUT, "GDAL")?;
+    if !out.status.success() {
+        return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| DataError::Format(format!("GDAL: unreadable dimension count ({e})")))?;
+    json.get("layers")
+        .and_then(|layers| layers.as_array())
+        .and_then(|layers| layers.first())
+        .and_then(|layer| layer.get("features"))
+        .and_then(|features| features.as_array())
+        .and_then(|features| features.first())
+        .and_then(|feature| feature.get("properties"))
+        .and_then(|properties| properties.get("zm_count"))
+        .and_then(|count| count.as_u64())
+        .ok_or_else(|| DataError::Format("GDAL: could not count features with Z or M coordinates".into()))
 }
 
 /// The longest a conversion may run, and the longest a layer listing may.
@@ -803,19 +862,85 @@ mod tests {
 
     #[test]
     fn fresh_and_shared_conversion_refuse_crs_addresses_before_reading_or_converting() {
+        // No GDAL gate: all these inputs must fail before looking for its programs or source data.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.geojsonl");
+        let cache = dir.path().join("cache");
+        for crs in ["local.prj", "./x.prj", "https://example.org/x", "WGS84", "-EPSG:4326", "EPSG:", ":4326", "EPSG:4:326", "EPSG:4\\326"] {
+            let expected = format!("crs '{crs}': give a code");
+            let error = convert_one_fresh_in(&cache, &path, "survey", Some(Family::Points), Some(crs)).unwrap_err();
+            assert!(error.to_string().contains(&expected), "{error}");
+            assert!(!cache.exists(), "invalid CRS must be refused before allocating or running a conversion");
+            let request = ConversionRequest { family: Some(Family::Points), kind: None, crs: Some(crs), has_srs: true, fresh: false };
+            let error = convert_one_in(&cache, &path, "survey", request).unwrap_err();
+            assert!(error.to_string().contains(&expected), "{error}");
+            let error = convert_in(&cache, &path, Some("survey"), Some(crs)).unwrap_err();
+            assert!(error.to_string().contains(&expected), "{error}");
+            let error = convert_one(&path, "survey", Some(Family::Points), Some(crs)).unwrap_err();
+            assert!(error.to_string().contains(&expected), "{error}");
+            assert!(!cache.exists(), "the shared converters must reject invalid CRS before touching their output");
+        }
+    }
+
+    #[test]
+    fn crs_overrides_require_authority_codes_and_accept_existing_epsg_codes() {
+        for crs in ["EPSG:2263", "EPSG:4326", "OGC:CRS84", "ESRI:102100", "AUTH:Code_1.2"] {
+            assert!(check_crs(Some(crs)).is_ok(), "{crs}");
+        }
+        assert!(check_crs(None).is_ok());
+        assert!(check_crs(Some(&format!("A:{}", "1".repeat(62)))).is_ok());
+        assert!(check_crs(Some(&format!("A:{}", "1".repeat(63)))).is_err());
+        for crs in ["", "EPSG1:4326", "ÉPSG:4326", "EPSG:٤٣٢٦", "EPSG:4326/other", "EPSG:4326 other"] {
+            assert!(check_crs(Some(crs)).is_err(), "{crs}");
+        }
+    }
+
+    #[test]
+    fn fresh_generic_layer_reports_only_selected_features_with_dropped_dimensions() {
         if !usable() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.geojsonl");
-        let cache = dir.path().join("cache");
-        let crs = Some("https://example.org/x");
-        let error = convert_one_fresh_in(&cache, &path, "survey", Some(Family::Points), crs).unwrap_err();
-        assert!(error.to_string().contains("crs 'https://example.org/x': give a code"), "{error}");
-        assert!(!cache.exists(), "invalid CRS must be refused before allocating or running a conversion");
-        let request = ConversionRequest { family: Some(Family::Points), kind: None, crs, has_srs: true, fresh: false };
-        let error = convert_one_in(&cache, &path, "survey", request).unwrap_err();
-        assert!(error.to_string().contains("crs 'https://example.org/x': give a code"), "{error}");
-        assert!(!cache.exists(), "the shared converter must reject invalid CRS before touching its output");
+        let path = dir.path().join("survey.geojsonl");
+        let point = r#"{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[2,48]}}"#;
+        for (point_coordinates, line_coordinates, lossy) in
+            [("[3,48,100]", "[[2,48],[3,48]]", true), ("[3,48]", "[[2,48],[3,48]]", false), ("[3,48]", "[[2,48,100],[3,48,100]]", false)]
+        {
+            let input = format!(
+                "{point}\n\
+                 {{\"type\":\"Feature\",\"properties\":{{}},\"geometry\":{{\"type\":\"Point\",\"coordinates\":{point_coordinates}}}}}\n\
+                 {{\"type\":\"Feature\",\"properties\":{{}},\"geometry\":{{\"type\":\"LineString\",\"coordinates\":{line_coordinates}}}}}\n"
+            );
+            std::fs::write(&path, input).unwrap();
+            let info = list(&path).unwrap().remove(0);
+            assert!(info.family.is_none() && !info.has_zm, "the fixture must declare generic Geometry: {info:?}");
+            let fresh = convert_one_fresh_in(&dir.path().join("cache"), &path, "survey", Some(Family::Points), None).unwrap();
+            let notes = fresh.notes.iter().filter(|n| n.contains("Z or M coordinates")).collect::<Vec<_>>();
+            if lossy {
+                assert_eq!(notes.len(), 1, "{:?}", fresh.notes);
+                assert!(notes[0].contains("Z or M coordinates on 1 source feature(s)"), "{notes:?}");
+            } else {
+                assert!(notes.is_empty(), "{:?}", fresh.notes);
+            }
+            assert_eq!(fresh.zm_dropped, lossy);
+            let source = crate::source::open_path(&fresh.path, None).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            assert_eq!(batch.features.len(), 2);
+            assert!(batch.features.iter().all(|f| f.geometry.as_ref().unwrap().kind() == GeometryType::Point));
+        }
+    }
+
+    #[test]
+    fn generic_dimension_count_includes_measures_and_quotes_layer_names() {
+        if !usable() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("surv'ey.csv");
+        for (point, expected) in [("POINT M (2 48 100)", 1), ("POINT ZM (2 48 100 200)", 1), ("POINT (2 48)", 0)] {
+            std::fs::write(&path, format!("WKT,name\n\"{point}\",point\n\"LINESTRING Z (2 48 100,3 48 100)\",line\n")).unwrap();
+            let info = list(&path).unwrap().remove(0);
+            assert_eq!(count_zm_features(&path, &info, Some(Family::Points)).unwrap(), expected);
+        }
     }
 }
