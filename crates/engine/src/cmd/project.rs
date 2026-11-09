@@ -149,8 +149,12 @@ pub(crate) fn reset_to(s: &mut Session, p: Project) {
 }
 
 /// A provider loss diagnostic beginning with a definite or explicitly unknown item count.
+/// The provider is empty for a note with no `provider: ` prefix ("3 rows could not be read…").
 fn counted_conversion_loss(note: &str) -> Option<(&str, Option<u128>, &str)> {
-    let (provider, body) = note.split_once(": ")?;
+    note.split_once(": ").and_then(|(provider, body)| counted_body(provider, body)).or_else(|| counted_body("", note))
+}
+
+fn counted_body<'a>(provider: &'a str, body: &'a str) -> Option<(&'a str, Option<u128>, &'a str)> {
     if let Some(tail) = body.strip_prefix("an unknown number of ") {
         return Some((provider, None, tail));
     }
@@ -159,6 +163,22 @@ fn counted_conversion_loss(note: &str) -> Option<(&str, Option<u128>, &str)> {
         return None;
     }
     Some((provider, Some(count.parse().ok()?), tail))
+}
+
+/// Whether a note states an amount: a leading count, "on N source feature(s)", or a GDAL
+/// "(N occurrence(s))" suffix. A note with none needs no per-layer qualifier.
+fn shows_count(note: &str) -> bool {
+    let digits_before = |marker: &str| {
+        note.split(marker)
+            .next()
+            .and_then(|head| head.rsplit([' ', '(']).next())
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            && note.contains(marker)
+    };
+    note.split_whitespace().next().is_some_and(|w| w.bytes().all(|b| b.is_ascii_digit()))
+        || counted_conversion_loss(note).is_some()
+        || digits_before(" source feature")
+        || digits_before(" occurrence(s))")
 }
 
 struct ConversionLoss {
@@ -192,11 +212,13 @@ impl ConversionLoss {
             && (total.is_some() || unknown)
         {
             let count = total.filter(|_| !unknown).map_or_else(|| "an unknown number of".into(), |n| n.to_string());
-            format!("{provider}: {count} {tail}")
+            if provider.is_empty() { format!("{count} {tail}") } else { format!("{provider}: {count} {tail}") }
         } else if unknown {
-            format!("{note} (count shown is {first}'s; others vary; total: an unknown number of affected items)")
+            format!("{note} (count shown is {first}'s; the total is unknown)")
+        } else if shows_count(&note) {
+            format!("{note} (count shown is {first}'s)")
         } else {
-            format!("{note} (count shown is {first}'s; others vary)")
+            note
         };
         format!("{layers} layers: {note}; first: {first}")
     }
@@ -653,14 +675,20 @@ mod conversion_loss_tests {
     use super::*;
 
     #[test]
-    fn grouped_unreadable_rows_qualify_the_first_layers_count() {
+    fn grouped_counts_sum_without_a_provider_and_uncounted_notes_take_no_qualifier() {
         let mut loss = ConversionLoss::new("First", "3 rows could not be read while checking the replacement".into());
         loss.add("4 rows could not be read while checking the replacement");
-        let notice = loss.notice();
-        assert_eq!(
-            notice,
-            "2 layers: 3 rows could not be read while checking the replacement (count shown is First's; others vary); first: First"
-        );
+        assert_eq!(loss.notice(), "2 layers: 7 rows could not be read while checking the replacement; first: First");
+
+        let note = "GDAL: 'a' has no declared coordinate system; its coordinates were left unprojected";
+        let mut loss = ConversionLoss::new("First", note.into());
+        loss.add("GDAL: 'b' has no declared coordinate system; its coordinates were left unprojected");
+        assert_eq!(loss.notice(), format!("2 layers: {note}; first: First"));
+
+        let note = "GDAL: 'a' declares Z or M coordinates on 3 source feature(s); conversion keeps only XY coordinates";
+        let mut loss = ConversionLoss::new("First", note.into());
+        loss.add("GDAL: 'b' declares Z or M coordinates on 5 source feature(s); conversion keeps only XY coordinates");
+        assert_eq!(loss.notice(), format!("2 layers: {note} (count shown is First's); first: First"));
     }
 
     #[test]

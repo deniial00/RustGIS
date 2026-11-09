@@ -315,7 +315,11 @@ mod tests {
 
         assert_eq!(std::fs::read(contents).unwrap(), b"unrelated data");
         assert_eq!(std::fs::read(lock_path).unwrap(), b"another application's workspace\n");
-        let marker = std::fs::read(live.path().join("owner.lock")).unwrap();
+        // Read through the owner's own handle: on Windows its lock blocks reads through any other.
+        let mut marker = Vec::new();
+        let mut lock = &live._lock;
+        std::io::Seek::seek(&mut lock, std::io::SeekFrom::Start(0)).unwrap();
+        std::io::Read::read_to_end(&mut lock, &mut marker).unwrap();
         assert!(marker.starts_with(RELOAD_OWNER_MARKER));
         assert_eq!(&marker[RELOAD_OWNER_MARKER.len()..], format!("{}\n", std::process::id()).as_bytes());
     }
