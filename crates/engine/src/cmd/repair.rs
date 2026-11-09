@@ -544,12 +544,13 @@ struct FileRevision {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl FileRevision {
-    fn read(path: &str, optional: bool) -> Result<Option<Self>, String> {
+    fn read(path: &std::path::Path, optional: bool) -> Result<Option<Self>, String> {
+        let shown = path.display();
         let metadata = match std::fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(format!("{path}: could not observe archive metadata ({e}); finish writing or restore the file and retry"));
+                return Err(format!("{shown}: could not observe archive metadata ({e}); finish writing or restore the file and retry"));
             }
         };
         // SQLite creates an empty -wal even for a read-only open of a clean WAL-mode archive,
@@ -558,11 +559,11 @@ impl FileRevision {
             return Ok(None);
         }
         if !metadata.is_file() {
-            return Err(format!("{path}: expected an archive file; restore the file and retry"));
+            return Err(format!("{shown}: expected an archive file; restore the file and retry"));
         }
         let modified = metadata
             .modified()
-            .map_err(|e| format!("{path}: could not observe the archive modification time ({e}); check file access and retry"))?;
+            .map_err(|e| format!("{shown}: could not observe the archive modification time ({e}); check file access and retry"))?;
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         #[cfg(windows)]
@@ -584,17 +585,30 @@ struct ArchiveObservation {
     primary: Option<FileRevision>,
     // SQLite commits can change these without changing the main database. The -shm file
     // is reader coordination, not content, and is deliberately not observed.
-    sqlite: Option<(Option<FileRevision>, Option<FileRevision>)>,
+    sqlite: Option<Vec<Option<FileRevision>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ArchiveObservation {
     fn read(path: &str) -> Result<Self, String> {
         let path = path.strip_prefix("file://").unwrap_or(path);
-        let primary = FileRevision::read(path, false)?;
+        let primary = FileRevision::read(std::path::Path::new(path), false)?;
         let sqlite = std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("mbtiles"));
         let sqlite = if sqlite {
-            Some((FileRevision::read(&format!("{path}-wal"), true)?, FileRevision::read(&format!("{path}-journal"), true)?))
+            // Unix SQLite names its sidecars from the resolved database path, so commits through
+            // a link land beside the target; Windows names them from the path as given. Observe
+            // beside both when they differ, so neither VFS's commits escape.
+            let given = std::path::Path::new(path);
+            let resolved = std::fs::canonicalize(given).ok().filter(|resolved| resolved != given);
+            let mut sidecars = Vec::new();
+            for base in std::iter::once(given).chain(resolved.as_deref()) {
+                for suffix in ["-wal", "-journal"] {
+                    let mut sidecar = base.as_os_str().to_owned();
+                    sidecar.push(suffix);
+                    sidecars.push(FileRevision::read(std::path::Path::new(&sidecar), true)?);
+                }
+            }
+            Some(sidecars)
         } else {
             None
         };
@@ -732,6 +746,32 @@ mod tests {
             assert!(observed.unchanged(&path).is_err(), "{sidecar}");
             std::fs::remove_file(&sidecar).unwrap();
             observed.unchanged(&path).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_mbtiles_observes_the_sidecars_beside_its_target_and_beside_the_link() {
+        let dir = std::env::temp_dir().join(format!("rustgis-repair-linked-observation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.mbtiles");
+        std::fs::write(&target, b"main database").unwrap();
+        let link = dir.join("link.mbtiles");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let link = link.display().to_string();
+        let observed = ArchiveObservation::read(&link).unwrap();
+        observed.unchanged(&link).expect("nothing was committed");
+        // SQLite on unix commits beside the target; on Windows beside the path as given.
+        for beside in [target.display().to_string(), link.clone()] {
+            for sidecar in ["-wal", "-journal"] {
+                let sidecar = format!("{beside}{sidecar}");
+                std::fs::write(&sidecar, b"committed frame").unwrap();
+                assert!(observed.unchanged(&link).is_err(), "a commit to {sidecar} escaped the freshness check");
+                std::fs::remove_file(&sidecar).unwrap();
+                observed.unchanged(&link).unwrap();
+            }
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
