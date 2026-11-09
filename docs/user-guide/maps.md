@@ -349,7 +349,8 @@ selectable or editable; a tile not yet loaded may need another click once it arr
 fetches them again.
 
 **Reloading a local tile archive (desktop).** After changing a PMTiles or MBTiles file on disk,
-right-click its row in Layers and choose **Reload Data**. CLI, Python, MCP and the Assistant use
+right-click its row in Layers and choose **Reload Data** (**Reload Tile Archive** in Command
+Search). CLI, Python, MCP and the Assistant use
 `map.reloadTiles={"index":0}`; `"name"` or catalog `"id"` can select the archive instead.
 No replacement path is accepted. This is a manual action: RustGIS does not watch the file for changes.
 It rereads that archive's metadata and tiles without clearing other archives or web layers.
