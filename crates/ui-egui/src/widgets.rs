@@ -163,7 +163,7 @@ pub fn why_disabled(app: &RustGisApp, id: &str) -> Option<&'static str> {
             .is_none_or(|layer| !crate::reloaddata::supported(layer))
             .then_some(tl_raw!("Select a layer linked to a local file or folder, or an editable GeoPackage layer."));
         #[cfg(target_arch = "wasm32")]
-        return Some("Reload Data from local files requires the desktop app.");
+        return Some(tl_raw!("Reload Data from local files requires the desktop app."));
     }
     app.session.registry.get(id).and_then(|s| (s.enabled)(&app.session))
 }
