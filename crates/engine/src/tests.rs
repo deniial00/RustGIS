@@ -34877,3 +34877,6 @@ fn bundled_ca_roots_are_said_once_a_session() {
     other.say_bundled_roots(true);
     assert_eq!(said(&other), 1);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod archive_render_revision;

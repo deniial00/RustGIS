@@ -3501,6 +3501,18 @@ fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
 /// Layout `li` as a PDF (kept as vectors; every map series page when `all`) or a PNG of the
 /// current page, at `dpi`.
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
+    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    let revisions = rustgis_render::layout::archive_revisions(layout, &s.project.maps);
+    let result = layout_bytes_inner(s, li, pdf, dpi, all);
+    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    revisions.finish_revision(
+        rustgis_render::layout::archive_revisions(layout, &s.project.maps),
+        Some(result),
+        "could not draw the page",
+    )?
+}
+
+fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
         s.warn(note);
@@ -3550,13 +3562,11 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
             // a memory budget.
             if pdf {
                 let (w, h) = (layout.width, layout.height);
-                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
-                    .ok_or("the page is too large to draw")?;
+                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)?;
                 if drawing.overflowed() {
                     pages_pictured.push(page + 1);
                     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-                    let img =
-                        rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
+                    let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info)?;
                     out.push(rustgis_render::pdf::Page::new(&img, w, h));
                 } else {
                     frames_pictured.extend(pictured);
@@ -3571,7 +3581,7 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
                     ));
                 }
             } else {
-                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
+                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info)?;
                 png = Some(img.encode_png().map_err(|e| e.to_string())?);
             }
             // A cancelled export stops here, its layout put back below.
@@ -3680,8 +3690,7 @@ fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     };
     // Rendering borrows the current layout; it does not step or modify the series page.
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
-        .ok_or("could not draw the page; check its map sources and export size")?;
+    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)?;
     pictured_notices(s, &pictured, &[]);
     Ok(text)
 }

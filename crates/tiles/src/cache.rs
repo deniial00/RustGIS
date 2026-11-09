@@ -188,6 +188,16 @@ fn archive_epochs() -> &'static Mutex<HashMap<String, u64>> {
     &E
 }
 
+/// The most recent reload of just these archives. Reload stamps increase globally, so any
+/// selected source changing increases this maximum; unrelated reloads and tile arrivals do not.
+/// The caller retains the source paths and can compare again without allocating a snapshot.
+pub fn archive_revision<'a>(archives: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut archives = archives.into_iter();
+    let Some(first) = archives.next() else { return 0 };
+    let epochs = archive_epochs().lock().unwrap_or_else(|e| e.into_inner());
+    std::iter::once(first).chain(archives).filter_map(|url| epochs.get(url).copied()).max().unwrap_or(0)
+}
+
 pub(crate) fn archive_epoch(url: &str) -> u64 {
     archive_epochs().lock().unwrap_or_else(|e| e.into_inner()).get(resource_of(url)).copied().unwrap_or(0)
 }
@@ -776,8 +786,8 @@ pub fn forget(url: &str) {
 /// derived styles. Call only after uncached validation succeeds. Older answers are discarded.
 pub fn reload_archive(url: &str) {
     let mut epochs = archive_epochs().lock().unwrap_or_else(|e| e.into_inner());
-    let epoch = epochs.entry(url.to_string()).or_default();
-    *epoch = epoch.wrapping_add(1);
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    epochs.insert(url.to_string(), NEXT.fetch_add(1, Ordering::Relaxed));
     lock().forget_archive(url);
     let abandoned = crate::pmtiles::reload_archive(url);
     crate::mbtiles::reload_archive(url);

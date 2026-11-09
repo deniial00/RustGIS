@@ -363,6 +363,8 @@ at a time. If its project, map, archive or presentation changes before it lands,
 left unapplied: retry on the intended target. A paused attached batch also rejects its remaining
 commands if the project or selected map changes. Attached MCP `run` scripts and file-bridge
 scripts validate inline, without reload status or cancellation during validation.
+Cancelling MBTiles validation also interrupts SQLite queries used to infer missing zoom metadata.
+It cannot preempt a filesystem operation blocked inside the operating system.
 
 Approval binds the selected archive's owning map, stack position and source route, not just its
 name or index. Retargeting or reordering it requires reviewing the operation again.
@@ -374,6 +376,8 @@ It also checks file identity and change time where the platform exposes them, pl
 Metadata that cannot be read is an error, not permission to apply an unchecked result.
 These checks are not an immutable snapshot: a rewrite that leaves the same observations, or a
 write after the final check, may escape detection. Finish writing before reloading or repairing.
+If an archive is reloaded during a map or layout export, the export refuses a mixed-version
+result. Wait for the reload to finish and retry the export.
 
 Reload first checks that the file can be read. If it is missing, unreadable or invalid, a notice
 explains the failure and the existing layer and retained cached data are left unchanged.

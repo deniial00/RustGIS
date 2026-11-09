@@ -389,35 +389,72 @@ mod file {
 
     /// Reads metadata and one bounded raster sample on a fresh connection, retaining nothing.
     /// Vector archives get only a tile-page readability probe; an empty archive has no sample.
+    /// The current progress probe and request predicate cancel SQLite scans on this connection.
     pub fn read_info_path(path: &Path) -> Result<(Info, Option<Vec<u8>>), String> {
-        let c = open(path)?;
-        let info = read_info(&c, path)?;
-        let sql = |e: rusqlite::Error| format!("{}: not a readable MBTiles file ({e})", path.display());
-        // Even complete metadata must not hide a damaged first tile page. Vector payloads are
-        // not decoded here; the tiles layer decodes the raster sample before accepting a reload.
-        let sample = if info.format.is_vector() {
-            let _: Option<Option<Vec<u8>>> =
-                c.query_row("SELECT substr(tile_data, 1, 16) FROM tiles LIMIT 1", [], |row| row.get(0)).optional().map_err(sql)?;
-            None
-        } else {
-            // Check the size before materializing a blob, as the normal tile reader does.
-            let tile: Option<(i64, Option<Vec<u8>>)> = c
-                .query_row(
-                    "SELECT length(tile_data), CASE WHEN length(tile_data) <= ?1 THEN tile_data END FROM tiles LIMIT 1",
-                    [MAX_TILE_BYTES as i64],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(sql)?;
-            match tile {
-                Some((len, _)) if len > MAX_TILE_BYTES as i64 => {
-                    return Err(format!("{}: raster sample of {len} bytes exceeds the {MAX_TILE_BYTES}-byte tile limit", path.display()));
-                }
-                Some((_, bytes)) => bytes,
-                None => None,
+        let still = crate::source::remote::current_still();
+        let cancelled = move || crate::progress::check().is_err() || still.as_ref().is_some_and(|s| !s());
+        if cancelled() {
+            return Err(crate::DataError::Cancelled.to_string());
+        }
+        // Latch callback cancellation: SQLite's "interrupted" error is not archive damage,
+        // even if a request predicate has changed again before the query unwinds.
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = (|| {
+            let mut c = open(path)?;
+            let poll = cancelled.clone();
+            let stopped = interrupted.clone();
+            c.progress_handler(
+                1000,
+                Some(move || {
+                    let stop = poll();
+                    if stop {
+                        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    stop
+                }),
+            )
+            .map_err(|e| format!("{}: cannot install MBTiles cancellation handler ({e})", path.display()))?;
+            let info = read_info(&c, path)?;
+            if cancelled() {
+                return Err(crate::DataError::Cancelled.to_string());
             }
-        };
-        Ok((info, sample))
+            let sql = |e: rusqlite::Error| format!("{}: not a readable MBTiles file ({e})", path.display());
+            // Even complete metadata must not hide a damaged first tile page. Vector payloads are
+            // not decoded here; the tiles layer decodes the raster sample before accepting a reload.
+            let sample = if info.format.is_vector() {
+                let _: Option<Option<Vec<u8>>> =
+                    c.query_row("SELECT substr(tile_data, 1, 16) FROM tiles LIMIT 1", [], |row| row.get(0)).optional().map_err(sql)?;
+                None
+            } else {
+                // Check the size before materializing a blob, as the normal tile reader does.
+                let tile: Option<(i64, Option<Vec<u8>>)> = c
+                    .query_row(
+                        "SELECT length(tile_data), CASE WHEN length(tile_data) <= ?1 THEN tile_data END FROM tiles LIMIT 1",
+                        [MAX_TILE_BYTES as i64],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(sql)?;
+                match tile {
+                    Some((len, _)) if len > MAX_TILE_BYTES as i64 => {
+                        return Err(format!(
+                            "{}: raster sample of {len} bytes exceeds the {MAX_TILE_BYTES}-byte tile limit",
+                            path.display()
+                        ));
+                    }
+                    Some((_, bytes)) => bytes,
+                    None => None,
+                }
+            };
+            Ok((info, sample))
+        })();
+        // Tiny queries may finish before the first SQLite callback; check success and error
+        // boundaries too, including a failed open. No fresh handle or hook enters the pool.
+        if interrupted.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
+            Err(crate::DataError::Cancelled.to_string())
+        } else {
+            result
+        }
     }
 
     fn read_info(c: &Connection, path: &Path) -> Result<Info, String> {
@@ -490,6 +527,139 @@ mod file {
     #[cfg(test)]
     mod reload_tests {
         use super::*;
+
+        struct CancelAfterPolls {
+            polls: std::sync::atomic::AtomicUsize,
+            after: usize,
+        }
+
+        impl CancelAfterPolls {
+            fn new(after: usize) -> std::sync::Arc<Self> {
+                std::sync::Arc::new(Self { polls: std::sync::atomic::AtomicUsize::new(0), after })
+            }
+
+            fn polls(&self) -> usize {
+                self.polls.load(std::sync::atomic::Ordering::Relaxed)
+            }
+        }
+
+        impl crate::progress::Probe for CancelAfterPolls {
+            fn cancelled(&self) -> bool {
+                self.polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 >= self.after
+            }
+
+            fn begin(&self, _: u64) {}
+
+            fn advance(&self, _: u64) {}
+        }
+
+        #[test]
+        fn candidate_missing_zoom_scan_cancels_inside_sql_and_retries_cleanly() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-cancel-scan-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE metadata(name TEXT,value TEXT);
+                 CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);
+                 INSERT INTO metadata VALUES('format','png'),('minzoom','2'),('maxzoom','7');
+                 WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<1023)
+                 INSERT INTO tiles SELECT 2+i%6,i,0,x'89504e470d0a1a0a' FROM n;",
+            )
+            .unwrap();
+            drop(c);
+
+            // The same small archive with complete zoom metadata needs only the entry and
+            // completion checks. Cancelling at poll four therefore requires SQLite's hook.
+            let complete = CancelAfterPolls::new(4);
+            {
+                let _installed = crate::progress::install(Some(complete.clone()));
+                let (info, _) = read_info_path(&path).unwrap();
+                assert_eq!((info.min_zoom, info.max_zoom), (2, 7));
+            }
+            assert!(complete.polls() < 4, "complete metadata unexpectedly ran a scan");
+            let c = Connection::open(&path).unwrap();
+            c.execute("DELETE FROM metadata WHERE name IN ('minzoom','maxzoom')", []).unwrap();
+            drop(c);
+
+            let scan = CancelAfterPolls::new(4);
+            {
+                let _installed = crate::progress::install(Some(scan.clone()));
+                assert_eq!(read_info_path(&path).unwrap_err(), crate::DataError::Cancelled.to_string());
+            }
+            assert_eq!(scan.polls(), 4, "the SQL callback must stop at the first cancelled poll");
+            assert!(!is_open(&path), "a cancelled fresh validator must not populate the pool");
+
+            let clean = CancelAfterPolls::new(usize::MAX);
+            {
+                let _installed = crate::progress::install(Some(clean.clone()));
+                let (info, sample) = read_info_path(&path).unwrap();
+                assert_eq!((info.min_zoom, info.max_zoom, info.format), (2, 7, super::super::Format::Png));
+                assert_eq!(sample.as_deref(), Some(b"\x89PNG\r\n\x1a\n".as_slice()));
+            }
+            assert!(clean.polls() > complete.polls() + 3, "the fixed scan must cross several SQLite callback intervals");
+            assert!(!is_open(&path), "a successful fresh validator must not populate the pool");
+            // A request revoked only during SQL must also latch cancellation, not relabel the
+            // interruption as a damaged archive when its predicate is live again afterwards.
+            let request_polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let polled = request_polls.clone();
+            crate::source::remote::with_still(
+                std::sync::Arc::new(move || polled.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 != 4),
+                || assert_eq!(read_info_path(&path).unwrap_err(), crate::DataError::Cancelled.to_string()),
+            );
+            assert_eq!(request_polls.load(std::sync::atomic::Ordering::Relaxed), 4);
+            assert!(!is_open(&path));
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn candidate_already_cancelled_stops_before_opening_the_file() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-cancel-missing-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let cancelled = CancelAfterPolls::new(1);
+            {
+                let _installed = crate::progress::install(Some(cancelled.clone()));
+                assert_eq!(read_info_path(&path).unwrap_err(), crate::DataError::Cancelled.to_string());
+            }
+            assert_eq!(cancelled.polls(), 1);
+            assert!(!is_open(&path));
+            assert!(
+                read_info_path(&path).unwrap_err().contains(&path.display().to_string()),
+                "a clean retry must report the real missing-file error"
+            );
+
+            let during_open = CancelAfterPolls::new(2);
+            {
+                let _installed = crate::progress::install(Some(during_open.clone()));
+                assert_eq!(read_info_path(&path).unwrap_err(), crate::DataError::Cancelled.to_string());
+            }
+            assert_eq!(during_open.polls(), 2, "a failed open still checks cancellation at its error boundary");
+        }
+
+        #[test]
+        fn candidate_small_queries_check_cancellation_at_completion() {
+            let path = std::env::temp_dir().join(format!("rustgis-mbtiles-cancel-small-{}.mbtiles", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE metadata(name TEXT,value TEXT);
+                 CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB);
+                 INSERT INTO metadata VALUES('format','pbf'),('minzoom','2'),('maxzoom','7');",
+            )
+            .unwrap();
+            drop(c);
+            // Neither short query reaches 1,000 VM instructions. Cancel after metadata and
+            // after the sample query must still refuse to publish a successful candidate.
+            for after in [2, 3] {
+                let cancelled = CancelAfterPolls::new(after);
+                let _installed = crate::progress::install(Some(cancelled));
+                assert_eq!(read_info_path(&path).unwrap_err(), crate::DataError::Cancelled.to_string());
+                assert!(!is_open(&path));
+            }
+            let (info, sample) = read_info_path(&path).unwrap();
+            assert_eq!((info.min_zoom, info.max_zoom), (2, 7));
+            assert!(sample.is_none());
+            std::fs::remove_file(path).unwrap();
+        }
 
         #[test]
         fn metadata_row_limit_is_explicit_and_retryable_for_both_readers() {
