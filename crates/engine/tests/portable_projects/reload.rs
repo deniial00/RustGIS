@@ -975,7 +975,9 @@ fn abandoned_reload_workspace(live: &Path) -> std::path::PathBuf {
     assert!(lock.try_lock().is_err(), "a live concrete reader owns an exclusive workspace lock");
     let abandoned = live.with_file_name(format!("reload-abandoned-{}", live.file_name().unwrap().to_string_lossy()));
     std::fs::create_dir(&abandoned).unwrap();
-    std::fs::write(abandoned.join("owner.lock"), []).unwrap();
+    // A crashed RustGIS left its own ownership marker, as the live workspace has.
+    let marker = std::fs::read(live.join("owner.lock")).unwrap();
+    std::fs::write(abandoned.join("owner.lock"), marker).unwrap();
     std::fs::write(abandoned.join("leftover"), b"crash-abandoned conversion").unwrap();
     age_reload_directory(&abandoned);
     abandoned

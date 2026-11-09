@@ -148,22 +148,66 @@ pub(crate) fn reset_to(s: &mut Session, p: Project) {
     reset(s, p);
 }
 
-/// A provider loss diagnostic whose first word is an integer feature or row count.
-fn counted_conversion_loss(note: &str) -> Option<(&str, u128, &str)> {
+/// A provider loss diagnostic beginning with a definite or explicitly unknown item count.
+fn counted_conversion_loss(note: &str) -> Option<(&str, Option<u128>, &str)> {
     let (provider, body) = note.split_once(": ")?;
+    if let Some(tail) = body.strip_prefix("an unknown number of ") {
+        return Some((provider, None, tail));
+    }
     let (count, tail) = body.split_once(' ')?;
     if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some((provider, count.parse().ok()?, tail))
+    Some((provider, Some(count.parse().ok()?), tail))
 }
 
-/// Says fresh opening losses once per kind, summing leading provider counts across layers, and
-/// saved-conversion fallbacks once with the layer count and first failure. Ordinary source notes
-/// are not opening conversion diagnostics.
+struct ConversionLoss {
+    layers: usize,
+    first: String,
+    note: String,
+    total: Option<u128>,
+    unknown: bool,
+}
+
+impl ConversionLoss {
+    fn new(first: &str, note: String) -> Self {
+        let total = counted_conversion_loss(&note).and_then(|(_, count, _)| count);
+        let unknown = note.contains("an unknown number of");
+        Self { layers: 1, first: first.into(), note, total, unknown }
+    }
+
+    fn add(&mut self, note: &str) {
+        self.layers += 1;
+        let amount = counted_conversion_loss(note).and_then(|(_, count, _)| count);
+        self.total = self.total.zip(amount).and_then(|(total, amount)| total.checked_add(amount));
+        self.unknown |= note.contains("an unknown number of");
+    }
+
+    fn notice(self) -> String {
+        let Self { layers, first, note, total, unknown } = self;
+        if layers == 1 {
+            return format!("{first}: {note}");
+        }
+        let note = if let Some((provider, _, tail)) = counted_conversion_loss(&note)
+            && (total.is_some() || unknown)
+        {
+            let count = total.filter(|_| !unknown).map_or_else(|| "an unknown number of".into(), |n| n.to_string());
+            format!("{provider}: {count} {tail}")
+        } else if unknown {
+            format!("{note} (count shown is {first}'s; others vary; total: an unknown number of affected items)")
+        } else {
+            format!("{note} (count shown is {first}'s; others vary)")
+        };
+        format!("{layers} layers: {note}; first: {first}")
+    }
+}
+
+/// Says fresh opening losses once per kind, summing leading provider counts only when all are
+/// known, and saved-conversion fallbacks once with the layer count and first failure. Ordinary
+/// source notes are not opening conversion diagnostics.
 pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
     let mut fallback: Option<(usize, String, String)> = None;
-    let mut losses = std::collections::BTreeMap::<(String, String), (usize, String, String, Option<u128>)>::new();
+    let mut losses = std::collections::BTreeMap::<(String, String), ConversionLoss>::new();
     for l in s.project.maps.iter_mut().flat_map(|m| &mut m.layers) {
         let Some(source) = l.source.as_mut() else { continue };
         if let Some(note) = source.take_conversion_fallback() {
@@ -191,10 +235,7 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
             let provider = note.split_once(": ").map_or("", |(provider, _)| provider);
             let key = (provider.to_owned(), kind.to_owned());
             if seen.insert(key.clone()) {
-                let amount = counted_conversion_loss(&note).map(|(_, count, _)| count);
-                let entry = losses.entry(key).or_insert_with(|| (0, l.name.clone(), note, Some(0)));
-                entry.0 += 1;
-                entry.3 = entry.3.zip(amount).and_then(|(total, amount)| total.checked_add(amount));
+                losses.entry(key).and_modify(|loss| loss.add(&note)).or_insert_with(|| ConversionLoss::new(&l.name, note));
             }
         }
     }
@@ -206,20 +247,8 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
         };
         s.notify(text, false);
     }
-    for (_, (count, name, note, total)) in losses {
-        let text = if count == 1 {
-            format!("{name}: {note}")
-        } else {
-            let note = if let Some(total) = total
-                && let Some((provider, _, tail)) = counted_conversion_loss(&note)
-            {
-                format!("{provider}: {total} {tail}")
-            } else {
-                note
-            };
-            format!("{count} layers: {note}; first: {name}")
-        };
-        s.notify(text, false);
+    for loss in losses.into_values() {
+        s.notify(loss.notice(), false);
     }
 }
 
@@ -617,4 +646,44 @@ fn save_as_inputs(input: &super::InputContext<'_>, p: &Value) -> Result<super::I
     let mut inputs = super::items::project_inputs(input, p)?;
     inputs.state = json!({"path":ps(p,"path").ok_or("path is required")?});
     Ok(inputs)
+}
+
+#[cfg(test)]
+mod conversion_loss_tests {
+    use super::*;
+
+    #[test]
+    fn grouped_unreadable_rows_qualify_the_first_layers_count() {
+        let mut loss = ConversionLoss::new("First", "3 rows could not be read while checking the replacement".into());
+        loss.add("4 rows could not be read while checking the replacement");
+        let notice = loss.notice();
+        assert_eq!(
+            notice,
+            "2 layers: 3 rows could not be read while checking the replacement (count shown is First's; others vary); first: First"
+        );
+    }
+
+    #[test]
+    fn grouped_conversion_losses_keep_unknown_totals_in_either_order() {
+        let definite = "GDAL: 3 features of another geometry type were left out";
+        let unknown = "GDAL: an unknown number of features of another geometry type may have been left out";
+        for notes in [[definite, unknown], [unknown, definite]] {
+            let mut loss = ConversionLoss::new("First", notes[0].into());
+            loss.add(notes[1]);
+            let notice = loss.notice();
+            assert!(notice.starts_with("2 layers: GDAL: an unknown number of features of another geometry type"), "{notice}");
+            assert!(!notice.contains("GDAL: 3 "), "{notice}");
+        }
+    }
+
+    #[test]
+    fn grouped_known_conversion_counts_sum_and_single_layers_stay_unchanged() {
+        let note = "GDAL: 3 features of another geometry type were left out";
+        let mut loss = ConversionLoss::new("First", note.into());
+        loss.add("GDAL: 4 features of another geometry type were left out");
+        assert_eq!(loss.notice(), "2 layers: GDAL: 7 features of another geometry type were left out; first: First");
+
+        let single = ConversionLoss::new("First", note.into());
+        assert_eq!(single.notice(), format!("First: {note}"));
+    }
 }

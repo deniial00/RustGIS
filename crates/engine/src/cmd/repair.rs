@@ -312,7 +312,7 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
             }
         }
         Candidate::Editable(new) => {
-            let super::gpkg::Candidate { dataset, edit, notes, .. } = *new;
+            let super::gpkg::Candidate { mut dataset, edit, notes, .. } = *new;
             let (Some(current), Snapshot::Editable { edit: prior, features, fields, geometry, .. }) = (&l.gpkg, &input.source) else {
                 return Err(stale());
             };
@@ -336,6 +336,7 @@ fn install(s: &mut Session, prepared: Prepared) -> Result<(), String> {
             {
                 l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol::default_for(dataset.geometry_type, seed));
             }
+            dataset.name.clone_from(&l.dataset.name);
             l.dataset = dataset;
             l.touch_replacement();
             l.gpkg = Some(edit);

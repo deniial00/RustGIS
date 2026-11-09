@@ -26,6 +26,7 @@ pub(crate) fn cache_dir(env: &str, sub: &str) -> Option<PathBuf> {
 }
 
 const RELOAD_PREFIX: &str = "reload-";
+const RELOAD_OWNER_MARKER: &[u8] = b"RustGIS reload workspace v1\n";
 
 /// A private conversion directory and its live-owner lock. Close the lock before deleting the
 /// directory (including on Windows); concrete readers retain this owner until their last read.
@@ -48,6 +49,8 @@ impl ReloadWorkspace {
 
 /// Reclaims a bounded number of crash-abandoned conversions before allocating a new workspace.
 pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<ReloadWorkspace>> {
+    use std::io::{Read, Write};
+
     std::fs::create_dir_all(cache)?;
     if let Ok(entries) = std::fs::read_dir(cache) {
         for entry in entries.take(4096).flatten() {
@@ -62,10 +65,16 @@ pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<R
                 continue;
             }
             let lock_path = path.join("owner.lock");
-            let lock = match std::fs::File::options().read(true).write(true).open(&lock_path) {
+            let mut lock = match std::fs::File::options().read(true).write(true).open(&lock_path) {
                 Ok(lock) => lock,
                 Err(_) => continue,
             };
+            // A matching name and age alone do not establish ownership in a shared cache.
+            // Read through the same handle we will lock, before Windows locks prevent reads.
+            let mut marker = [0; RELOAD_OWNER_MARKER.len()];
+            if lock.read_exact(&mut marker).is_err() || marker.as_slice() != RELOAD_OWNER_MARKER {
+                continue;
+            }
             if lock.try_lock().is_ok() {
                 // Windows cannot remove an open lock file. No writer claims an existing
                 // workspace; once unlocked, only other collectors can race its removal.
@@ -75,8 +84,10 @@ pub(crate) fn reload_workspace(cache: &Path) -> std::io::Result<std::sync::Arc<R
         }
     }
     let dir = tempfile::Builder::new().prefix(RELOAD_PREFIX).tempdir_in(cache)?;
-    let lock = std::fs::File::options().read(true).write(true).create_new(true).open(dir.path().join("owner.lock"))?;
+    let mut lock = std::fs::File::options().read(true).write(true).create_new(true).open(dir.path().join("owner.lock"))?;
     lock.try_lock().map_err(std::io::Error::other)?;
+    lock.write_all(RELOAD_OWNER_MARKER)?;
+    writeln!(lock, "{}", std::process::id())?;
     Ok(std::sync::Arc::new(ReloadWorkspace { _lock: lock, dir }))
 }
 
@@ -279,7 +290,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let abandoned = cache.path().join("reload-installing");
         std::fs::create_dir(&abandoned).unwrap();
-        std::fs::write(abandoned.join("owner.lock"), []).unwrap();
+        std::fs::write(abandoned.join("owner.lock"), RELOAD_OWNER_MARKER).unwrap();
         std::fs::write(abandoned.join("converted.fgb"), b"saved conversion").unwrap();
         let fresh = reload_workspace(cache.path()).unwrap();
         assert!(abandoned.exists(), "the creator has 60 seconds to lock its newly installed lock file");
@@ -287,6 +298,26 @@ mod tests {
         let next = reload_workspace(cache.path()).unwrap();
         assert!(!abandoned.exists(), "an old unlocked workspace is crash-abandoned");
         assert!(fresh.path().exists() && next.path().exists(), "live owners remain untouched");
+    }
+
+    #[test]
+    fn reload_collection_keeps_old_unlocked_foreign_owner_locks_intact() {
+        let cache = tempfile::tempdir().unwrap();
+        let foreign = cache.path().join("reload-foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        let lock_path = foreign.join("owner.lock");
+        std::fs::write(&lock_path, b"another application's workspace\n").unwrap();
+        let contents = foreign.join("not-rustgis.txt");
+        std::fs::write(&contents, b"unrelated data").unwrap();
+        age_directory(&foreign, 3601);
+
+        let live = reload_workspace(cache.path()).unwrap();
+
+        assert_eq!(std::fs::read(contents).unwrap(), b"unrelated data");
+        assert_eq!(std::fs::read(lock_path).unwrap(), b"another application's workspace\n");
+        let marker = std::fs::read(live.path().join("owner.lock")).unwrap();
+        assert!(marker.starts_with(RELOAD_OWNER_MARKER));
+        assert_eq!(&marker[RELOAD_OWNER_MARKER.len()..], format!("{}\n", std::process::id()).as_bytes());
     }
 
     #[test]

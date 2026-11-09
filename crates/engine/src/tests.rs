@@ -34275,6 +34275,30 @@ fn prepared_reload_never_discards_geopackage_edits_or_baselines_changed_after_co
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn prepared_editable_reload_preserves_a_name_changed_while_reading() {
+    use rustgis_analysis::control::Control;
+    use rustgis_data::{Coord, Dataset, Geometry, GeometryType, raster::Crs, source::gpkg};
+    let path = std::env::temp_dir().join(format!("rustgis-prepared-reload-renamed-{}.gpkg", std::process::id()));
+    let mut ds = Dataset::new("Rows", GeometryType::Point, vec![]);
+    ds.push(Some(Geometry::Point(Coord::new(2.0, 48.0))), vec![]);
+    gpkg::write_in(&ds, &path, Crs::LonLat).unwrap();
+    let mut s = Session::new(Project::default());
+    let id = s.run("gpkg.addLayer", &json!({"path": path, "table": "Rows"})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let read = crate::cmd::reads::read_ahead(&mut s, "layer.reloadData", &json!({"layer": id})).unwrap().run(&Control::new()).unwrap();
+    s.run("layer.rename", &json!({"layer": id, "name": "Renamed while reading"})).unwrap();
+
+    crate::cmd::reads::read_land(&mut s, read).unwrap();
+
+    let layer = s.map().layer(id).unwrap();
+    assert_eq!(layer.name, "Renamed while reading");
+    assert_eq!(layer.dataset.name, "Renamed while reading");
+    assert_eq!(layer.dataset.features.len(), 1);
+    drop(s);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn prepared_zarr_reload_uses_worker_pixels_and_refuses_configuration_time_or_opening_drift() {
     use rustgis_analysis::control::Control;
     let _cache = zarr_cache_lock();
