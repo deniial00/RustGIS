@@ -1244,6 +1244,12 @@ mod tests {
         // A scheme-less address says its query went; a `#` in a file name is part of the name.
         assert_eq!(address_in_message("data.tif?custom=hidden unescaped hidden"), "data.tif[query omitted]");
         assert_eq!(message_with_address("/data/plot#1.gpkg", "no such table"), "/data/plot#1.gpkg: no such table");
+        // A secret after a scheme-less `#` is still a field, and goes; a `#` before `?` stays in
+        // the path while the query is cut.
+        let shown = address_in_message("host/data#token=hidden");
+        assert!(shown.starts_with("host/data#") && !shown.contains("hidden"), "{shown}");
+        assert_eq!(redact(&shown), shown);
+        assert_eq!(address_in_message("/data/plot#1.gpkg?token=hidden"), "/data/plot#1.gpkg[query omitted]");
     }
 
     #[test]

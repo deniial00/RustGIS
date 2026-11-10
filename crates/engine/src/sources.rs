@@ -316,7 +316,38 @@ pub fn holds_plain_key(params: &serde_json::Value) -> bool {
 /// A known source address safe to compose into a repeatedly redacted diagnostic, without
 /// publishing a web-login runtime binding or the credentials inside a source wrapper.
 pub fn address_in_message(address: &str) -> String {
-    rustgis_data::diagnostics::address_in_message(&redact(address))
+    let mut shown = rustgis_data::diagnostics::address_in_message(&redact(address));
+    // Source redaction can take out a secret query whole; the diagnostic label still says one went.
+    let raw = rustgis_data::diagnostics::address_in_message(address);
+    if let Some(marker) = ["[query omitted]", "[fragment omitted]"].into_iter().find(|m| raw.ends_with(m))
+        && !shown.ends_with(marker)
+        && !shown.ends_with("omitted]")
+    {
+        shown.push_str(marker);
+    }
+    shown
+}
+
+/// An error naming a long known address shortened to `limit` characters, then `reason` (fixed
+/// prose, not from the network). A trailing omission marker (`[query omitted]`) is kept whole
+/// and the address before it is cut instead, marked `…`; a cut never leaves half a marker. The
+/// shortened address is already sanitized, so it isn't parsed again as an address.
+pub fn shortened_message_with_address(address: &str, limit: usize, reason: &str) -> String {
+    let full = address_in_message(address);
+    if full.chars().count() <= limit {
+        return message_with_address(address, reason);
+    }
+    let (head, marker) = match full.rfind('[') {
+        Some(at) if full.ends_with(']') => full.split_at(at),
+        _ => (full.as_str(), ""),
+    };
+    let mut shown: String = head.chars().take(limit.saturating_sub(marker.chars().count() + 1)).collect();
+    if let Some(at) = shown.rfind('[').filter(|&at| !shown.get(at..).unwrap_or("").contains(']')) {
+        shown.truncate(at);
+    }
+    shown.push('…');
+    shown.push_str(marker);
+    format!("{shown}: {reason}")
 }
 
 /// Names a known source while keeping its failure reason. Exact address occurrences are
@@ -859,7 +890,7 @@ MIIE
             assert_eq!(crate::Session::redacted(text).as_str(), text);
             // An error naming the address it refused keeps those words, and its key stays out.
             let error = message_with_address("https://h.example/a?token=hidden", text);
-            assert_eq!(error, format!("https://h.example/a: {text}"));
+            assert_eq!(error, format!("https://h.example/a[query omitted]: {text}"));
             assert_eq!(crate::Session::redacted(&error).as_str(), error);
         }
         // Anything after the scheme is an address: what can hold a credential goes. A hint's
