@@ -36,6 +36,56 @@ pub struct EditCounts {
     pub deleted: usize,
 }
 
+/// Whether a retained display expression reads area; stale field references do not count.
+fn has_area_display(l: &rustgis_map::Layer) -> bool {
+    let uses_area =
+        |text: &str| rustgis_data::query::parse_fields(text, &l.dataset).is_ok_and(|expr| rustgis_data::query::uses_area(&expr));
+    let by = &l.symbol_by;
+    l.definition_query
+        .as_deref()
+        .into_iter()
+        .chain(l.display_filters.iter().map(|filter| filter.where_.as_str()))
+        .chain(l.renderer.expression())
+        .chain([&by.size, &by.fill, &by.stroke, &by.stroke_width, &by.angle].into_iter().filter_map(|text| text.as_deref()))
+        .chain(std::iter::once(&l.labels.default).chain(l.labels.classes.iter()).flat_map(|class| {
+            [&class.where_, &class.by.text, &class.by.size, &class.by.color, &class.by.angle].into_iter().filter_map(|text| text.as_deref())
+        }))
+        .any(uses_area)
+}
+
+/// Explain unavailable areas in retained display expressions without discarding their text.
+pub(crate) fn display_area_message(l: &rustgis_map::Layer) -> Option<String> {
+    display_area_messages(std::iter::once(l))
+}
+
+/// Count unavailable values across affected layers in one notice, naming the read scope.
+pub(crate) fn display_area_messages<'a>(layers: impl Iterator<Item = &'a rustgis_map::Layer>) -> Option<String> {
+    let (mut rings, mut features, mut names, mut windowed) = (0usize, 0usize, Vec::new(), false);
+    for layer in layers.filter(|layer| has_area_display(layer)) {
+        let before = features;
+        let counts = layer
+            .source
+            .as_ref()
+            .and_then(|source| source.unavailable_areas(&layer.dataset.features))
+            .unwrap_or_else(|| rustgis_map::source::AmbiguousAreas::from_features(&layer.dataset.features));
+        rings = rings.saturating_add(counts.rings);
+        features = features.saturating_add(counts.features);
+        if features > before {
+            names.push(layer.name.clone());
+            windowed |= layer.source.is_some();
+        }
+    }
+    if rings == 0 {
+        return None;
+    }
+    let scope = if windowed { "; streamed-layer counts cover only decoded features for the current views" } else { "" };
+    Some(format!(
+        "{} layer(s) ({}): area is ambiguous for {rings} ring(s) in {features} feature(s): a ring through both poles winds beyond one whole surface{scope}; area values for affected features are unavailable; saved display expressions are retained",
+        names.len(),
+        crate::names_said(&names)
+    ))
+}
+
 /// Editing is on and a feature layer is active.
 pub(crate) fn need_editable(s: &Session) -> Option<&'static str> {
     if !s.map().editing.settings.enabled {
@@ -131,13 +181,33 @@ pub(crate) fn apply_with(s: &mut Session, id: u32, changes: Vec<Change>, new_def
     // What each calculation rule's whole-number field cut: the rule and the field's name. Each
     // rule's cuts are said, even when a later rule writes the same field: it may read them.
     let mut cuts: Vec<(String, String, super::edit::Cuts)> = Vec::new();
+    // Parsing against the fields separates a measurement failure from a stale rule. The latter
+    // may still be skipped below, but an ambiguous area must never disable a valid rule.
+    let metadata = rustgis_data::Dataset::new(l.dataset.name.clone(), l.dataset.geometry_type, l.dataset.fields.clone());
+    let uses_area = |text: &str| rustgis_data::query::parse(text, &metadata).is_ok_and(|expr| rustgis_data::query::uses_area(&expr));
+    let display_area = has_area_display(l);
+    let rule_area = l
+        .design
+        .rules
+        .iter()
+        .any(|rule| (rule.kind == RuleKind::Constraint || l.dataset.field_index(&rule.field).is_some()) && uses_area(&rule.expression));
+    if (display_area || rule_area)
+        && let Some(message) = rustgis_data::ambiguous_area_message(changes.iter().filter_map(|change| {
+            let feature = l.dataset.features.get(change.row?)?;
+            (rule_area || change.before.as_ref().is_none_or(|before| before.geometry != feature.geometry))
+                .then_some(feature.geometry.as_ref())
+                .flatten()
+        }))
+    {
+        return Err(format!("{}: {message}", l.dataset.name));
+    }
     // Calculation rules, in order.
     for rule in l.design.rules.iter().filter(|r| r.kind == RuleKind::Calculation) {
         let Some(fi) = l.dataset.field_index(&rule.field) else { continue };
         let ty = l.dataset.fields.get(fi).map(|f| f.ty).unwrap_or(FieldType::Text);
         // A rule that no longer reads (its field was removed, or a hand-edited file) is skipped
         // rather than blocking every edit.
-        let Ok(calc) = super::edit::Calculation::parse(&rule.expression, &l.dataset) else { continue };
+        let Ok(calc) = super::edit::Calculation::parse(&rule.expression, &metadata) else { continue };
         let mut cut = super::edit::Cuts::default();
         for r in &rows {
             let (v, c) = super::edit::coerce_cut(calc.eval(&l.dataset, *r), ty);
@@ -157,7 +227,7 @@ pub(crate) fn apply_with(s: &mut Session, id: u32, changes: Vec<Change>, new_def
         .iter()
         .filter(|r| r.kind == RuleKind::Constraint)
         .filter_map(|rule| {
-            rustgis_data::query::parse(&rule.expression, &l.dataset).ok().map(|e| (rule.name.clone(), rule.expression.clone(), e))
+            rustgis_data::query::parse(&rule.expression, &metadata).ok().map(|e| (rule.name.clone(), rule.expression.clone(), e))
         })
         .collect();
     let changed_fields = |r: usize| -> Option<Vec<bool>> {
@@ -939,8 +1009,8 @@ fn polar_transform(
     })
 }
 
-/// [`modify`] for a move, turn or scale, which leaves a vertex missing a coordinate where it was:
-/// says how many of the features it changed have one.
+/// [`modify`] for a move, turn or scale, which leaves a vertex missing a coordinate (or with an
+/// infinite one) where it was: says how many of the features it changed have one.
 fn move_features(s: &mut Session, mut change: impl FnMut((u32, usize), &Geometry) -> Result<Option<Geometry>, String>) -> CmdResult {
     let mut missing = 0usize;
     let done = modify(s, |key, g| {
@@ -953,7 +1023,7 @@ fn move_features(s: &mut Session, mut change: impl FnMut((u32, usize), &Geometry
         Ok(moved)
     })?;
     if missing > 0 {
-        s.warn(format!("{missing} feature(s) have a vertex missing a coordinate, which was left where it was"));
+        s.warn(format!("{missing} feature(s) have a vertex missing a coordinate or with an infinite one, which was left where it was"));
     }
     Ok(done)
 }
@@ -986,7 +1056,7 @@ fn modify(s: &mut Session, mut change: impl FnMut((u32, usize), &Geometry) -> Re
 fn set_geometry(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let row = p.get("row").and_then(Json::as_u64).ok_or("row is required")? as usize;
-    let g = p.get("geometry").and_then(rustgis_data::io::geometry_from_geojson).ok_or("geometry must be a GeoJSON geometry")?;
+    let g = super::edit::geometry_param(p)?;
     replace_geometry(s, id, row, g)?;
     Ok(Json::Null)
 }
@@ -1689,6 +1759,17 @@ fn archive_restore(s: &mut Session, p: &Json) -> CmdResult {
             (None, None) => {}
         }
     }
+    if (has_area_display(l)
+        || l.design.rules.iter().any(|rule| {
+            rule.kind == RuleKind::Constraint
+                && rustgis_data::query::parse_fields(&rule.expression, &l.dataset).is_ok_and(|expr| rustgis_data::query::uses_area(&expr))
+        }))
+        && let Some(message) = rustgis_data::ambiguous_area_message(
+            touched.iter().filter_map(|(fid, _)| l.dataset.features.get(*index.get(fid)?)?.geometry.as_ref()),
+        )
+    {
+        return Err(format!("{}: {message}", l.dataset.name));
+    }
     // The restore is itself archived and counted, so it can be restored past too.
     let time = now();
     let mut counts = EditCounts::default();
@@ -1981,21 +2062,35 @@ fn topology_validate(s: &mut Session, p: &Json) -> CmdResult {
     // Rules whose check stopped early (an error or work limit), or measured some part more coarsely
     // than it's meant to (a line winding round a pole many times): their counts may be off.
     let mut incomplete = Vec::new();
+    // Polygons a check had to leave out, by rule.
+    let mut skipped = Vec::new();
     for rule in s.map().editing.topology.clone() {
         let Some(l) = s.map().layer_by_name(rule.layer()) else { continue };
         let rows: Vec<usize> = l.visible_rows().iter().enumerate().filter(|(_, v)| **v).map(|(i, _)| i).collect();
+        rustgis_analysis::validate_latitudes(&l.dataset, rows.iter().copied())?;
         let found = match &rule {
             TopologyRule::MustNotOverlap { .. } => t::overlaps(&l.dataset, &rows),
             TopologyRule::MustNotHaveGaps { .. } => t::gaps(&l.dataset, &rows),
             TopologyRule::MustNotSelfIntersect { .. } => t::self_intersections(&l.dataset, &rows),
             TopologyRule::MustNotHaveDangles { .. } => t::dangles(&l.dataset, &rows, tol),
             TopologyRule::MustBeCoveredBy { by, .. } => match s.map().layer_by_name(by) {
-                Some(b) => t::not_covered(&l.dataset, &rows, &b.dataset),
+                Some(b) => {
+                    rustgis_analysis::validate_latitudes(&b.dataset, 0..b.dataset.features.len())?;
+                    t::not_covered(&l.dataset, &rows, &b.dataset)
+                }
                 None => continue,
             },
         };
-        if !found.complete {
+        if !found.complete || found.skipped > 0 {
             incomplete.push(rule.label().to_string());
+        }
+        if found.skipped > 0 {
+            // The features left out are the covering layer's.
+            let of = match &rule {
+                TopologyRule::MustBeCoveredBy { by, .. } => by.as_str(),
+                _ => l.name.as_str(),
+            };
+            skipped.push(format!("{} on '{}': {} feature(s) of '{}'", rule.label(), l.name, found.skipped, of));
         }
         errors.extend(found.errors.into_iter().map(|e| crate::TopologyIssue {
             rule: rule.label().to_string(),
@@ -2007,9 +2102,15 @@ fn topology_validate(s: &mut Session, p: &Json) -> CmdResult {
     }
     if !incomplete.is_empty() {
         s.warn(format!(
-            "{} topology rule(s) weren't checked completely ({}): a check stopped early, or measured a line winding round a pole coarsely, so their counts may be off",
+            "{} topology rule(s) weren't checked completely ({}): a check stopped early, left out a polygon, or measured a line winding round a pole coarsely, so their counts may be off",
             incomplete.len(),
             incomplete.join(", ")
+        ));
+    }
+    if !skipped.is_empty() {
+        s.warn(format!(
+            "Polygons left out of the check at a pole (a coordinate missing or infinite, or a million turns around), so its result there may be wrong: {}",
+            skipped.join("; ")
         ));
     }
     let n = errors.len();

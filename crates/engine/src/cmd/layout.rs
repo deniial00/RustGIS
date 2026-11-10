@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).inputs(publication_inputs).roles(&[]).effects(crate::policy::Effects::NONE).params(
-            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite and each arrangement by name laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "colorbar"?: "auto" (the default: the top visible raster with a colour scale gets one, under the legend in its box) | "none" (no colorbar, and the legend's box has no room for one), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite and each arrangement by name laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.arrangement", "Favourite Arrangement", "Publish › Layout", arrangement).roles(&[]).effects(crate::policy::Effects::NONE).view().params(
             r#"{"favourite"?: "classic" (the locator top left, the north arrow top right, the legend bottom left, the scale bar bottom right) | "mirrored" | "legendRight" | "legendTop" | {"locator", "northArrow", "legend", "scaleBar": "top-left"|"top-right"|"bottom-left"|"bottom-right", each a corner of its own}} → the favourite arrangement of publication layouts (kept with the app's preferences), its corners and the arrangements by name; with no favourite given, it is only shown"#,
@@ -76,6 +76,9 @@ pub fn commands() -> Vec<C> {
             let mut l = s.project.layouts.get(i).ok_or("open a layout first")?.clone();
             l.name = super::copy_name(ps(p, "newName"), &l.name, |n| s.project.layouts.iter().any(|x| x.name.eq_ignore_ascii_case(n)));
             let name = l.name.clone();
+            if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
+                return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
+            }
             s.project.layouts.insert(i + 1, l);
             s.active_layout = Some(i + 1);
             Ok(json!({"name": name, "layout": i + 1}))
@@ -123,7 +126,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layout"?}"#),
         C::new("layout.export", "Export Layout", "Publish › Output", |s, p| super::exports::write_here(s, p, "layout.export")).inputs(layout_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page)}"#),
+            .params(r#"{"layout"?, "path": "*.png|*.pdf|*.svg" (PNG/SVG: current page; SVG: each element a group of its own; text and shapes as SVG, map frames and surrounds as vectors, rasters and tiles in them as pictures at dpi), "dpi"?: 72..600, "allPages"?: bool (PDF only; default true: every map series page, up to 500; false: the current page), "georeference"?: bool (PDF only; default true: map frames carry their coordinates, a GeoPDF; false: none)}"#),
         C::new("layout.save", "Save Layout File", "Publish › Save As", |s, p| {
             let path = ps(p, "path").ok_or("path is required")?;
             let l = active(s, p)?.clone();
@@ -318,6 +321,9 @@ pub(crate) fn new_layout(s: &mut Session, p: &Value) -> CmdResult {
             );
         }
         t => return Err(format!("unknown template '{t}'")),
+    }
+    if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
+        return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
     }
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
@@ -786,7 +792,7 @@ pub fn parse_arrangement(v: &Value) -> Result<Homes, String> {
                 let corner = o.get(*key).and_then(Value::as_str).map(str::trim).unwrap_or("");
                 homes[i] = CORNER_NAMES
                     .iter()
-                    .position(|c| *c == corner)
+                    .position(|c| c.eq_ignore_ascii_case(corner))
                     .ok_or_else(|| format!("arrangement: \"{key}\" is \"top-left\", \"top-right\", \"bottom-left\" or \"bottom-right\""))?;
             }
             if (0..4).any(|i| homes[..i].contains(&homes[i])) {
@@ -937,6 +943,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let headings = texts_of(p, "headings")?.unwrap_or_default();
     let comma = decimal_mark(p)?.unwrap_or(false);
     let locator = publication_locator(p, sheet)?;
+    let colorbar = publication_colorbar(p)?;
     // A style or an accent that isn't text is refused, as an unknown one is, rather than left out.
     for k in ["style", "accent"] {
         if p.get(k).is_some_and(|v| !v.is_null() && !v.is_string()) {
@@ -1783,8 +1790,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     surrounds.push((Surround::Arrow, aw, ah));
     // The topmost visible raster drawn on a ramp gets a colorbar, under the legend in its box (a
     // map whose theme is a raster has its key there, which the legend's rows don't give).
+    // `"colorbar": "none"` leaves it out, and its room in the box with it (#1680).
     let bar = rustgis_map::layout::colorbar_layer(s.map(), None)
-        .filter(|l| l.raster.as_ref().and_then(rustgis_map::layout::color_scale).is_some())
+        .filter(|l| colorbar && l.raster.as_ref().and_then(rustgis_map::layout::color_scale).is_some())
         .map(|l| l.name.clone());
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
@@ -2062,7 +2070,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             _ => (format!("the {} and the {last}", rest.join(", the ")), "sit"),
         };
         warnings
-            .push(format!("{names} {verb} on what the map shows, the freer corners having gone to the others: move by hand what matters"));
+            .push(format!("{names} {verb} on what the map shows, the freer places having gone to the others: move by hand what matters"));
     }
     for (i, (a, ra)) in placed.iter().enumerate() {
         for (b, rb) in placed.iter().skip(i + 1) {
@@ -2079,6 +2087,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     }
     // Every element by name and id, for `layout.update`.
     let elements: Vec<Value> = l.elements.iter().map(|e| json!({"element": e.id, "name": e.name, "kind": e.kind.code()})).collect();
+    if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
+        return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
+    }
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);
@@ -2550,6 +2561,11 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             let l = active(s, p)?;
             if let Some(ElementKind::MapFrame { grid, .. }) = l.element_mut(frame).map(|e| &mut e.kind) {
                 *grid = new;
+            }
+            if !b(p, "off").unwrap_or(false)
+                && let Some(text) = ps(p, "crs")
+            {
+                super::say_crs_note(s, text);
             }
             return Ok(json!({"element": frame}));
         }
@@ -3307,6 +3323,9 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     if new_columns.is_some() || (in_columns && refitted) {
         say_legend_fit(s, li, id);
     }
+    if let Some(text) = p.get("grid").and_then(|grid| grid.get("crs")).and_then(Value::as_str) {
+        super::say_crs_note(s, text);
+    }
     if let Some(w) = font_told {
         return Ok(json!({"warning": w}));
     }
@@ -3479,11 +3498,9 @@ fn series_page(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"page": page, "pages": n, "name": name}))
 }
 
-/// Renders a layout to PNG or PDF bytes. `all` renders every map series page (PDF only).
 /// What an export of a layout whose texts name installed families is told while the app is still
 /// indexing the fonts (its first seconds; the app's exports don't wait for them): those texts
-/// are drawn in their fallbacks. A script or the command line indexes them at
-/// once.
+/// are drawn in their fallbacks. A script or the command line indexes them at once.
 fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
     let named = layout.elements.iter().any(|e| matches!(&e.kind, ElementKind::Text { font_name: Some(_), .. }));
     (named && rustgis_render::families::available().is_none()).then_some(
@@ -3491,9 +3508,27 @@ fn named_fonts_unread(layout: &Layout) -> Option<&'static str> {
     )
 }
 
-/// Layout `li` as a PDF (kept as vectors; every map series page when `all`) or a PNG of the
-/// current page, at `dpi`.
+/// Layout `li` as a PDF (kept as vectors; every map series page when `all`; its map frames
+/// georeferenced) or a PNG of the current page, at `dpi`.
 pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) -> Result<Vec<u8>, String> {
+    layout_bytes_with(s, li, pdf, dpi, all, true)
+}
+
+/// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191).
+/// Returns an actionable error if a linked archive changes while the pages are drawn.
+pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
+    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    let revisions = rustgis_render::layout::archive_revisions(layout, &s.project.maps);
+    let result = layout_bytes_inner(s, li, pdf, dpi, all, georeference);
+    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    revisions.finish_revision(
+        rustgis_render::layout::archive_revisions(layout, &s.project.maps),
+        Some(result),
+        "could not draw the page",
+    )?
+}
+
+fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
         s.warn(note);
@@ -3518,6 +3553,9 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
     // What the PDF draws as pictures because its vectors would grow too large: frames, and
     // whole pages (their surrounds).
     let (mut frames_pictured, mut pages_pictured) = (Vec::new(), Vec::new());
+    // The map frames a PDF can't georeference, and those it georeferences by their corners only,
+    // each with the page (from 1) it is on.
+    let (mut left_out, mut by_corners): (Vec<(usize, u32, String, &'static str)>, Vec<(usize, u32, String)>) = (Vec::new(), Vec::new());
     let mut render_pages = || -> Result<(Vec<rustgis_render::pdf::Page>, Option<Vec<u8>>), String> {
         let mut out = Vec::new();
         let mut png = None;
@@ -3543,17 +3581,23 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
             // a memory budget.
             if pdf {
                 let (w, h) = (layout.width, layout.height);
-                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
-                    .ok_or("the page is too large to draw")?;
+                // Where its map frames show, for readers to locate and measure in: a GeoPDF (#1191).
+                let geo = if georeference {
+                    rustgis_render::layout::frame_viewports(layout, &s.project.maps, dpi)
+                } else {
+                    rustgis_render::layout::Georeferenced::default()
+                };
+                left_out.extend(geo.left_out.into_iter().map(|(id, n, why)| (page + 1, id, n, why)));
+                by_corners.extend(geo.by_corners.into_iter().map(|(id, n)| (page + 1, id, n)));
+                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)?;
                 if drawing.overflowed() {
                     pages_pictured.push(page + 1);
                     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-                    let img =
-                        rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
-                    out.push(rustgis_render::pdf::Page::new(&img, w, h));
+                    let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info)?;
+                    out.push(rustgis_render::pdf::Page::new(&img, w, h).with_viewports(geo.viewports));
                 } else {
                     frames_pictured.extend(pictured);
-                    out.push(rustgis_render::pdf::Page::drawing(drawing, w, h));
+                    out.push(rustgis_render::pdf::Page::drawing(drawing, w, h).with_viewports(geo.viewports));
                 }
                 held += out.last().map_or(0, rustgis_render::pdf::Page::len);
                 if held > PDF_BUDGET {
@@ -3564,7 +3608,7 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
                     ));
                 }
             } else {
-                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
+                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info)?;
                 png = Some(img.encode_png().map_err(|e| e.to_string())?);
             }
             // A cancelled export stops here, its layout put back below.
@@ -3579,7 +3623,83 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
     }
     let (pages, png) = result?;
     pictured_notices(s, &frames_pictured, &pages_pictured);
+    georeference_notices(s, &left_out, &by_corners, pages.len());
     if pdf { Ok(rustgis_render::pdf::write(&pages, &saved.name)) } else { png.ok_or_else(|| "nothing to draw".to_string()) }
+}
+
+/// Says which map frames a PDF doesn't georeference, with why, and which it georeferences by their
+/// corners only (#1191): one notice for each, with a count. Each entry has the page (from 1) it
+/// is on, of the `pages` exported. A frame is counted once however many pages of a series it is
+/// on (by its id: two frames sharing a name are two), with the first page's reason, and named with
+/// its pages when it is so on some of them only: a series moves each frame, which may cross the
+/// 180° meridian on one page and not the next. Information, not warnings: nothing wrong is
+/// written (a frame left out carries no coordinates, and one placed by its corners is checked to
+/// within half a millimetre).
+pub(crate) fn georeference_notices(
+    s: &mut Session,
+    left_out: &[(usize, u32, String, &'static str)],
+    by_corners: &[(usize, u32, String)],
+    pages: usize,
+) {
+    let listed = |items: Vec<String>| {
+        let more = items.len().saturating_sub(10);
+        let mut text = items.into_iter().take(10).collect::<Vec<_>>().join(", ");
+        if more > 0 {
+            text.push_str(&format!(" and {more} more"));
+        }
+        text
+    };
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    // Each frame once, in the order first met: its name, the first page's reason and its pages.
+    let frames = |entries: Vec<(usize, u32, &str, &'static str)>| {
+        let mut frames: Vec<(u32, String, &'static str, Vec<usize>)> = Vec::new();
+        for (page, id, name, why) in entries {
+            match frames.iter_mut().find(|f| f.0 == id) {
+                Some(f) if !f.3.contains(&page) => f.3.push(page),
+                Some(_) => {}
+                None => frames.push((id, name.to_string(), why, vec![page])),
+            }
+        }
+        frames
+    };
+    // A frame's name, with its pages when it is so on some of the pages only.
+    let named = |name: &str, on: &[usize]| {
+        if pages < 2 || on.len() >= pages {
+            return name.to_string();
+        }
+        let mut shown: Vec<String> = on.iter().map(usize::to_string).collect();
+        let more = shown.len().saturating_sub(10);
+        shown.truncate(10);
+        let listed = match (shown.split_last(), more) {
+            (Some((last, rest)), 0) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            (_, 0) => shown.join(", "),
+            (_, more) => format!("{} and {more} more", shown.join(", ")),
+        };
+        format!("{name} on page{} {listed}", plural(on.len()))
+    };
+    let out: Vec<String> = frames(left_out.iter().map(|(p, id, n, why)| (*p, *id, n.as_str(), *why)).collect())
+        .into_iter()
+        .map(|(_, n, why, on)| format!("{}: {why}", named(&n, &on)))
+        .collect();
+    if !out.is_empty() {
+        let n = out.len();
+        s.notify(format!("The PDF doesn't georeference {n} map frame{} ({})", plural(n), listed(out)), false);
+    }
+    let corners: Vec<String> = frames(by_corners.iter().map(|(p, id, n)| (*p, *id, n.as_str(), "")).collect())
+        .into_iter()
+        .map(|(_, n, _, on)| named(&n, &on))
+        .collect();
+    if !corners.is_empty() {
+        let n = corners.len();
+        s.notify(
+            format!(
+                "The PDF georeferences {n} map frame{} by its corners in longitude/latitude, as its coordinate system can't be written as WKT: on a 9 × 9 grid over each, it puts places within 0.5 mm of where they are drawn, not proven between them ({})",
+                plural(n),
+                listed(corners)
+            ),
+            false,
+        );
+    }
 }
 
 /// Says which layout elements, map frames and surrounds (by name), and pages (by number) an export
@@ -3631,7 +3751,7 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
     if !pdf && !svg && !lower.ends_with(".png") {
         return Err("export to a .png, .pdf or .svg file".into());
     }
-    let (dpi, all) = (f(p, "dpi").unwrap_or(150.0), b(p, "allPages").unwrap_or(true));
+    let (dpi, all, georeference) = (f(p, "dpi").unwrap_or(150.0), b(p, "allPages").unwrap_or(true), b(p, "georeference").unwrap_or(true));
     let mut project = s.project.clone();
     for m in &mut project.maps {
         m.detach_reads();
@@ -3639,7 +3759,11 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
     Ok(Box::new(move || {
         let mut copy = Session::new(project);
         let written = (|| {
-            let bytes = if svg { layout_svg(&mut copy, li, dpi)?.into_bytes() } else { layout_bytes(&mut copy, li, pdf, dpi, all)? };
+            let bytes = if svg {
+                layout_svg(&mut copy, li, dpi)?.into_bytes()
+            } else {
+                layout_bytes_with(&mut copy, li, pdf, dpi, all, georeference)?
+            };
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
             rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
@@ -3673,8 +3797,7 @@ fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     };
     // Rendering borrows the current layout; it does not step or modify the series page.
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
-        .ok_or("could not draw the page; check its map sources and export size")?;
+    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)?;
     pictured_notices(s, &pictured, &[]);
     Ok(text)
 }
@@ -3684,19 +3807,43 @@ pub(crate) fn import(s: &mut Session, text: &str) -> CmdResult {
         return Err("the layout file is too large".into());
     }
     let mut l: Layout = serde_json::from_str(text).map_err(|e| format!("not a RustGIS layout: {e}"))?;
-    l.clamp();
+    // Refused before anything is said of it.
+    if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
+        return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
+    }
+    let repairs = l.clamp();
+    if !repairs.is_empty() {
+        for notice in crate::project::layout_notices(&l.name, "while importing the layout file", 0, &[(l.name.clone(), repairs)]) {
+            s.notify(notice, false);
+        }
+    }
     l.name = unique_name(s, &l.name);
     // Frames showing maps this project lacks show the active map instead.
     let fallback = s.map().name.clone();
     let names: Vec<String> = s.project.maps.iter().map(|m| m.name.to_ascii_lowercase()).collect();
+    let mut swapped = 0usize;
     for e in &mut l.elements {
         if let ElementKind::MapFrame { map, .. } = &mut e.kind
             && !names.contains(&map.to_ascii_lowercase())
         {
             *map = fallback.clone();
+            swapped = swapped.saturating_add(1);
         }
     }
+    if swapped > 0 {
+        s.notify(
+            format!(
+                "{}: {swapped} map frame(s) showing a map this project lacks show \"{}\" instead",
+                crate::project::short_name(&l.name),
+                crate::project::short_name(&fallback)
+            ),
+            false,
+        );
+    }
     let name = l.name.clone();
+    if s.project.layouts.len() >= crate::project::MAX_LAYOUTS {
+        return Err(format!("a project holds at most {} layouts; remove one first", crate::project::MAX_LAYOUTS));
+    }
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);
@@ -3862,6 +4009,19 @@ fn locator_orphan(input: &impl super::InputSource) -> Option<usize> {
         x.tiles.is_empty() && x.layers.iter().all(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon && !l.labels.enabled)
     };
     s.project.maps.iter().position(|x| x.projection.is_globe() && ours(&x.name) && !shown(&x.name) && x.name != src.name && made_here(x))
+}
+
+/// Whether the publication gives the top visible raster a colorbar: `"auto"` (the default) or
+/// `"none"`.
+fn publication_colorbar(p: &Value) -> Result<bool, String> {
+    match p.get("colorbar").filter(|v| !v.is_null()) {
+        None => Ok(true),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("auto") => Ok(true),
+            Some("none") => Ok(false),
+            _ => Err("colorbar is \"auto\" or \"none\"".into()),
+        },
+    }
 }
 
 /// Parses the publication's locator choice with the sheet-specific default.

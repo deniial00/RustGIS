@@ -10,6 +10,7 @@ pub mod connections;
 pub mod durable;
 pub mod geometry_calc;
 pub mod model;
+mod notice_text;
 pub mod peer;
 pub mod policy;
 #[cfg(not(target_arch = "wasm32"))]
@@ -527,8 +528,19 @@ pub struct TopologyIssue {
 pub struct Notice {
     pub text: String,
     pub error: bool,
+    /// Trusted templates with already-redacted arguments; ordinary notices have no payload.
+    localized: Option<notice_text::NoticeText>,
     /// How the troubleshooting history files it (an error, a warning or information).
     pub(crate) severity: rustgis_data::diagnostics::Severity,
+}
+
+impl Notice {
+    /// Deferred interface text, or `None` for an ordinary notice whose text is already final.
+    /// The formatter returns logical-order text; the front end shapes the complete result once.
+    /// Arguments are redacted before retention, and the result has the ordinary notice limits.
+    pub fn translated(&self, format: impl Fn(&str, &[(&str, &str)]) -> String) -> Option<String> {
+        self.localized.as_ref().map(|text| Session::redacted(&text.render(&format)).into_string())
+    }
 }
 
 /// One counted, already-redacted loss, independent of the changes a command can roll back.
@@ -700,6 +712,8 @@ pub struct Session {
     /// Runtime-only: never in Project, undo or PutAside, so replacement cannot erase them.
     loss_notices: Vec<LossNotice>,
     loss_notice_overflow: u32,
+    /// Whether this session has said that native HTTPS trusts the bundled CA roots (#1591).
+    bundled_roots_said: bool,
     /// Troubleshooting history, independent of the active pane, project files and undo.
     pub diagnostics: rustgis_data::diagnostics::History,
     /// Notices given in this session, including ones no longer kept (see [`Session::notices_since`]),
@@ -807,6 +821,9 @@ pub struct Session {
     /// them (it keeps nothing between calls). Not saved with the project: a plugin's state
     /// command reads what it needs from the map when the panel opens.
     pub plugin_panels: std::collections::BTreeMap<String, rustgis_plugins::PanelState>,
+    /// What running session plugins were last told of the map, to send them events.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) plugin_watch: cmd::plugins::Watch,
     /// Data downloads of this project under way (Home › Add › Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
@@ -840,6 +857,8 @@ pub struct Session {
     /// While a plugin command runs again for its downloads: what each one asked for, and what
     /// adding it answered, for its `layer.addUrl` to answer once.
     pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult, cmd::plugins::fetch::Added)>,
+    /// Which of those are failures already told in this run (see [`Session::rerun_answer`]).
+    pub(crate) rerun_told: Vec<usize>,
     /// While a plugin command runs again: the errors its earlier runs said, not said again.
     pub(crate) rerun_said: Vec<String>,
     /// While plugin commands whose downloads are in run again: the downloads they wait for, still
@@ -886,6 +905,10 @@ pub struct Session {
     /// ([`cmd::gp::Ahead::Taking`]), or which that copy records ([`cmd::gp::Ahead::Recording`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) tools_ahead: Option<cmd::gp::Ahead>,
+    /// The files a batch read on that copy, which the batch's run here takes
+    /// ([`cmd::gp::FilesAhead`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) files_ahead: Option<cmd::gp::FilesAhead>,
     /// Where the requests a copy of the session makes for a model's run ahead go
     /// ([`cmd::workflows::ahead_on_copy`]): the session's own Diagnostics, as when they're made
     /// there. Its notices stay its own: the run there says them.
@@ -1067,7 +1090,7 @@ impl Session {
         rustgis_data::diagnostics::set_clock(|| {
             web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
         });
-        let label_notices = std::mem::take(&mut project.label_read_notices);
+        let label_notices = project.take_read_notices(&crate::project::ALL_PARTS);
         let mut session = Session {
             project,
             path: None,
@@ -1099,6 +1122,7 @@ impl Session {
             notices: Vec::new(),
             loss_notices: Vec::new(),
             loss_notice_overflow: 0,
+            bundled_roots_said: false,
             diagnostics: rustgis_data::diagnostics::History::default(),
             notices_given: 0,
             table_layer: None,
@@ -1145,6 +1169,7 @@ impl Session {
             started: Vec::new(),
             plugin_runs: Vec::new(),
             plugin_panels: std::collections::BTreeMap::new(),
+            plugin_watch: Default::default(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
             landed_reads: Vec::new(),
@@ -1161,6 +1186,7 @@ impl Session {
             next_request: 0,
             call_requests: None,
             rerun_landed: Vec::new(),
+            rerun_told: Vec::new(),
             rerun_said: Vec::new(),
             rerun_requests: Vec::new(),
             retry_tries: 0,
@@ -1179,13 +1205,15 @@ impl Session {
             #[cfg(not(target_arch = "wasm32"))]
             tools_ahead: None,
             #[cfg(not(target_arch = "wasm32"))]
+            files_ahead: None,
+            #[cfg(not(target_arch = "wasm32"))]
             requests_into: None,
             #[cfg(test)]
             tools_taken: 0,
             stoppable: false,
         };
         for text in label_notices {
-            session.notify(text, false);
+            session.notify_text(text, false);
         }
         session
     }
@@ -1464,7 +1492,7 @@ impl Session {
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
             #[cfg(not(target_arch = "wasm32"))]
             let files_before: Vec<String> = self.mbtiles_files().map(str::to_string).collect();
-            let res = run(self);
+            let res = self.with_unread_bools(source, run);
             // Whichever command took its last layer away (removed, undone, the project closed):
             // the file can now be moved or replaced, so what was read of it is forgotten too.
             #[cfg(not(target_arch = "wasm32"))]
@@ -1493,11 +1521,13 @@ impl Session {
                 // command's result as it was, without an entry, and says so in the app's log.
                 let logged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if project_log::is_logged(self, id, params) {
-                        let params = match step {
-                            Some(label) => serde_json::json!({"step": label}),
-                            None => project_log::kept_params(params),
+                        // The step's label isn't a parameter: the command, run again, takes none.
+                        let (params, partial) = match step {
+                            Some(label) => (serde_json::json!({"step": label}), false),
+                            None => project_log::kept_and_partial(params),
                         };
-                        let e = project_log::entry(id, params, &res, at, start.elapsed());
+                        let project = (project_log::kept_name(&self.title()), self.opened);
+                        let e = project_log::entry(project, id, params, partial, &res, at, start.elapsed());
                         if joins && res.is_ok() { self.log.join_last(e) } else { self.log.push(e) }
                     }
                 }));
@@ -1949,6 +1979,19 @@ impl Session {
     /// read, and why. Once for each layer's pixels or failure, one notice of each kind; the app
     /// calls it each frame.
     pub fn notice_landed_rasters(&mut self) {
+        // Streamed vector windows land after project opening too. Check each installed read
+        // once, keeping the same counted notice channel as retained resident expressions.
+        let mut landed = Vec::new();
+        for map in &mut self.project.maps {
+            for layer in &mut map.layers {
+                if layer.source.as_mut().is_some_and(|source| source.take_display_window()) {
+                    landed.push(&*layer);
+                }
+            }
+        }
+        if let Some(message) = cmd::design::display_area_messages(landed.into_iter()) {
+            self.notify(message, false);
+        }
         let (mut lost, mut held, mut failed, mut dropped) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for m in &mut self.project.maps {
             for l in &mut m.layers {
@@ -1970,6 +2013,9 @@ impl Session {
         }
         // What a header left out, as adding the layer says it (one notice a kind, with counts).
         cmd::raster::say_losses(self, lost);
+        // The browser uses its own trust; only native clients can fall back.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.notice_trust();
         if !dropped.is_empty() {
             let mut kinds: Vec<&str> = dropped.iter().flat_map(|(_, k)| k.iter().copied()).collect();
             kinds.sort_unstable();
@@ -2007,6 +2053,28 @@ impl Session {
                     false,
                 )
             }
+        }
+    }
+
+    /// Says once a session that native HTTPS trusts the bundled Mozilla roots, as a Linux or BSD
+    /// system with no CA certificates and no `SSL_CERT_FILE` or `SSL_CERT_DIR` makes it
+    /// ([`rustgis_data::http::bundled_roots`]): the trust source was assumed, not the system's.
+    /// Checked after each command and each frame, as the clients are first made when a request is.
+    /// Says, once a session, that native HTTPS fell back to the bundled CA roots, if it did. Run
+    /// with [`Session::notice_landed_rasters`]; a reader of the notices that runs no command (the
+    /// Python package) calls it first, as a client made on a background thread chooses the trust.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn notice_trust(&mut self) {
+        self.say_bundled_roots(rustgis_data::http::bundled_roots());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn say_bundled_roots(&mut self, bundled: bool) {
+        if bundled && !self.bundled_roots_said {
+            self.bundled_roots_said = true;
+            self.warn(
+                "This system has no CA certificates, so HTTPS servers are checked against the Mozilla roots bundled with RustGIS: install the system's CA certificates (or set SSL_CERT_FILE or SSL_CERT_DIR) to use its trust instead",
+            );
         }
     }
 
@@ -2073,6 +2141,33 @@ impl Session {
     pub fn notify(&mut self, text: impl Into<String>, error: bool) {
         use rustgis_data::diagnostics::Severity;
         self.notice(text.into(), if error { Severity::Error } else { Severity::Info });
+    }
+
+    /// Publishes English diagnostics and retains redacted templates for translated interfaces.
+    pub(crate) fn notify_text(&mut self, text: notice_text::NoticeText, error: bool) {
+        let text = text.redacted();
+        let mark = self.notices_given;
+        self.notify(text.english(), error);
+        if self.notices_given != mark
+            && let Some(notice) = self.notices.last_mut()
+        {
+            notice.localized = Some(text);
+        }
+    }
+
+    /// Runs `f`, then says the true/false parameters it could not read: text taken as false,
+    /// other values ignored (#1600), as `source`'s notice. Inside another such run (a command's
+    /// script, a command run by a command) they are left for the outer one to say.
+    pub(crate) fn with_unread_bools<T>(&mut self, source: Option<&'static str>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let scope = cmd::UnreadBoolsScope::open();
+        let r = f(self);
+        if let Some(text) = scope.close() {
+            let said_by = source.or(self.diagnostic_source);
+            let previous = std::mem::replace(&mut self.diagnostic_source, said_by);
+            self.warn(text);
+            self.diagnostic_source = previous;
+        }
+        r
     }
 
     /// A nonfatal problem: existing notice consumers still see it as a non-error, while
@@ -2163,7 +2258,12 @@ impl Session {
             return;
         }
         self.diagnostics.push_redacted(severity, source.unwrap_or("Application"), &text);
-        self.notices.push(Notice { text: text.into_string(), error: severity == rustgis_data::diagnostics::Severity::Error, severity });
+        self.notices.push(Notice {
+            text: text.into_string(),
+            error: severity == rustgis_data::diagnostics::Severity::Error,
+            localized: None,
+            severity,
+        });
         self.notices_given += 1;
         if self.notices.len() > 200 {
             self.notices.remove(0);
@@ -2240,7 +2340,8 @@ impl Session {
         self.state
     }
 
-    /// The project as it is now is saved (written to its file, or downloaded in the browser).
+    /// The project as it is now is saved: written to its file. A browser download doesn't
+    /// count, as the page can't tell whether the browser saved it.
     pub fn mark_saved(&mut self) {
         self.saved = Some(self.state);
     }

@@ -318,6 +318,7 @@ pub enum RenderOutput {
 /// [`render`]; `Backend::Gpu` draws what it can as tessellated meshes and everything else
 /// (basemap, tiles, rasters, masked/blended/transparent layers) as CPU-rasterized images in
 /// the same z-order.
+/// A pass spanning a linked archive reload returns `None`; redraw against the new source.
 pub fn render_backend(map: &mut Map, view: &View, backend: Backend) -> Option<RenderOutput> {
     render_with_backend(map, view, false, backend)
 }
@@ -1615,8 +1616,44 @@ pub fn view_lonlat(map: &Map, view: &View) -> Extent {
     if out.is_empty() { Extent::WORLD_LONLAT } else { out }
 }
 
+/// A source-specific render revision, independent of ordinary tile arrivals.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArchiveRevision(u64);
+
+impl ArchiveRevision {
+    /// Checks against the same maps whose linked archives were captured.
+    pub fn current<'a>(self, maps: impl IntoIterator<Item = &'a Map>) -> bool {
+        self.0 == archive_revisions(maps).0
+    }
+
+    /// Refuses a spanning render before reporting any ordinary drawing failure.
+    pub(crate) fn finish<'a, T>(self, maps: impl IntoIterator<Item = &'a Map>, result: Option<T>, failure: &str) -> Result<T, String> {
+        self.finish_revision(archive_revisions(maps), result, failure)
+    }
+
+    /// Checks a composed output against a newly captured revision of the same source set.
+    pub fn finish_revision<T>(self, current: Self, result: Option<T>, failure: &str) -> Result<T, String> {
+        if self.0 != current.0 {
+            return Err("a tile archive changed during rendering; export again after the reload finishes".to_string());
+        }
+        result.ok_or_else(|| failure.to_string())
+    }
+}
+
+/// Captures only linked tile archives used by these maps, before styles or tiles are read.
+/// The token is allocation-free; retain the maps for a check at worker publication.
+pub fn archive_revisions<'a>(maps: impl IntoIterator<Item = &'a Map>) -> ArchiveRevision {
+    ArchiveRevision(rustgis_tiles::cache::archive_revision(maps.into_iter().flat_map(|map| {
+        map.tiles
+            .iter()
+            .filter(|t| t.draws() && t.opacity > 0.0 && matches!(t.kind, rustgis_map::TileKind::PmTiles | rustgis_map::TileKind::MbTiles))
+            .map(|t| t.url.as_str())
+    })))
+}
+
 /// Draws the map for the screen. Layers are drawn bottom-up (the last layer in the list first).
 /// On high-density screens rasters are computed at logical-pixel resolution, for speed.
+/// A pass spanning a linked archive reload returns `None`, without publishing its mixed pixels.
 pub fn render(map: &mut Map, view: &View) -> Option<Rendered> {
     render_with(map, view, false)
 }
@@ -1660,6 +1697,13 @@ fn render_with_backend(map: &mut Map, view: &View, full_res_rasters: bool, backe
 /// [`render_with_backend`], `record` keeping a flat, north-up frame as vectors where it can
 /// ([`render_frame`]).
 fn render_any(map: &mut Map, view: &View, full_res_rasters: bool, backend: Backend, record: bool) -> Option<RenderOutput> {
+    let revisions = archive_revisions([&*map]);
+    let output = render_pass(map, view, full_res_rasters, backend, record);
+    revisions.current([&*map]).then_some(output).flatten()
+}
+
+/// One entire pass, including all bands and backend fallbacks, under `render_any`'s guard.
+fn render_pass(map: &mut Map, view: &View, full_res_rasters: bool, backend: Backend, record: bool) -> Option<RenderOutput> {
     // A bearing or pitch set directly on the camera may be unnormalised (or no number, which
     // faces north and looks straight down).
     let mut camera = view.camera;
@@ -2090,7 +2134,7 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
         None => warp.finish(pm.pixels()),
     }
     drop(kept);
-    extrusions_tilted(map, view, pm.pixels());
+    extrusions_tilted(map, view, pm.pixels())?;
     markers_tilted(map, view, &mut pm);
     let placed = place_tilted_labels(map, view, candidates, ground.as_ref());
     for l in &placed.labels {
@@ -2592,6 +2636,7 @@ pub fn extruded_shapes(map: &mut Map, view: &View) -> Vec<ExtrudedShape> {
     let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
     // Layers a hidden or out-of-scale group holds aren't drawn, as in `render_frame`.
     let held = map.held_by_group(scale);
+    let group_opacity = map.group_opacities();
     // Only the features on the ground the view shows (grown by a moving drape's margin).
     let cull = view.camera.extent(view.width, view.height).padded(0.3, 0.0);
     let (flat, key) = (map.flat(), map.projection.code());
@@ -2614,6 +2659,12 @@ pub fn extruded_shapes(map: &mut Map, view: &View) -> Vec<ExtrudedShape> {
             continue;
         }
         let Some(x) = layer.extrusion.clone() else { continue };
+        // The layer's transparency and its groups' fade it as a whole, as in the flat map (#1669);
+        // the symbol's own fill alpha stays ignored.
+        let alpha = ((layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0)).clamp(0.0, 1.0) * 255.0).round() as u8;
+        if alpha == 0 {
+            continue;
+        }
         let rows = layer.drawn_rows(scale);
         layer.thinned_in(&flat, &key, tol);
         let layer: &rustgis_map::Layer = layer;
@@ -2648,7 +2699,7 @@ pub fn extruded_shapes(map: &mut Map, view: &View) -> Vec<ExtrudedShape> {
                 holes: polys.iter().flat_map(|p| p.iter().skip(1)).filter(|r| r.len() >= 3).cloned().collect(),
                 metres,
                 height,
-                fill: sym.fill.with_alpha(255),
+                fill: sym.fill.with_alpha(alpha),
                 stroke: sym.stroke,
                 face_culling: x.face_culling,
                 lighting: x.lighting,
@@ -2749,7 +2800,7 @@ const UPRIGHT_SCALE: (f64, f64) = (0.25, 2.0);
 
 /// Whether a tilted view of `map` stands `layer`'s point markers up, facing the viewer (as
 /// MapLibre's circles do), rather than drawing them flat on the ground. A masked, swiped or
-/// blended layer, an aggregation or graphics keep theirs on the ground.
+/// blended layer, an aggregation, graphics or a diagram keep theirs on the ground.
 fn stands_up(map: &Map, layer: &rustgis_map::Layer) -> bool {
     // Complete sources must use their total, never the pan-dependent interaction sample.
     // An unknown total conservatively uses complete ground-marker traversal.
@@ -2768,6 +2819,8 @@ fn stands_up(map: &Map, layer: &rustgis_map::Layer) -> bool {
         && !layer.has_strokes()
         && layer.marker_rotation.is_none()
         && layer.symbol_by.angle.is_none()
+        // A diagram is a flat chart on the ground: its markers lie under it there (#1596).
+        && layer.diagram.is_none()
         && rows.is_some_and(|n| n <= MAX_UPRIGHT_POINTS as u64)
 }
 
@@ -2926,11 +2979,13 @@ fn markers_tilted(map: &mut Map, view: &View, pm: &mut Canvas) {
 }
 
 /// The extruded layers of a tilted view, stood up in perspective over its ground, bottom layer
-/// first (a drape of the moving view shows them flat).
-fn extrusions_tilted(map: &mut Map, view: &View, pm: &mut Pixmap) {
+/// first (a drape of the moving view shows them flat). `None` when a see-through layer's own
+/// pixmap can't be allocated, as the flat map's offscreen layers fail the render.
+fn extrusions_tilted(map: &mut Map, view: &View, pm: &mut Pixmap) -> Option<()> {
     let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
     // Layers a hidden or out-of-scale group holds aren't drawn, as in `render_frame`.
     let held = map.held_by_group(scale);
+    let group_opacity = map.group_opacities();
     let (flat, key) = (map.flat(), map.projection.code());
     // Heights are metres on the map's body.
     let body = map.body().ratio();
@@ -2948,14 +3003,42 @@ fn extrusions_tilted(map: &mut Map, view: &View, pm: &mut Pixmap) {
             continue;
         }
         let Some(x) = layer.extrusion.clone() else { continue };
+        // The layer's transparency and its groups' (#1669): the layer fades as a whole.
+        let opacity = (layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0)).clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            continue;
+        }
         let rows = layer.drawn_rows(scale);
         // Refreshes the projected copy for this projection.
         layer.projected_in(&flat, &key);
         let layer: &rustgis_map::Layer = layer;
         let styler = layer.styler(Some(scale));
         let geoms: Vec<Option<&Geometry>> = layer.projected_cache().iter().map(Option::as_ref).collect();
-        effects::extrude_tilted(pm, view, &layer.dataset, &geoms, &rows, &x, |c| flat.ground_per_unit(c) * body, fog, |r| styler.symbol(r));
+        let draw = |target: &mut Pixmap| {
+            effects::extrude_tilted(
+                target,
+                view,
+                &layer.dataset,
+                &geoms,
+                &rows,
+                &x,
+                |c| flat.ground_per_unit(c) * body,
+                fog,
+                |r| styler.symbol(r),
+            )
+        };
+        // Below 1, on a pixmap of its own laid over the map once, so the layer's back walls don't
+        // show through its roofs.
+        if opacity < 1.0 {
+            let mut own = Pixmap::new(pm.width(), pm.height())?;
+            draw(&mut own);
+            let over = PixmapPaint { opacity, ..PixmapPaint::default() };
+            pm.draw_pixmap(0, 0, own.as_ref(), &over, Transform::identity(), None);
+        } else {
+            draw(pm);
+        }
     }
+    Some(())
 }
 
 /// The most physical pixels a side of a tilted view's band is drawn with: past it, at a lower
@@ -3159,9 +3242,14 @@ fn render_frame(
     record: bool,
 ) -> Option<RenderOutput> {
     let (w, h) = view.pixel_size();
-    // Kept as vectors (`record`) on the CPU, for a flat frame without view effects (a pixel
-    // filter over the whole frame); anything else draws its pixels.
-    let record = record && !backend.is_gpu() && !map.projection.is_globe() && map.view.effects.is_none();
+    // Kept as vectors (`record`) on the CPU, for a flat frame without view effects or a
+    // colour-vision simulation it applies (pixel filters over the whole frame; an export,
+    // `full_res_rasters`, never simulates colour vision); anything else draws its pixels.
+    let record = record
+        && !backend.is_gpu()
+        && !map.projection.is_globe()
+        && map.view.effects.is_none()
+        && (full_res_rasters || map.view.color_vision == rustgis_map::view::ColorVision::Normal);
     let mut pm = if record { Canvas::recording(w, h)? } else { Canvas::new(w, h)? };
     // Streamed layers read the view: in the background for the screen, in place for an export
     // (the full-resolution render), which waits for them; only the layers drawn at the view's
@@ -3579,6 +3667,9 @@ fn render_frame(
             scaled_ctx = Ctx { ppp: ctx.ppp * size_factor, sprites: Default::default(), bursts: std::rc::Rc::clone(&ctx.bursts), ..ctx };
             &scaled_ctx
         };
+        // An extruded layer's diagrams, drawn on a sheet of their own until the spool has drawn its
+        // polygons.
+        let mut extruded_charts: Option<Canvas> = None;
         let mut draw_chunk = |layer: &mut rustgis_map::Layer| -> rustgis_data::Result<()> {
             // The definition query and the display filters that apply at this scale (a feature draws
             // only if it matches all of them).
@@ -3718,6 +3809,36 @@ fn render_frame(
                 };
                 gpu_done = collected.is_ok();
             }
+            // The layer's diagram, its fields, and how far a chart reaches past its feature (map
+            // units). Graphics take none (`layer.diagram` refuses them).
+            let diagram = layer.diagram.as_ref().filter(|_| !layer.graphics).map(|d| {
+                // Grown by the largest diagram, as a point's marks are.
+                (d, d.field_indices(ds_ptr), f64::from(diagrams::reach(d) * ctx.ppp) * map_per_px)
+            });
+            // Where row's chart goes in the view, and what it shows; `None` when it has none there.
+            let chart_at = |row: usize| -> Option<(f32, f32, Vec<(f64, rustgis_map::Rgba)>, f64)> {
+                let (d, fields, r) = diagram.as_ref()?;
+                let g = geoms.get(row).copied().flatten()?;
+                if rows.get(row) != Some(&true) {
+                    return None;
+                }
+                let e = extents.get(row).copied().unwrap_or_else(|| g.extent());
+                if !visible(&Extent::new(e.min_x - r, e.min_y - r, e.max_x + r, e.max_y + r)) {
+                    return None;
+                }
+                let (x, y) = ctx.px(diagrams::anchor(g)?);
+                let (values, total) = d.values_at(ds_ptr, row, fields)?;
+                Some((x, y, values, total))
+            };
+            // Draws the layer's diagrams on `on`, a feature at a time.
+            let draw_diagrams = |on: &mut Canvas| {
+                let Some((d, ..)) = diagram.as_ref() else { return };
+                for row in 0..geoms.len() {
+                    if let Some((x, y, values, total)) = chart_at(row) {
+                        diagrams::draw(on, x, y, d, &values, total, if direct { opacity } else { 1.0 }, ctx.ppp, display.paused);
+                    }
+                }
+            };
             // False for a layer drawn elsewhere: nothing goes into the picture for it.
             let mut drawn_here = true;
             if !gpu_done {
@@ -3737,10 +3858,25 @@ fn render_frame(
                     drawn_here = false;
                 } else if let Some(x) = extrude.filter(|_| !matches!(labels_to, Labels::Shared)) {
                     let px_per_m = view.pixels_per_point / (map_ground_res(view, &flat) * body);
+                    // The diagrams go over the extruded polygons (#1596): after the spool draws them
+                    // all, or straight after these.
                     if let Some(spool) = &mut extrusions {
                         spool.add(ctx, ds_ptr, &geoms, &rows, x, px_per_m, |r| styler.symbol(r))?;
+                        // On a sheet of their own the size of the view (recording if the layer's
+                        // picture does), laid over the extrusions once the spool has drawn them;
+                        // made only once a chart shows.
+                        if extruded_charts.is_none() && (0..geoms.len()).any(|row| chart_at(row).is_some()) {
+                            extruded_charts = Some(
+                                dest.sub(dest.width(), dest.height())
+                                    .ok_or_else(|| rustgis_data::DataError::Format("cannot allocate the layer's diagrams".into()))?,
+                            );
+                        }
+                        if let Some(sheet) = &mut extruded_charts {
+                            draw_diagrams(sheet);
+                        }
                     } else {
                         effects::extrude(dest, ctx, ds_ptr, &geoms, &rows, x, px_per_m, |r| styler.symbol(r));
+                        draw_diagrams(dest);
                     }
                 } else {
                     let mut stroke_paths = stroke_paths::Paths::default();
@@ -3841,24 +3977,11 @@ fn render_frame(
                     }
                     // Diagrams: a small chart on each feature from several fields, over the
                     // renderer's own symbol (pie or bars, as ArcGIS Pro's Chart symbology draws).
-                    if let Some(d) = layer.diagram.as_ref().filter(|_| !layer.graphics) {
-                        let fields = d.field_indices(ds_ptr);
-                        for (row, g) in geoms.iter().enumerate() {
-                            let Some(g) = g else { continue };
-                            if rows.get(row) != Some(&true) {
-                                continue;
-                            }
-                            let e = extents.get(row).copied().unwrap_or_else(|| g.extent());
-                            // Grown by the largest diagram, as a point's marks are (in map units).
-                            let r = f64::from(diagrams::reach(d) * ctx.ppp) * map_per_px;
-                            if !visible(&Extent::new(e.min_x - r, e.min_y - r, e.max_x + r, e.max_y + r)) {
-                                continue;
-                            }
-                            let Some(c) = diagrams::anchor(g) else { continue };
-                            let (x, y) = ctx.px(c);
-                            let Some((values, total)) = d.values_at(ds_ptr, row, &fields) else { continue };
-                            diagrams::draw(dest, x, y, d, &values, total, if direct { opacity } else { 1.0 }, ctx.ppp, display.paused);
-                        }
+                    // Not on an extruded layer in the tilt drape: at rest the tilted view stands
+                    // its polygons up and shows no chart, so a moving view shows none either.
+                    let tilted_extrusion = extrude.is_some() && matches!(labels_to, Labels::Shared);
+                    if !tilted_extrusion {
+                        draw_diagrams(dest);
                     }
                 }
                 cpu_dirty |= drawn_here;
@@ -4378,6 +4501,10 @@ fn render_frame(
                 source.error = Some(e.to_string());
             }
             return None;
+        }
+        if let Some(sheet) = extruded_charts {
+            let dest = if direct { &mut pm } else { &mut target };
+            dest.place(sheet, Transform::identity(), 1.0, rustgis_map::effects::Blend::Normal, None);
         }
         if complete_source {
             if let (Some(a), Some(base)) = (layer.aggregation, aggregate_symbol) {
@@ -4917,6 +5044,7 @@ pub struct DrapePatch {
 /// ([`rustgis_map::Globe::drape_mesh`]) while it turns, with no drawing per frame. Labels are
 /// left out (the view hides them while it moves).
 pub fn render_globe_drape(map: &mut Map, view: &View, boxes: &[Extent], max_side: u32) -> Vec<DrapePatch> {
+    let revisions = archive_revisions([&*map]);
     // A coarse drape may have far fewer pixels than points: it shows the map blurrier, but at
     // the view's scale.
     let ppp = if view.pixels_per_point.is_finite() { view.pixels_per_point.clamp(1.0 / 64.0, 4.0) } else { 1.0 };
@@ -4956,7 +5084,7 @@ pub fn render_globe_drape(map: &mut Map, view: &View, boxes: &[Extent], max_side
     map.label_display = display;
     map.label_lock = lock;
     map.label_lock_line_anchors = anchors;
-    out
+    if revisions.current([&*map]) { out } else { Vec::new() }
 }
 
 /// A band of a tilted view drawn flat, to lay over the tilted ground while the view moves.
@@ -4974,6 +5102,7 @@ pub struct TiltPatch {
 /// band, square, over the circle round the view and without the margin: it is laid over the view
 /// the same way while it turns.
 pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32) -> Vec<TiltPatch> {
+    let revisions = archive_revisions([&*map]);
     let ppp = if view.pixels_per_point.is_finite() { view.pixels_per_point.clamp(0.25, 4.0) } else { 1.0 };
     let max_side = f64::from(max_side.clamp(64, 8192));
     let cam = view.camera;
@@ -5008,7 +5137,7 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
     map.label_display = display;
     map.label_lock = lock;
     map.label_lock_line_anchors = anchors;
-    out
+    if revisions.current([&*map]) { out } else { Vec::new() }
 }
 
 /// A line's longest stretch in view, in points (`None` when none has two points in sight): the
@@ -5693,7 +5822,14 @@ fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
 
 /// [`render_png`]'s map kept as vectors (for a vector PDF) where it can be: flat, north up,
 /// without view effects; anything else, and what is pixels by nature, as pictures.
-pub fn render_drawing(map: &mut Map, view: &View) -> Option<vector::Drawing> {
+/// Returns an actionable error if a linked archive changes during the complete drawing.
+pub fn render_drawing(map: &mut Map, view: &View) -> Result<vector::Drawing, String> {
+    let revisions = archive_revisions([&*map]);
+    let result = render_drawing_inner(map, view);
+    revisions.finish([&*map], result, "could not draw the map")
+}
+
+fn render_drawing_inner(map: &mut Map, view: &View) -> Option<vector::Drawing> {
     let r = render_complete_recorded(map, view)?;
     let mut pm = match r.recorded {
         Some(c) => c,
@@ -5713,8 +5849,70 @@ pub fn render_drawing(map: &mut Map, view: &View) -> Option<vector::Drawing> {
 }
 
 /// Renders a map with its labels, a scale bar and a north arrow to PNG bytes.
+/// Refuses an archive changed during rendering or encoding; a caller must not write a destination on error.
 pub fn render_png(map: &mut Map, view: &View) -> Result<Vec<u8>, String> {
-    let r = render_complete(map, view).ok_or("could not allocate the image")?;
+    let revisions = archive_revisions([&*map]);
+    let r = render_exported(map, view)?;
+    let mut pm = Canvas::from_pixmap(r.pixmap);
+    for l in r.unplaced.iter().chain(&r.labels) {
+        text::draw(&mut pm, l, view.pixels_per_point as f32);
+    }
+    text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
+    draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32);
+    let png = pm.into_pixmap().encode_png().map_err(|e| e.to_string())?;
+    revisions.finish([&*map], Some(png), "could not encode the image")
+}
+
+/// A map drawn as data ([`render_placed`]), with what it holds besides its pixels.
+pub struct Placed {
+    /// The pixels, premultiplied as tiny-skia keeps them.
+    pub pixmap: Pixmap,
+    /// The credits the map's tile layers ask for, for the file to keep.
+    pub credits: Vec<String>,
+    /// Why parts of it may be empty: tiles or streamed data still on their way when the wait
+    /// ran out, tile layers that couldn't be drawn. In a picture placed on the ground a gap looks
+    /// like data, so an export says these.
+    pub gaps: Vec<String>,
+}
+
+/// A map drawn as data, for an image placed on the ground (a GeoTIFF of the view): its layers
+/// and labels (the unplaced ones too, when the map shows them, as [`render_png`] draws them),
+/// without the scale bar and the credits, which sit on the screen, not the ground. Refuses what
+/// [`render_png`] refuses.
+pub fn render_placed(map: &mut Map, view: &View) -> Result<Placed, String> {
+    let revisions = archive_revisions([&*map]);
+    let r = render_exported(map, view)?;
+    let mut gaps = Vec::new();
+    if r.tiles_pending {
+        gaps.push("some tiles were still on their way when the export stopped waiting, so parts of tile layers are empty: export again once the map has drawn them".to_string());
+    }
+    if r.data_pending {
+        gaps.push(
+            "streamed layers were still reading the view, so some features are missing: export again once the map has drawn them"
+                .to_string(),
+        );
+    }
+    if let Some(first) = r.tile_errors.first() {
+        let n = r.tile_errors.len();
+        gaps.push(if n == 1 {
+            format!("a tile layer couldn't be drawn, so its part is empty: {first}")
+        } else {
+            format!("{n} tile layers couldn't be drawn, so their parts are empty; the first: {first}")
+        });
+    }
+    let mut pm = Canvas::from_pixmap(r.pixmap);
+    for l in r.unplaced.iter().chain(&r.labels) {
+        text::draw(&mut pm, l, view.pixels_per_point as f32);
+    }
+    revisions.finish([&*map], Some(Placed { pixmap: pm.into_pixmap(), credits: r.attribution, gaps }), "could not draw the map")
+}
+
+/// The map drawn whole for an export, or why it can't be written: a raster read in place whose
+/// tiles haven't come, or that is drawn from less than the view needs.
+fn render_exported(map: &mut Map, view: &View) -> Result<Rendered, String> {
+    let revisions = archive_revisions([&*map]);
+    let result = render_complete(map, view);
+    let r = revisions.finish([&*map], result, "could not draw the map")?;
     // A raster read in place drawn from less than the view needs isn't written: its tiles still
     // on their way (the browser can't wait; natively the wait ran out), or a coarser level or
     // tiles it couldn't read (`partial`).
@@ -5730,13 +5928,7 @@ pub fn render_png(map: &mut Map, view: &View) -> Result<Vec<u8>, String> {
         });
         return Err(format!("{why}, so the image isn't written"));
     }
-    let mut pm = Canvas::from_pixmap(r.pixmap);
-    for l in r.unplaced.iter().chain(&r.labels) {
-        text::draw(&mut pm, l, view.pixels_per_point as f32);
-    }
-    text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
-    draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32);
-    pm.into_pixmap().encode_png().map_err(|e| e.to_string())
+    Ok(r)
 }
 
 /// The tile layers' credits, small, in the bottom-right corner.
@@ -7760,6 +7952,73 @@ mod tests {
         assert!(upright_markers(&mut m, &view, 0.3).is_empty());
     }
 
+    /// A diagram shows on an extruded polygon in a flat view, over the extrusion, and on a point
+    /// layer in a tilted view, where its markers lie on the ground with it rather than stand up
+    /// (#1596: both drew no chart at all).
+    #[test]
+    fn diagrams_show_on_extruded_polygons_and_tilted_points() {
+        let magenta = rustgis_map::Rgba::rgb(255, 0, 255);
+        let diagram = rustgis_map::DiagramSettings {
+            kind: rustgis_map::DiagramKind::Pie,
+            categories: vec![rustgis_map::DiagramCategory { field: "n".into(), colour: magenta }],
+            size: rustgis_map::DiagramSize::Fixed(12.0),
+            start_angle: 0.0,
+            background: None,
+            stroke: rustgis_map::DiagramSettings::default_stroke(),
+            stroke_width: 0.75,
+            labels: rustgis_map::DiagramLabel::None,
+        };
+        let magentas = |r: &Rendered| {
+            r.pixmap.pixels().iter().filter(|p| p.red() > 200 && p.green() < 60 && p.blue() > 200 && p.alpha() > 200).count()
+        };
+        // An extruded square in a flat view, its chart at the centre.
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("blocks", GeometryType::Polygon, vec![Field::new("n", FieldType::Double)]);
+        let s = 0.9;
+        let ring = vec![Coord::new(-s, -s), Coord::new(s, -s), Coord::new(s, s), Coord::new(-s, s), Coord::new(-s, -s)];
+        d.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Float(5.0)]);
+        let id = m.add_dataset(d);
+        if let Some(l) = m.layer_mut(id) {
+            l.diagram = Some(diagram.clone());
+            l.extrusion = Some(rustgis_map::effects::Extrusion {
+                field: None,
+                height: 20_000.0,
+                factor: 1.0,
+                face_culling: true,
+                lighting: true,
+                shadows: false,
+            });
+        }
+        let flat =
+            View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera: Camera::new(Coord::new(0.0, 0.0), 2000.0), sky: false };
+        let r = render(&mut m, &flat).unwrap();
+        assert!(magentas(&r) > 100, "the extruded square's chart: {} px", magentas(&r));
+        // Tilted, the square stands up and shows no chart (the notice says so).
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 2000.0, bearing: 30.0, pitch: 45.0 };
+        let tilted = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let r = render(&mut m, &tilted).unwrap();
+        assert_eq!(magentas(&r), 0, "no chart on a tilted extrusion");
+        // A point in a tilted view.
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("towns", GeometryType::Point, vec![Field::new("n", FieldType::Double)]);
+        d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Float(5.0)]);
+        let id = m.add_dataset(d);
+        if let Some(l) = m.layer_mut(id) {
+            l.diagram = Some(diagram);
+        }
+        assert!(!stands_up(&m, &m.layers[0]), "a point layer with a diagram lies on the ground");
+        let r = render(&mut m, &tilted).unwrap();
+        assert!(magentas(&r) > 30, "the tilted point's chart: {} px", magentas(&r));
+        // Aggregated, the points draw their bins and no chart (the notice says so).
+        if let Some(l) = m.layer_mut(id) {
+            l.aggregation = Some(rustgis_map::effects::Aggregation { hexagons: true, size: 24.0 });
+        }
+        let r = render(&mut m, &flat).unwrap();
+        assert_eq!(magentas(&r), 0, "no chart on aggregated points");
+    }
+
     #[test]
     fn extrusions_stand_up_in_a_tilted_view() {
         let mut m = Map::new("Map");
@@ -7951,6 +8210,90 @@ mod tests {
         assert!(extruded_shapes(&mut m, &view).is_empty());
         let hidden = render(&mut m, &view).unwrap();
         assert_eq!(hidden.pixmap.pixel(200, 150), hidden.pixmap.pixel(5, 295));
+    }
+
+    /// A map with one extruded square seen tilted, and the layer's id (#1669).
+    fn tilted_extrusion() -> (Map, u32, View) {
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("block", GeometryType::Polygon, vec![]);
+        let ring = vec![Coord::new(-2.0, -2.0), Coord::new(2.0, -2.0), Coord::new(2.0, 2.0), Coord::new(-2.0, 2.0), Coord::new(-2.0, -2.0)];
+        d.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![]);
+        let id = m.add_dataset(d);
+        if let Some(l) = m.layer_mut(id) {
+            l.extrusion = Some(rustgis_map::effects::Extrusion {
+                field: None,
+                height: 200_000.0,
+                factor: 1.0,
+                face_culling: true,
+                lighting: true,
+                shadows: true,
+            });
+        }
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 2_000.0, bearing: 0.0, pitch: 60.0 };
+        (m, id, View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false })
+    }
+
+    #[test]
+    fn a_tilted_extrusion_fades_with_its_layer_and_groups_transparency() {
+        let bytes = |m: &mut Map, v: &View| render(m, v).unwrap().pixmap.data().to_vec();
+        let (mut m, id, view) = tilted_extrusion();
+        let opaque = bytes(&mut m, &view);
+        // The layer not drawn at all: what 100% must show.
+        let set = |m: &mut Map, t: f32| m.layer_mut(id).map(|l| l.transparency = t);
+        if let Some(l) = m.layer_mut(id) {
+            l.visible = false;
+        }
+        let none = bytes(&mut m, &view);
+        assert_ne!(opaque, none);
+        if let Some(l) = m.layer_mut(id) {
+            l.visible = true;
+        }
+        // 0% is as if no transparency were set; 100% shows nothing of the layer; 50% is between.
+        set(&mut m, 0.0);
+        assert_eq!(bytes(&mut m, &view), opaque);
+        set(&mut m, 100.0);
+        assert_eq!(bytes(&mut m, &view), none);
+        set(&mut m, 50.0);
+        let half = bytes(&mut m, &view);
+        assert_ne!(half, opaque);
+        assert_ne!(half, none);
+        // A group's transparency multiplies in: 50% in a layer and in its group is 75% in all.
+        let mut g = rustgis_map::LayerGroup::new("g");
+        g.children = vec![id];
+        g.transparency = 50.0;
+        m.groups.push(g);
+        let both = bytes(&mut m, &view);
+        set(&mut m, 75.0);
+        m.groups.clear();
+        assert_eq!(both, bytes(&mut m, &view));
+        // A group at 100% hides it whatever the layer's own.
+        let mut g = rustgis_map::LayerGroup::new("g");
+        g.children = vec![id];
+        g.transparency = 100.0;
+        m.groups.push(g);
+        set(&mut m, 0.0);
+        assert_eq!(bytes(&mut m, &view), none);
+    }
+
+    #[test]
+    fn extruded_shapes_carry_the_effective_opacity() {
+        let (mut m, id, view) = tilted_extrusion();
+        let alpha = |m: &mut Map| extruded_shapes(m, &view).iter().map(|s| s.fill.a()).collect::<Vec<_>>();
+        assert_eq!(alpha(&mut m), vec![255]);
+        if let Some(l) = m.layer_mut(id) {
+            l.transparency = 50.0;
+        }
+        let mut g = rustgis_map::LayerGroup::new("g");
+        g.children = vec![id];
+        g.transparency = 50.0;
+        m.groups.push(g);
+        // 0.5 * 0.5 of 255, the symbol's own alpha ignored.
+        assert_eq!(alpha(&mut m), vec![64]);
+        if let Some(g) = m.groups.first_mut() {
+            g.transparency = 100.0;
+        }
+        assert!(extruded_shapes(&mut m, &view).is_empty());
     }
 
     #[test]

@@ -939,6 +939,8 @@ static PLUGINS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
+    // A plugin's tab, added or removed by a test running alongside, would change the tab strip.
+    let _turn = PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = harness();
     h.set_size(egui::vec2(900.0, 600.0));
     h.state_mut().ui.tab = "View".into();
@@ -963,6 +965,9 @@ fn a_ribbon_wider_than_the_window_scrolls_with_arrow_buttons() {
 
 #[test]
 fn a_tab_strip_wider_than_the_window_scrolls_with_arrow_buttons() {
+    // Plugins' tabs follow Help, so one removed by a test running alongside while the strip is
+    // scrolled to its end shifts the tabs right, and a click on Help lands on Settings.
+    let _turn = PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = harness();
     // Narrower than the tabs' text alone, whatever the system font: at 560 points the tabs just
     // fit on macOS once its semibold is drawn heavier (#591), so they didn't need to scroll.
@@ -2360,6 +2365,60 @@ fn a_service_is_listed_when_its_capabilities_land() {
     h.step();
 }
 
+/// A listing that stops short says in Add From Service how many layers there are, that its filter
+/// searches only those listed, and how many of them are shown, in one place and not three.
+#[test]
+fn a_cut_listing_says_what_the_filter_searches() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let types: String = (1..=2001).map(|i| format!("<FeatureType><Name>t:{i}</Name></FeatureType>")).collect();
+        let body = format!(
+            r#"<WFS_Capabilities version="2.0.0"><ServiceIdentification><Title>Local</Title></ServiceIdentification><OperationsMetadata><Operation name="GetFeature"><DCP><HTTP><Get href="http://127.0.0.1/wfs?"/></HTTP></DCP></Operation></OperationsMetadata><FeatureTypeList>{types}</FeatureTypeList></WFS_Capabilities>"#
+        );
+        for stream in listener.incoming().take(1) {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+",
+                body.len()
+            );
+            let _ = s.write_all(body.as_bytes());
+        }
+    });
+    let mut h = harness();
+    h.state_mut().run("ui.addService", json!(null)).unwrap();
+    h.step();
+    h.state_mut().run("ui.addService", json!({"url": format!("http://{addr}/wfs"), "type": "wfs"})).unwrap();
+    for _ in 0..200 {
+        h.step();
+        if h.state().ui.service.as_ref().is_some_and(|c| c.listing.is_some() || c.error.is_some() || c.failure.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let conn = h.state().ui.service.as_ref().unwrap();
+    assert_eq!(conn.error, None);
+    assert_eq!(conn.listing.as_ref().unwrap()["total"], 2001);
+    h.step();
+    h.step();
+    h.get_by_label_contains("Local: 2001 layers");
+    h.get_by_label("The filter searches the first 2000 of them; the service.add command adds any other by its name.");
+    h.get_by_label("500 of 2000 are listed.");
+    assert!(h.query_by_label_contains("only the first 2000").is_none(), "the note isn't said twice");
+    h.state_mut().ui.service_browse.filter = "t:20".into();
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains("are listed.").is_none(), "its 12 matches are all shown");
+}
+
 #[test]
 fn connections_section_and_dialog() {
     use std::io::{Read, Write};
@@ -2928,6 +2987,8 @@ fn connections_tree_browses_and_adds() {
 
 /// Save in the web app (issue #197): the browser has no save dialog, so the first Save and every
 /// Save As ask for the file name, and Save then downloads under it; an opened file keeps its name.
+/// A download offered isn't a file saved (the user can cancel the browser's prompt), so the
+/// project keeps its unsaved changes and leaving the page still warns.
 #[test]
 fn web_save_asks_for_the_file_name() {
     let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Vec<u8>)>::new()));
@@ -2949,8 +3010,10 @@ fn web_save_asks_for_the_file_name() {
         app,
     );
     let names = |got: &std::sync::Mutex<Vec<(String, Vec<u8>)>>| got.lock().unwrap().iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-    // A project never saved: Save asks first, with the project's name.
-    h.state_mut().run("layer.color", json!({"layer": "Countries", "color": "#336699"})).unwrap();
+    // A clean document's Save As rename is itself unsaved; no unrelated dirty edit is needed
+    // to keep the browser's close warning active after a download is merely offered.
+    h.state_mut().session.mark_saved();
+    assert!(!h.state().session.dirty());
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, Some("saveProject"));
     assert_eq!(h.state().dialogs.text, "World Atlas.rgis");
@@ -2970,7 +3033,8 @@ fn web_save_asks_for_the_file_name() {
     assert_eq!(h.state().dialogs.open, None);
     assert_eq!(names(&got), ["Trip plan.rgis"]);
     assert_eq!(h.state().session.project.name, "Trip plan");
-    assert!(!h.state().session.dirty());
+    assert!(h.state().session.dirty(), "a download offered doesn't mark the project saved");
+    assert!(h.state().session.notices.iter().any(|n| n.text.starts_with("Download offered: Trip plan.rgis")));
     // Saved once: Save downloads under that name again without asking; Save As asks.
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, None);
@@ -2983,9 +3047,13 @@ fn web_save_asks_for_the_file_name() {
     let bytes = got.lock().unwrap()[0].1.clone();
     h.state_mut().open_picked("test.rgis", &bytes).unwrap();
     assert_eq!(h.state().session.project.name, "test");
+    assert!(!h.state().session.dirty());
     h.state_mut().run("ui.save", json!(null)).unwrap();
     assert_eq!(h.state().dialogs.open, None);
     assert_eq!(names(&got).last().map(String::as_str), Some("test.rgis"));
+    assert!(!h.state().session.dirty(), "an unchanged opened project stays clean after a download offer");
+    let notice = h.state().session.notices.iter().rev().find(|n| n.text.starts_with("Download offered: test.rgis")).unwrap();
+    assert!(!notice.text.contains("unsaved changes"), "{}", notice.text);
     // Another project in its place hasn't been saved: Save asks again, even under the same name.
     let n = names(&got).len();
     h.state_mut().run("project.new", json!({"name": "test"})).unwrap();
@@ -3515,6 +3583,28 @@ fn plugin_panels_run_their_commands_when_a_slider_is_let_go() {
     h.get_by_label("Only versions with local changes").click();
     h.run_steps(3);
     assert!(h.state().session.plugin_panels["ui-panel"].checked("local"));
+    // A range runs nothing while a handle is dragged, and takes the values it shows when let go.
+    let span = |h: &egui_kittest::Harness<'_, RustGisApp>| h.state().session.plugin_panels["ui-panel"].range("span");
+    assert_eq!(span(&h), (2, 8));
+    let rect = h.query_all_by_label("Year span").map(|n| n.rect()).max_by(|a, b| a.width().total_cmp(&b.width())).unwrap();
+    let (from, to) = (egui::pos2(rect.max.x - 2.0, rect.center().y), egui::pos2(rect.center().x, rect.center().y));
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    for i in 1..=6 {
+        h.event(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.step();
+    }
+    assert_eq!(span(&h), (2, 8), "nothing sent while dragging");
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    let (lo, hi) = span(&h);
+    assert!(lo == 2 && (3..8).contains(&hi), "the high handle, sent when let go: {lo}–{hi}");
     // Its button closes it again; a disabled plugin's panel closes.
     h.state_mut().run("ui.pane.plugin", json!({"id": "ui-panel"})).unwrap();
     h.step();

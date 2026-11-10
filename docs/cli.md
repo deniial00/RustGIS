@@ -29,6 +29,11 @@ A data file is zoomed to its full extent; a project keeps its saved view.
 world outline, for `render`, `run` and the other subcommands. `auto` follows
 `RUSTGIS_WORLDVIEW`, else the system time zone and locale.
 
+`--threads N` sets the most threads one piece of work uses (1 to 1024, never more than the
+cores), as [`gp.threads`](user-guide/analysis.md#analysis-workflows) sets it. With `mcp --attach` the
+open app's own setting holds, so `--threads` is refused there. Without it, a run takes
+the computer's cores, up to 16.
+
 ## Chaining commands
 
 `run` starts with an empty project. `--sample` loads the World Atlas sample, `--project <path>`
@@ -117,7 +122,7 @@ rustgis-cli ask --login                             # sign in with ChatGPT to us
 rustgis-cli ask --sample --provider chatgpt "Zoom to Tokyo"
 ```
 
-The provider is `--provider` (`anthropic`, `openai`, `chatgpt`, `gemini`, `openrouter`, `ollama`, `custom`, `requesty`),
+The provider is `--provider` (`anthropic`, `openai`, `chatgpt`, `gemini`, `openrouter`, `ollama`, `custom`, `requesty`, `trustedrouter`),
 else `RUSTGIS_ASSISTANT_PROVIDER`, else the first with a key in the environment, else the app's
 saved provider when `--use-saved-secrets` is set, else Ollama. ChatGPT sign-in is used only when
 that provider is selected. Account management and `--models` do not read saved API keys:

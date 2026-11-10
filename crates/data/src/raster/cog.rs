@@ -418,18 +418,23 @@ fn read_layout(r: Sparse) -> Result<Parse> {
         Ok(Some(v)) => match v.into_string() {
             Ok(t) => super::pam::parse_gdal_metadata(&t),
             Err(e) => {
-                lost.push(format!("its GDAL metadata isn't text ({e}): band and class names are left out"));
+                lost.push(format!("its GDAL metadata isn't text ({e}): band and class names and wavelengths are left out"));
                 None
             }
         },
         Err(e) => {
-            lost.push(format!("its GDAL metadata doesn't decode ({e}): band and class names are left out"));
+            lost.push(format!("its GDAL metadata doesn't decode ({e}): band and class names and wavelengths are left out"));
             None
         }
     };
     let mut levels = Vec::new();
     let mut index = 0usize;
     let mut allowance = MAX_TOTAL_TILES;
+    // Overviews left out for a sample count other than the full image's (its tag's, which a
+    // JPEG YCbCr image's decoded bands may differ from), and how many.
+    let full_samples = dec.find_tag_unsigned::<u16>(Tag::SamplesPerPixel).ok().flatten().unwrap_or(1);
+    let mut mismatched: Vec<String> = Vec::new();
+    let mut mismatched_count = 0usize;
     loop {
         let subfile = dec.find_tag_unsigned::<u32>(Tag::NewSubfileType).ok().flatten().unwrap_or(0);
         // Transparency masks are skipped.
@@ -458,7 +463,17 @@ fn read_layout(r: Sparse) -> Result<Parse> {
             counts.truncate(n);
             // An overview a little larger than the one before isn't an overview of it.
             if levels.last().is_none_or(|l: &Level| w < l.width) {
-                levels.push(Level { ifd: index, width: w, height: h, tile_width: tw, tile_height: th, offsets, counts });
+                // A level decodes as the full image does, with as many samples: an overview with
+                // another count (three of an RGBI image's four) is left out, and said.
+                let samples = dec.find_tag_unsigned::<u16>(Tag::SamplesPerPixel).ok().flatten().unwrap_or(1);
+                if samples == full_samples {
+                    levels.push(Level { ifd: index, width: w, height: h, tile_width: tw, tile_height: th, offsets, counts });
+                } else {
+                    mismatched_count += 1;
+                    if mismatched.len() < 5 {
+                        mismatched.push(format!("image {index} ({samples})"));
+                    }
+                }
             }
         }
         if levels.len() >= MAX_LEVELS || !dec.more_images() {
@@ -466,6 +481,13 @@ fn read_layout(r: Sparse) -> Result<Parse> {
         }
         dec.next_image().map_err(err)?;
         index += 1;
+    }
+    if mismatched_count > 0 {
+        let more = if mismatched_count > mismatched.len() { ", …" } else { "" };
+        lost.push(format!(
+            "{mismatched_count} overview(s) with samples per pixel other than the full image's {full_samples} are left out: {}{more}",
+            mismatched.join(", ")
+        ));
     }
     if levels.is_empty() {
         return Ok(Parse::NotTiled("no image".into()));
@@ -645,6 +667,9 @@ pub struct Example {
     pub sparse: bool,
     /// Without overviews: the full image alone (a file saved without them).
     pub no_overviews: bool,
+    /// Without `classes`: band `b`'s wavelength, 400 + 100 b nanometres, in GDAL's metadata
+    /// (its only item there).
+    pub wavelengths: bool,
 }
 
 impl Default for Example {
@@ -666,6 +691,7 @@ impl Default for Example {
             no_table: false,
             sparse: false,
             no_overviews: false,
+            wavelengths: false,
         }
     }
 }
@@ -804,6 +830,9 @@ pub fn example_with(e: &Example) -> Vec<u8> {
                     r#"<GDALMetadata><Item name="CLASS_3">Forest Formation</Item><Item name="CLASS_15">Pasture</Item></GDALMetadata>"#
                 };
                 t.push((42112, V::A([xml.as_bytes(), b"\0"].concat())));
+            } else if e.wavelengths {
+                let items: String = (0..nb).map(|b| format!(r#"<Item name="wavelength" sample="{b}">{}</Item>"#, 400 + 100 * b)).collect();
+                t.push((42112, V::A([format!("<GDALMetadata>{items}</GDALMetadata>").as_bytes(), b"\0"].concat())));
             }
         }
         if e.int8 {
@@ -1051,7 +1080,7 @@ pub(crate) mod tests {
         bad[entry + 8..entry + 12].copy_from_slice(&(len + 1000).to_le_bytes());
         let Parse::Done(l) = layout(&Sparse::default().with_len(u64::from(len)).with(0, bad)).unwrap() else { panic!("not read") };
         let said: Vec<&String> = l.lost.iter().chain(l.described.iter().flat_map(|d| d.lost.iter())).collect();
-        assert!(said.iter().any(|x| x.contains("band and class names are left out")), "{said:?}");
+        assert!(said.iter().any(|x| x.contains("band and class names and wavelengths are left out")), "{said:?}");
     }
 
     #[test]

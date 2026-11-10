@@ -26,6 +26,7 @@ mod connectiontree;
 mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
 mod connectui;
+mod coordreadout;
 mod cswui;
 mod cubesui;
 mod diagnosticlog;
@@ -65,6 +66,7 @@ mod panes;
 mod pluginpanel;
 mod pluginstart;
 mod pluginsui;
+mod popupmedia;
 mod portalsui;
 #[cfg(not(target_arch = "wasm32"))]
 mod readjob;
@@ -78,6 +80,8 @@ pub enum Landed {
 }
 #[cfg(not(target_arch = "wasm32"))]
 mod relayshot;
+#[cfg(not(target_arch = "wasm32"))]
+mod reloaddata;
 mod repairsource;
 mod reportpane;
 mod ribbon;
@@ -92,12 +96,14 @@ mod shortcutfile;
 mod shortcutui;
 mod showme;
 mod sourcespane;
+mod spectralui;
 mod sqlbox;
 mod sqlpane;
 mod stacui;
 mod table;
 mod textform;
 pub mod theme;
+mod threadsui;
 mod tilelayer;
 mod tilelegend;
 mod tilt_drape;
@@ -119,6 +125,7 @@ use serde_json::{Value, json};
 pub use autosave::FolderStore;
 pub use autosave::{Recovery, RecoveryStore};
 pub use chrome::{DoubleClick, TitlebarMetrics};
+pub use coordreadout::CoordReadout;
 pub use rustgis_assistant;
 pub use rustgis_engine;
 pub use widgets::big_split_menu;
@@ -707,6 +714,8 @@ pub struct UiState {
     pub hidden_tabs: Vec<String>,
     /// Extra Quick Access Toolbar commands.
     pub quick_access: Vec<String>,
+    /// Whether a layout's PDF georeferences its map frames (Layout › Export › Georeference PDF).
+    pub(crate) pdf_georeference: bool,
     /// The native title bar the header is drawn into; set by the desktop app on macOS.
     pub titlebar: Option<TitlebarMetrics>,
     /// Saved pane arrangements: (name, left pane, right pane in view, ribbon tab, right panes open).
@@ -978,6 +987,7 @@ impl Default for UiState {
             geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
+            pdf_georeference: true,
             titlebar: None,
             pane_sets: Vec::new(),
             layer_filter: String::new(),
@@ -1098,6 +1108,9 @@ pub struct RustGisApp {
     /// to give its wake callback yet: `logic` installs the wake as soon as a context exists.
     #[cfg(not(target_arch = "wasm32"))]
     relay_wake_pending: bool,
+    /// Whether session plugins' programs ask for a repaint when they send a line.
+    #[cfg(not(target_arch = "wasm32"))]
+    plugin_wake_set: bool,
     /// Extra font faces installed with the interface fonts: (name, face, script). The current
     /// language's face comes right after the interface font (before it for Arabic script), so its
     /// glyph shapes win; the others are last-resort fallbacks. Faces are shared, so reinstalling
@@ -1124,14 +1137,26 @@ impl RustGisApp {
     /// The layer to export: `layer` (an id or name, as commands take it; the dialog's is checked
     /// against its `instance`, so a reused id isn't taken for it), else the active layer.
     fn export_target(&self, p: &Value) -> Result<u32, String> {
-        if p.get("layer").is_none_or(Value::is_null) {
-            return self.session.active_layer.ok_or_else(|| "select a layer in the Layers pane first".to_string());
+        let gone = || tl!("the layer Export Features was opened on is gone").to_string();
+        match p.get("layer") {
+            None | Some(Value::Null) => {
+                return self.session.active_layer.ok_or_else(|| tl!("select a layer in the Layers pane first").to_string());
+            }
+            Some(Value::Number(_) | Value::String(_)) => {}
+            // Not taken for the active layer: with replaceTable that would overwrite a table.
+            Some(other) => {
+                return Err(crate::i18n::fmt("\"layer\" must be a layer's id or name, not {value}", &[("value", &other.to_string())]));
+            }
         }
         let id = self.session.layer_id(p)?;
-        let l = self.session.map().layer(id).ok_or("the layer Export Features was opened on is gone")?;
-        match p.get("instance").and_then(Value::as_u64) {
-            Some(instance) if instance != l.instance_id() => Err("the layer Export Features was opened on is gone".into()),
-            _ => Ok(id),
+        let l = self.session.map().layer(id).ok_or_else(gone)?;
+        match p.get("instance") {
+            None | Some(Value::Null) => Ok(id),
+            Some(v) => match v.as_u64() {
+                Some(instance) if instance == l.instance_id() => Ok(id),
+                Some(_) => Err(gone()),
+                None => Err(crate::i18n::fmt("\"instance\" must be a layer's instance number, not {value}", &[("value", &v.to_string())])),
+            },
         }
     }
 
@@ -1290,6 +1315,8 @@ impl RustGisApp {
             frame_ctx: None,
             #[cfg(not(target_arch = "wasm32"))]
             relay_wake_pending: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_wake_set: false,
             extra_fonts: Vec::new(),
             installed_region: None,
             fonts_dirty: false,
@@ -1320,6 +1347,8 @@ impl RustGisApp {
         }
         // Theme readers and startup notices keep translated text, so select the language before reading.
         i18n::set_current(self.chosen_lang());
+        // After the language, so a notice about the saved value is in it.
+        threadsui::load(&mut self);
         // A stored value that is neither `auto` nor a known worldview means `auto`.
         if let Some(w) = self.services.load_pref.as_ref().and_then(|load| load("worldview"))
             && rustgis_engine::sample::Worldview::from_code(&w).is_some()
@@ -1360,8 +1389,6 @@ impl RustGisApp {
                 Ok(v) if v.is_null() => self.session.layout_favourite = Value::String("classic".into()),
                 Ok(v) => self.session.layout_favourite = v,
                 Err(why) => {
-                    // Notices are shown as written, and the language is set only in `start`.
-                    i18n::set_current(self.chosen_lang());
                     self.session.layout_favourite = Value::String("classic".into());
                     self.session.notify(
                         crate::i18n::fmt(
@@ -1385,6 +1412,18 @@ impl RustGisApp {
             .unwrap_or_else(|| "Meters".into());
         self.ui.measurement_imperial =
             self.services.load_pref.as_ref().and_then(|load| load("measurement_units")).as_deref() == Some("imperial");
+        // The pointer's coordinate format; a missing one reads as decimal degrees. One this
+        // version doesn't know (a newer RustGIS may have saved it) is said and read as decimal
+        // degrees too. It stays saved until the user picks a format (`ui.coordinateFormat`).
+        if let Some(code) = self.services.load_pref.as_ref().and_then(|load| load(coordreadout::PREF)) {
+            match CoordReadout::from_code(&code) {
+                Some(format) => self.map.coord_format = format,
+                None => {
+                    self.session
+                        .notify(tl!("The saved coordinate format isn't known to this version, so decimal degrees are shown."), false);
+                }
+            }
+        }
         // The GPU map backend: RUSTGIS_GPU forces it on, else the saved preference.
         self.map.gpu_enabled = std::env::var_os("RUSTGIS_GPU").is_some()
             || self.services.load_pref.as_ref().and_then(|load| load("ui.map.gpu")).as_deref() == Some("1");
@@ -1485,6 +1524,7 @@ impl RustGisApp {
             i18n::Script::Cjk(i18n::CjkFont::Korean) => Some(ScriptFont::Cjk(CjkRegion::Korean)),
             i18n::Script::Arabic => Some(ScriptFont::Arabic),
             i18n::Script::Bengali => Some(ScriptFont::Bengali),
+            i18n::Script::Lao => Some(ScriptFont::Lao),
             i18n::Script::Alphabetic => None,
         }
     }
@@ -1528,11 +1568,13 @@ impl RustGisApp {
         r
     }
 
-    /// A layout as PDF or PNG bytes, guarded like `Session::run`.
+    /// A layout as PDF or PNG bytes, guarded like `Session::run`; a PDF georeferenced as Publish ›
+    /// Export › Georeference PDF says.
     fn layout_bytes(&mut self, li: usize, pdf: bool, dpi: f64) -> Result<Vec<u8>, String> {
+        let georeference = self.ui.pdf_georeference;
         let session = &mut self.session;
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rustgis_engine::cmd::layout::layout_bytes(session, li, pdf, dpi, true)
+            rustgis_engine::cmd::layout::layout_bytes_with(session, li, pdf, dpi, true, georeference)
         }))
         .unwrap_or_else(|_| Err("the layout export failed unexpectedly".into()));
         if let Err(e) = &r {
@@ -1705,7 +1747,9 @@ impl RustGisApp {
     }
 
     /// Downloads the project as `file` (web), naming the project after it as Save As does
-    /// natively. A name without the `.rgis` extension gets it.
+    /// natively. A name without the `.rgis` extension gets it. Existing unsaved changes stay
+    /// unsaved, and a rename makes a clean project unsaved: the browser doesn't say whether
+    /// it wrote the file (the save prompt can be cancelled, the download blocked).
     pub(crate) fn save_download(&mut self, file: &str) -> Result<(), String> {
         let file = file.trim();
         let stem = if file.to_ascii_lowercase().ends_with(".rgis") { file.get(..file.len() - 5).unwrap_or(file) } else { file }.trim();
@@ -1717,7 +1761,7 @@ impl RustGisApp {
         }
         let stem: String = stem.chars().take(200).collect();
         // Not an undoable edit: saving names the project, as `project.saveAs` does, once the
-        // file is written.
+        // browser takes the file.
         let old = std::mem::replace(&mut self.session.project.name, stem.clone());
         let (text, report) = match self.session.project.saved_text(None) {
             Ok(saved) => saved,
@@ -1731,17 +1775,24 @@ impl RustGisApp {
             self.session.project.name = old;
             return Err(e);
         }
-        self.session.notify(crate::i18n::fmt("Downloaded {name}", &[("name", &file)]), false);
+        if self.session.project.name != old {
+            // Save As changed the document even when it began clean. Offering a download
+            // cannot confirm that this renamed document reached a file.
+            self.session.mark_unsaved();
+        }
+        self.session.notify(
+            crate::i18n::fmt("Download offered: {name}. The browser doesn't say whether it saved the file.", &[("name", &file)]),
+            false,
+        );
         for notice in report.notices() {
             self.session.notify(notice, false);
         }
-        self.session.mark_saved();
         self.ui.web_file = Some(file);
         Ok(())
     }
 
-    /// Offers bytes as a download (web), and says whether it was delivered (a failure is
-    /// notified).
+    /// Offers bytes as a download (web), and says whether the browser accepted the offer.
+    /// A failure is notified; acceptance does not confirm that a file was saved.
     pub(crate) fn download_bytes(&mut self, name: &str, bytes: Vec<u8>) -> bool {
         self.download(name, bytes)
     }
@@ -1754,7 +1805,7 @@ impl RustGisApp {
                     self.session.notify(e, true);
                     return false;
                 }
-                self.session.notify(crate::i18n::fmt("Downloaded {name}", &[("name", name)]), false);
+                self.session.notify(crate::i18n::fmt("Download offered: {name}", &[("name", name)]), false);
                 true
             }
             None => false,
@@ -1924,7 +1975,8 @@ impl RustGisApp {
         self.themes.iter().find(|t| t.name == self.ui.theme_name).or_else(|| self.themes.iter().find(|t| t.dark == self.ui.dark))
     }
 
-    /// The theme in use: the one named, else the nearest built-in for the current brightness.
+    /// The theme in use: the one named, else the first loaded theme of the current brightness,
+    /// which can be a user theme, else the built-in of that brightness.
     pub fn current_theme(&self) -> theme::Theme {
         self.drawn().cloned().unwrap_or_else(|| {
             let builtin = theme::Theme::builtin();
@@ -1978,7 +2030,7 @@ impl RustGisApp {
     /// Selects a loaded theme and saves its name and brightness; unknown names leave the choice unchanged.
     fn use_theme(&mut self, name: &str) -> Result<(), String> {
         let Some(picked) = self.themes.iter().find(|t| t.name == name).cloned() else {
-            return Err(i18n::fmt("No theme is named {name}.", &[("name", name)]));
+            return Err(i18n::fmt("No theme is named {name}.", &[("name", &theme::clip(name))]));
         };
         self.ui.theme_name = picked.name.clone();
         self.ui.dark = picked.dark;
@@ -2164,6 +2216,8 @@ impl RustGisApp {
         assistantpane::peer_replaced(self);
         self.ui.web_file = None;
         self.map.deleting = None;
+        // A spectral profile's points were read on the old project's rasters.
+        self.workflow.spectral.clear();
         self.retire_cog_probes();
         if let Some(steps) = self.ws.recording.take() {
             self.session.notify(
@@ -2194,6 +2248,17 @@ impl RustGisApp {
 
     /// Runs a command by id: `ui.*` here, everything else in the engine.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.reads_off_frame {
+            let archive = match id {
+                "map.reloadTiles" => Some("map.reloadTiles"),
+                "map.repairTiles" => Some("map.repairTiles"),
+                _ => None,
+            };
+            if let Some(command) = archive {
+                return readjob::run(self, command, params);
+            }
+        }
         self.run_with_prepared(id, params, AppDispatch::Direct)
     }
 
@@ -2264,6 +2329,9 @@ impl RustGisApp {
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();
         }
+        // Nested commands (including scripts) can replace rows too; never retarget a chosen
+        // vertex or held gesture to the replacement feature at the same row.
+        crate::vertexedit::cancel_stale_drag(self);
         if let Err(e) = &r {
             self.command_failed(id, e, notice_mark);
         }
@@ -2278,6 +2346,8 @@ impl RustGisApp {
             self.ui.web_file = None;
             // A deletion asked for in the old project never reaches a namesake in the new one.
             self.map.deleting = None;
+            // Nor are a spectral profile's points read on a namesake raster of the new one.
+            self.workflow.spectral.clear();
             // A recording's steps name the old project's layers: it ends here, and says so.
             if let Some(steps) = self.ws.recording.take() {
                 let n = steps.len().to_string();
@@ -2322,7 +2392,7 @@ impl RustGisApp {
         // fields stay with the old one.
         layoutview::follow_project(self);
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
-            self.map.vertex = None;
+            crate::vertexedit::choose(self, None);
             if let Some(before) = steps_before
                 && task_steps(self).is_none_or(|now| now != before)
             {
@@ -2632,6 +2702,12 @@ impl RustGisApp {
         }
         let toggle_right = |ui: &mut UiState, pane: RightPane| ui.toggle_right(pane);
         match id {
+            "ui.reloadData" => {
+                #[cfg(not(target_arch = "wasm32"))]
+                return reloaddata::request(self, p);
+                #[cfg(target_arch = "wasm32")]
+                return Err(tl!("Reload Data from local files requires the desktop app.").into());
+            }
             "ui.pane.contents" => self.ui.left = if self.ui.left == Some(LeftPane::Contents) { None } else { Some(LeftPane::Contents) },
             "ui.pane.catalog" => self.ui.left = if self.ui.left == Some(LeftPane::Catalog) { None } else { Some(LeftPane::Catalog) },
             "ui.pane.sources" => self.ui.left = if self.ui.left == Some(LeftPane::Sources) { None } else { Some(LeftPane::Sources) },
@@ -2745,6 +2821,7 @@ impl RustGisApp {
                 self.apply_worldview();
             }
             "ui.autosave" => return autosave::command(self, p),
+            "ui.threads" => return threadsui::command(self, p),
             // Adds a file as a drop or Add Data does: one holding several layers asks which (#934).
             "ui.addFile" => {
                 let path = p.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).ok_or("path is required")?;
@@ -2916,6 +2993,18 @@ impl RustGisApp {
                 self.ui.measurement_imperial = imperial;
                 if let Some(save) = &self.services.save_pref {
                     save("measurement_units", if imperial { "imperial" } else { "metric" });
+                }
+            }
+            "ui.coordinateFormat" => {
+                let format = match p.get("format") {
+                    None | Some(Value::Null) => self.map.coord_format.next(),
+                    Some(Value::String(v)) => CoordReadout::from_code(v)
+                        .ok_or_else(|| tl!("The coordinate format must be decimal, dms, utm or mgrs").to_string())?,
+                    _ => return Err(tl!("The coordinate format must be decimal, dms, utm or mgrs").into()),
+                };
+                self.map.coord_format = format;
+                if let Some(save) = &self.services.save_pref {
+                    save(coordreadout::PREF, format.code());
                 }
             }
             "ui.moveSharedVertices" => {
@@ -3379,10 +3468,11 @@ impl RustGisApp {
                         if pdf_only { (&["pdf"], tl!("PDF")) } else { (&["pdf", "png", "svg"], tl!("PDF, PNG or SVG")) };
                     if let Some(path) = dialogs::pick_save(&format!("{name}.pdf"), exts, kinds) {
                         // Drawn on a thread of its own, with progress and Cancel in the status bar.
+                        let params = json!({"layout": li, "path": path, "dpi": 200, "georeference": self.ui.pdf_georeference});
                         #[cfg(not(target_arch = "wasm32"))]
-                        return exportjob::start(self, "layout.export", json!({"layout": li, "path": path, "dpi": 200}));
+                        return exportjob::start(self, "layout.export", params);
                         #[cfg(target_arch = "wasm32")]
-                        return self.run("layout.export", json!({"layout": li, "path": path, "dpi": 200}));
+                        return self.run("layout.export", params);
                     }
                 }
             }
@@ -3514,10 +3604,9 @@ impl RustGisApp {
             }
             "ui.captureMap" => {
                 let session = &mut self.session;
-                let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    rustgis_engine::cmd::share::map_png(session, None, None, Some(192.0))
-                }))
-                .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
+                let png =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0)))
+                        .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
                 let pm = rustgis_engine::render::decode_png(&png).ok_or("could not draw the map")?;
                 let size = [pm.width() as usize, pm.height() as usize];
                 self.ui.copy_image = Some(egui::ColorImage::from_rgba_premultiplied(size, pm.data()));
@@ -3527,22 +3616,28 @@ impl RustGisApp {
             // pass the app's own pixel budget or the renderer's largest side (and says so). A page
             // that would be copied below 36 dpi is an error.
             "ui.captureLayout" => {
-                let li = self.session.active_layout.ok_or("open a layout first")?;
+                let li = self.session.active_layout.ok_or_else(|| tl!("open a layout first").to_string())?;
                 // Text still being typed into the Format pane is part of the page.
                 layoutview::commit_drafts(self);
-                let (w_mm, h_mm) = self.session.project.layouts.get(li).map(|l| (l.width, l.height)).ok_or("open a layout first")?;
+                let (w_mm, h_mm) = self
+                    .session
+                    .project
+                    .layouts
+                    .get(li)
+                    .map(|l| (l.width, l.height))
+                    .ok_or_else(|| tl!("open a layout first").to_string())?;
                 let area = (w_mm / 25.4) * (h_mm / 25.4);
                 let side = rustgis_engine::render::layout::MAX_SIDE * 25.4 / w_mm.max(h_mm);
                 let dpi = CAPTURE_DPI.min((CAPTURE_PIXELS / area).sqrt()).min(side);
                 if dpi < CAPTURE_MIN_DPI {
-                    return Err("the page is too large to copy to the clipboard: export it instead".into());
+                    return Err(tl!("the page is too large to copy to the clipboard: export it instead").into());
                 }
                 let session = &mut self.session;
                 let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     rustgis_engine::cmd::layout::layout_bytes(session, li, false, dpi, false)
                 }))
-                .unwrap_or_else(|_| Err("the capture failed unexpectedly".into()))?;
-                let pm = rustgis_engine::render::decode_png(&png).ok_or("could not draw the layout")?;
+                .unwrap_or_else(|_| Err(tl!("the capture failed unexpectedly").into()))?;
+                let pm = rustgis_engine::render::decode_png(&png).ok_or_else(|| tl!("could not draw the layout").to_string())?;
                 let size = [pm.width() as usize, pm.height() as usize];
                 self.ui.copy_image = Some(egui::ColorImage::from_rgba_premultiplied(size, pm.data()));
                 // The dpi reported is the one the image has, on its smaller scale (a whole pixel
@@ -3842,10 +3937,9 @@ impl RustGisApp {
             "ui.exportMap" if self.services.download.is_some() => {
                 // The same last-resort panic guard `Session::run` gives commands.
                 let session = &mut self.session;
-                let png = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    rustgis_engine::cmd::share::map_png(session, None, None, Some(192.0))
-                }))
-                .unwrap_or_else(|_| Err("Export Map failed unexpectedly".into()));
+                let png =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::share::map_png_fitted(session, 192.0)))
+                        .unwrap_or_else(|_| Err("Export Map failed unexpectedly".into()));
                 let png = match png {
                     Ok(p) => p,
                     Err(e) => {
@@ -3862,7 +3956,7 @@ impl RustGisApp {
             }
             "ui.exportLayer" if self.services.download.is_some() => {
                 let id = self.export_target(p)?;
-                let l = self.session.map().layer(id).ok_or("select a layer in the Layers pane first")?;
+                let l = self.session.map().layer(id).ok_or_else(|| tl!("select a layer in the Layers pane first").to_string())?;
                 // Any format the dialog offers here (`dialogs::export_formats`): not GeoPackage or
                 // FlatGeobuf, which the data crate refuses in the browser.
                 let ext = p.get("format").and_then(Value::as_str).unwrap_or("geojson").to_ascii_lowercase();
@@ -3889,8 +3983,11 @@ impl RustGisApp {
                     dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
                     dbf_notes.extend(io::shapefile_values_notes(ds, &name));
                 }
-                if left_out > 0 {
-                    self.session.notify(format!("{name}: {left_out} features without drawable geometry were left out"), false);
+                if matches!(ext.as_str(), "parquet" | "geoparquet") {
+                    dbf_notes.extend(rustgis_engine::data::source::parquet::values_note(ds, &name));
+                }
+                if let Some(note) = io::left_out_note(&name, &ext, left_out) {
+                    self.session.notify(note, false);
                 }
                 if ext == "zip" && rustgis_engine::data::raster::wkt::to_wkt(crs).is_none() {
                     self.session.notify(format!("{name}: no .prj written, as {} has no WKT form", crs.label()), false);
@@ -3902,8 +3999,13 @@ impl RustGisApp {
                 }
             }
             "ui.exportRaster" if self.services.download.is_some() => {
-                // The web app: encode once and download.
-                match rustgis_engine::cmd::raster::geotiff_bytes(&self.session, &Value::Null) {
+                // The web app: encode once and download. A tile layer is fetched on a thread of
+                // its own, which the browser hasn't: the export says so.
+                if p.get("tiles").is_some_and(|t| !t.is_null()) || self.session.selected_tile().is_some() {
+                    let tiles = p.get("tiles").cloned().unwrap_or(Value::Null);
+                    return self.run("share.exportRaster", json!({"path": "tiles.tif", "tiles": tiles}));
+                }
+                match rustgis_engine::cmd::raster::geotiff_bytes(&mut self.session, &Value::Null) {
                     Ok((name, bytes)) => {
                         self.download(&format!("{name}.tif"), bytes);
                     }
@@ -3914,33 +4016,69 @@ impl RustGisApp {
                 }
             }
             "ui.exportRaster" => {
-                let name = self
-                    .session
-                    .active_layer
-                    .and_then(|id| self.session.map().layer(id))
-                    .map(|l| format!("{}.tif", l.name))
-                    .unwrap_or_default();
+                // A tile layer (the one its menu names, else the one picked) is written over the
+                // view at the zoom it shows.
+                // A tile layer asked for by name or index is that one or none, never another.
+                let tile = match p.get("tiles").filter(|t| !t.is_null()) {
+                    Some(v) => {
+                        let all = &self.session.map().tiles;
+                        let named = v.as_str().and_then(|n| all.iter().position(|t| t.name.eq_ignore_ascii_case(n.trim())));
+                        match v.as_u64().and_then(|i| usize::try_from(i).ok()).or(named).filter(|i| *i < all.len()) {
+                            Some(i) => Some(i),
+                            None => {
+                                let why = tl!("No such tile layer").to_string();
+                                self.session.notify(why.clone(), true);
+                                return Err(why);
+                            }
+                        }
+                    }
+                    None => self.session.selected_tile(),
+                };
+                let tiles = self.session.map().tiles.get(tile.unwrap_or(usize::MAX)).map(|t| t.name.clone());
+                let name = match &tiles {
+                    Some(t) => format!("{t}.tif"),
+                    None => self
+                        .session
+                        .active_layer
+                        .and_then(|id| self.session.map().layer(id))
+                        .map(|l| format!("{}.tif", l.name))
+                        .unwrap_or_default(),
+                };
+                // Neither a tile layer nor a raster: said before the save dialog, not after it.
+                let raster = self.session.active_layer.and_then(|id| self.session.map().layer(id)).is_some_and(|l| l.is_raster());
+                if tiles.is_none() && !raster {
+                    let why = tl!("Select a raster or tile layer in the Layers pane first").to_string();
+                    self.session.notify(why.clone(), true);
+                    return Err(why);
+                }
                 if let Some(path) = dialogs::pick_save(&name, &["tif", "tiff"], tl!("GeoTIFF")) {
+                    let params = match tile.filter(|_| tiles.is_some()) {
+                        Some(i) => json!({"path": path, "tiles": i}),
+                        None => json!({"path": path}),
+                    };
                     // Written on a thread of its own, with progress and Cancel in the status bar.
                     #[cfg(not(target_arch = "wasm32"))]
-                    return exportjob::start(self, "share.exportRaster", json!({"path": path}));
+                    return exportjob::start(self, "share.exportRaster", params);
                     #[cfg(target_arch = "wasm32")]
-                    return self.run("share.exportRaster", json!({"path": path}));
+                    return self.run("share.exportRaster", params);
                 }
             }
             "ui.exportMap" => {
                 let name = format!("{}.png", self.session.map().name);
-                if let Some(path) = dialogs::pick_save(&name, &["png"], tl!("PNG image")) {
+                // A .tif is the view placed on the ground (a GeoTIFF), without the scale bar.
+                if let Some(path) = dialogs::pick_save(&name, &["png", "tif", "tiff"], tl!("PNG image or GeoTIFF")) {
+                    // 192 DPI, or the most a view too large for it holds (the export says so).
+                    let args = json!({"path": path, "dpi": 192, "fit": true});
                     // Drawn on a thread of its own, with progress and Cancel in the status bar;
                     // here while a style added with its own view loads, as the command waits for
                     // it to move the map there first.
                     #[cfg(not(target_arch = "wasm32"))]
                     if self.session.style_view.is_none() {
-                        return exportjob::start(self, "share.exportMap", json!({"path": path, "dpi": 192}));
+                        return exportjob::start(self, "share.exportMap", args);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     exportjob::idle(self)?;
-                    return self.run("share.exportMap", json!({"path": path, "dpi": 192}));
+                    return self.run("share.exportMap", args);
                 }
             }
             "ui.exportLayer" => {
@@ -4332,10 +4470,10 @@ impl RustGisApp {
                 if let Some(zoom) = p.get("zoom") {
                     q["zoom"] = zoom.clone();
                 }
-            } else if let Some(zoom) =
-                p.get("zoom").and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| matches!(s, "true" | "yes" | "1" | "on"))))
-            {
-                q["zoom"] = json!(zoom);
+            } else if let Some(zoom) = p.get("zoom").filter(|v| !v.is_null()) {
+                // Read as the engine reads a true/false parameter; a value it can't read goes on
+                // as given, for the command adding the download to read as false and say so (#1600).
+                q["zoom"] = rustgis_engine::cmd::bool_value(zoom).map_or_else(|| zoom.clone(), |z| json!(z));
             }
             if let Some(number) = p.get("request").filter(|v| v.is_u64()) {
                 q["request"] = number.clone();
@@ -4453,11 +4591,14 @@ impl RustGisApp {
                     }
                 }
                 Err(e) => {
+                    // A waiting command's error names the address, as the notice does.
+                    // Redacted whole, as the notice is: a key with a space in it isn't left half there.
+                    let e = if e.starts_with(&url) { e } else { format!("{url}: {e}") };
+                    let e = rustgis_engine::Session::redacted(&e).into_string();
                     self.session.request_failed(&p, &e);
                     if let Some(id) = claim {
                         self.session.download_failed(id);
                     }
-                    let e = if e.starts_with(&url) { e } else { format!("{url}: {e}") };
                     self.landed_in_dialog(&p, Err(&e));
                     self.session.notify(e, true);
                 }
@@ -4628,7 +4769,7 @@ impl RustGisApp {
         let shown = rustgis_engine::sources::redact(&url);
         p["id"] = json!(id);
         p["url"] = json!(url);
-        let zoom = p.get("zoom").and_then(Value::as_bool) == Some(true);
+        let zoom = p.get("zoom").and_then(rustgis_engine::cmd::bool_value) == Some(true);
         if zoom && self.ui.link_zoomed {
             p["zoom"] = json!(false);
         }
@@ -4689,10 +4830,17 @@ impl RustGisApp {
 
     /// Tells how a service layer added outside the add-service dialog (or in it) went: in the
     /// dialog's own line, or as a notice for the Connections tree.
-    fn report_step(&mut self, dialog: bool, r: Result<String, String>) {
-        match (dialog, r) {
+    /// `shown` is the line the step put in the dialog: the dialog is told only while it still
+    /// shows that line (a failure clears it), so a late step never overwrites a newer add's line
+    /// and is told as a notice instead.
+    fn report_step(&mut self, dialog: bool, shown: Option<&str>, r: Result<String, String>) {
+        let in_dialog = dialog && self.dialogs.open == Some("addService") && shown.is_some() && self.dialogs.info.as_deref() == shown;
+        match (in_dialog, r) {
             (true, Ok(m)) => self.dialogs.info = Some(m),
-            (true, Err(e)) => self.dialogs.error = Some(connectionui::translated(&e)),
+            (true, Err(e)) => {
+                self.dialogs.info = None;
+                self.dialogs.error = Some(connectionui::translated(&e));
+            }
             (false, Ok(m)) => self.session.notify(m, false),
             (false, Err(e)) => self.session.notify(connectionui::translated(&e), true),
         }
@@ -4758,7 +4906,7 @@ impl RustGisApp {
                                 }
                                 Err(e) => {
                                     self.notice_service_query_loss(resolve.withheld_addresses);
-                                    self.report_step(dialog, Err(e));
+                                    self.report_step(dialog, pending.as_deref(), Err(e));
                                     continue;
                                 }
                             }
@@ -4787,7 +4935,7 @@ impl RustGisApp {
                         connectiontree::name_recent(self, before, origin.as_deref());
                     }
                     let r = r.map(|_| serviceui::added(&title));
-                    self.report_step(dialog, r);
+                    self.report_step(dialog, pending.as_deref(), r);
                     self.map.invalidate();
                 }
                 ServiceStep::Coverage { mut params, slot, dialog, origin, opened } => {
@@ -4819,7 +4967,7 @@ impl RustGisApp {
                         }
                         connectiontree::run_add_url(self, p, origin.as_deref())
                     });
-                    self.report_step(dialog, r.map(|_| serviceui::downloading(&title)));
+                    self.report_step(dialog, pending.as_deref(), r.map(|_| serviceui::downloading(&title)));
                 }
             }
         }
@@ -4883,7 +5031,7 @@ impl RustGisApp {
             self.frame_ctx = Some(ctx.clone());
             // Agents the user turned on last time: the relay starts with the app.
             connectui::resume(self);
-            if let Some(relay) = &self.relay {
+            if let Some(relay) = self.relay.clone() {
                 // A relay started before the first frame has no wake yet; now there is a context
                 // to ask for repaints with.
                 if self.relay_wake_pending {
@@ -4895,11 +5043,30 @@ impl RustGisApp {
                 relay.set_screen(relayshot::map_shown(self, ctx));
                 // Only a request that changed the project ends a label move: a read-only one leaves it.
                 let state = self.session.state();
-                if relay.poll(&mut self.session) > 0 && self.session.state() != state {
+                relay.poll(&mut self.session);
+                if self.session.state() != state {
                     self.map.cancel_label_drag();
+                }
+                if let Some(ahead) = relay.take_archive_read() {
+                    readjob::admitted(self, ahead, relay);
                 }
             }
             relayshot::drive(self, ctx);
+            // Session plugins' programs: what they asked, and what changed on the map for them.
+            if !self.plugin_wake_set {
+                let ctx = ctx.clone();
+                rustgis_engine::plugins::session::set_wake(std::sync::Arc::new(move || ctx.request_repaint()));
+                self.plugin_wake_set = true;
+            }
+            let state = self.session.state();
+            if self.session.poll_plugin_sessions() > 0 && self.session.state() != state {
+                self.map.cancel_label_drag();
+            }
+            // A program that exits without a last line (something it left running holds its output
+            // open) wakes nothing: while one runs, the app looks at least once a second.
+            if !rustgis_engine::plugins::session::running().is_empty() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
             // A script an agent wrote to the file bridge.
             if let Some(bridge) = self.file_bridge.clone() {
                 if !bridge.has_wake() {
@@ -5023,7 +5190,7 @@ impl RustGisApp {
             let region = [CjkRegion::SimplifiedChinese, CjkRegion::Japanese, CjkRegion::Korean]
                 .map(ScriptFont::Cjk)
                 .into_iter()
-                .chain([ScriptFont::Arabic, ScriptFont::Bengali])
+                .chain([ScriptFont::Arabic, ScriptFont::Bengali, ScriptFont::Lao])
                 .find(|r| script_font_url(*r) == Some(url.as_str()));
             if bytes.is_empty() || !valid_font(&bytes, 0) {
                 // A failed download: say so; picking the language again retries.
@@ -5266,8 +5433,9 @@ impl RustGisApp {
         // egui times clicks by the frame they arrive in: at a slow frame rate the two clicks of a
         // double-click land too far apart for its default delay (#1321). It reads the delay when
         // the next frame begins, before that frame's `logic`, so it's set here, from this frame's
-        // work so far (a map drawn on the CPU) and from the last frame's length, painting included
-        // (`stable_dt` leaves out the time spent idle between frames).
+        // work so far (a map drawn on the CPU) and from egui's `stable_dt`. That is the last
+        // frame's real length only when the frame before it asked for an immediate repaint, and
+        // egui's `predicted_dt` otherwise, so a frame slow only in painting can go unseen.
         if let Some(start) = self.frame_start.take() {
             let dt = ctx.input(|i| i.stable_dt).max(start.elapsed().as_secs_f32());
             ctx.options_mut(|o| o.input_options.max_double_click_delay = double_click_delay(dt));
@@ -5507,6 +5675,7 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "data.similar",
     "layer.geocode",
     "layer.repairSource",
+    "layer.reloadData",
     "report.new",
     "report.open",
     "share.webLayer",
@@ -6211,10 +6380,13 @@ mod vertex_undo_tests {
         let id = app.session.map().layer_by_name("Paths").unwrap().id;
         let insert = json!({"layer": id, "row": row, "action": "insert", "index": 0, "lon": 0.5, "lat": 0});
         app.run("edit.vertex", insert).unwrap();
-        app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
+        let chosen = Some((id, row, VertexId::new(0, 0, 1)));
+        crate::vertexedit::choose(&mut app, chosen);
+        assert_eq!(app.map.vertex, chosen, "chosen before undo");
         app.run("edit.undo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "undo");
-        app.map.vertex = Some((id, row, VertexId::new(0, 0, 1)));
+        crate::vertexedit::choose(&mut app, chosen);
+        assert_eq!(app.map.vertex, chosen, "chosen before redo");
         app.run("edit.redo", Value::Null).unwrap();
         assert_eq!(app.map.vertex, None, "redo");
     }
@@ -6404,6 +6576,34 @@ mod download_service_tests {
         }
     }
 
+    /// A failed step clears its own "still working" line beside the error; one that lands after a
+    /// newer add leaves that add's line alone and is told as a notice.
+    #[test]
+    fn a_failed_service_step_clears_only_its_own_line() {
+        for (newer, open) in [(false, true), (true, true), (false, false)] {
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            let params = json!({"url":"https://h.invalid/wcs", "name":"Heights"});
+            let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(Err("the server is down".to_string()))));
+            let opened = app.session.opened;
+            app.ui.service_steps.push(super::ServiceStep::Coverage { params, slot, dialog: true, origin: None, opened });
+            app.dialogs.info = Some(if newer { "Reading the tileset of Roads" } else { "Describing Heights" }.into());
+            app.dialogs.open = open.then_some("addService");
+            app.poll_service_steps();
+            if !open {
+                // Closed, the dialog would keep the error unseen: it is told as a notice.
+                assert!(app.dialogs.error.is_none(), "{:?}", app.dialogs.error);
+                assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("the server is down")));
+            } else if newer {
+                assert_eq!(app.dialogs.info.as_deref(), Some("Reading the tileset of Roads"), "the newer line stays");
+                assert!(app.dialogs.error.is_none(), "{:?}", app.dialogs.error);
+                assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("the server is down")));
+            } else {
+                assert!(app.dialogs.info.is_none(), "the step's own line is cleared: {:?}", app.dialogs.info);
+                assert!(app.dialogs.error.as_deref().is_some_and(|e| e.contains("the server is down")), "{:?}", app.dialogs.error);
+            }
+        }
+    }
+
     #[test]
     fn retired_service_steps_clear_only_their_own_pending_dialog() {
         for coverage in [false, true] {
@@ -6467,7 +6667,7 @@ mod download_service_tests {
         assert!(app.save_download("renamed.rgis").is_err());
         assert_eq!(app.session.project.name, name);
         assert_eq!(app.ui.web_file, saved_name);
-        assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("Download offered")));
         assert!(!app.download("archive.pmtiles", vec![1, 2, 3]));
         assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
         assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
@@ -6567,6 +6767,14 @@ mod download_service_tests {
         // A layer by name is that layer; one not there is refused, not taken for the active one.
         let e = app.run("ui.exportLayer", json!({"format": "gpkg", "mode": "addTable", "layer": "Nowhere"})).unwrap_err();
         assert!(e.contains("Nowhere"), "{e}");
+        // A layer or instance of the wrong kind is refused, not taken for the active or a reused layer.
+        let e =
+            app.run("ui.exportLayer", json!({"format": "gpkg", "mode": "replaceTable", "tableName": "Cities", "layer": true})).unwrap_err();
+        assert!(e.contains("\"layer\""), "{e}");
+        let e = app
+            .run("ui.exportLayer", json!({"format": "gpkg", "mode": "replaceTable", "tableName": "Cities", "layer": id, "instance": "7"}))
+            .unwrap_err();
+        assert!(e.contains("\"instance\""), "{e}");
         // Cancelling the pick writes nothing.
         let before = std::fs::read(&path).unwrap();
         app.run("ui.exportLayer", json!({"format": "gpkg", "mode": "replaceTable", "tableName": "Cities"})).unwrap();
