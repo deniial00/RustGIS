@@ -81,7 +81,7 @@ fn send_with(req: &HttpRequest, timeout: std::time::Duration, mut on_chunk: Opti
 /// The scheme and authority of an already-sanitized address, without its omission suffix. A
 /// root address keeps the `/` that separates it from a following `: `; a path is dropped whole.
 fn host(shown: &str) -> &str {
-    let url = shown.strip_suffix("[query omitted]").unwrap_or(shown);
+    let url = shown.strip_suffix("[query omitted]").or_else(|| shown.strip_suffix("[fragment omitted]")).unwrap_or(shown);
     let Some((scheme, rest)) = url.split_once("://") else { return url };
     let end = match rest.find('/') {
         Some(at) if at + 1 == rest.len() => url.len(),

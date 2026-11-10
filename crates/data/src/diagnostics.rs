@@ -589,12 +589,30 @@ fn base64_shaped(word: &str) -> bool {
 }
 
 /// A slash (or a backslash, which URL parsers read as one) before `@` can disguise userinfo as
-/// an authority and path.
+/// an authority and path; a `?` or `#` before an `@` in the authority disguises it as a query
+/// or fragment. Takes the whole address, query included.
 fn ambiguous_userinfo(address: &str) -> bool {
     let Some((_, rest)) = address.split_once("://") else { return false };
+    // `u:123?w@host`: the password ends at the `@`, not at the `?` a parser stops at.
+    let raw_authority = rest.split(['/', '\\']).next().unwrap_or("");
+    if raw_authority.split_once('@').is_some_and(|(before, _)| before.contains(['?', '#'])) {
+        return true;
+    }
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
     let Some((authority, path)) = rest.split_once(['/', '\\']) else { return false };
     let Some((before_at, _)) = path.split_once('@') else { return false };
     !authority.contains('@') && !authority.starts_with('[') && (authority.contains(':') || before_at.contains(':'))
+}
+
+/// Whether a word of text too long to scan names an address whose query or userinfo may hold
+/// a credential: a linear look at each `://` word, without the full scanner.
+fn may_hold_secret(text: &str) -> bool {
+    text.split_whitespace().filter(|word| word.contains("://")).any(|word| {
+        ambiguous_userinfo(word)
+            || word
+                .split_once(['?', '#'])
+                .is_some_and(|(_, query)| query.split(['&', ';', '#']).any(|pair| secret_name(pair.split('=').next().unwrap_or(""))))
+    })
 }
 
 /// Sanitizes a known address on its own, before composing it with diagnostic prose.
@@ -626,7 +644,7 @@ pub fn address_in_message(address: &str) -> String {
         return "[address omitted]".to_string();
     }
     // Do not guess which interpretation of a slash-containing authority held a password.
-    if ambiguous_userinfo(before_query) {
+    if ambiguous_userinfo(address) {
         return "[address omitted]".to_string();
     }
     let url = address.contains("://");
@@ -654,8 +672,8 @@ pub fn address_in_message(address: &str) -> String {
     {
         shown.push('/');
     }
-    if url && before_query.len() < address.len() {
-        shown.push_str("[query omitted]");
+    if url && let Some(cut) = address.get(before_query.len()..).filter(|cut| !cut.is_empty()) {
+        shown.push_str(if cut.starts_with('#') { "[fragment omitted]" } else { "[query omitted]" });
     }
     shown
 }
@@ -748,12 +766,13 @@ pub fn redact_parameter(text: &str) -> String {
 /// that value ends, so callers use this result instead of retaining the later words.
 pub fn secret_continuation_cut(text: &str) -> Option<String> {
     // Detected before the output is bounded: a long prefix must not cut the marker away. Text
-    // too long to scan can't be shown to end its addresses' values, so with an address in it
-    // the whole text goes, said.
+    // too long to scan goes whole only when one of its addresses may hold a credential, and the
+    // marker says how much went and why; other long text keeps its words.
+    if text.len() > MAX_INPUT_BYTES {
+        return may_hold_secret(text).then(|| format!("[{} bytes of text omitted: too long to check its addresses]", text.len()));
+    }
     let mut strict = redact_scan(text, true);
-    let cut = ["[query and the rest omitted]", "[address and the rest omitted]"].iter().any(|m| strict.contains(m))
-        || (text.len() > MAX_INPUT_BYTES && text.contains("://"));
-    if !cut {
+    if !["[query and the rest omitted]", "[address and the rest omitted]"].iter().any(|m| strict.contains(m)) {
         return None;
     }
     cut_with_ellipsis(&mut strict, MAX_DETAILS_BYTES);
@@ -858,7 +877,7 @@ fn redact_scan(text: &str, diagnostic: bool) -> String {
                     field_before = false;
                     continue;
                 }
-                if ambiguous_userinfo(address.split(['?', '#']).next().unwrap_or("")) {
+                if ambiguous_userinfo(address) {
                     // Its password may run on past whitespace, as a secret query's may: the rest
                     // goes too, and the marker says so.
                     out.push_str("[address and the rest omitted]");
@@ -1177,10 +1196,16 @@ mod tests {
         // An ambiguous address cuts as a secret query does.
         let ambiguous = "run failed at https://u:123/w@h/x hidden-tail: HTTP 500";
         assert_eq!(secret_continuation_cut(ambiguous).as_deref(), Some("run failed at [address and the rest omitted]"));
-        // Text too long to scan goes whole when it holds an address; without one it is left
-        // to the address scrubber, which has nothing to do.
+        // Text too long to scan goes whole, said with its size, only when an address in it may
+        // hold a credential; a long text with a public link keeps its words.
         let oversized = format!("{} https://example.org/a?token=hidden hidden-tail", "word ".repeat(4000));
-        assert_eq!(secret_continuation_cut(&oversized).as_deref(), Some("[oversized diagnostic omitted]"));
+        assert_eq!(
+            secret_continuation_cut(&oversized),
+            Some(format!("[{} bytes of text omitted: too long to check its addresses]", oversized.len()))
+        );
+        let ambiguous = format!("{} https://u:123?w@host/x tail", "word ".repeat(4000));
+        assert!(secret_continuation_cut(&ambiguous).is_some());
+        assert_eq!(secret_continuation_cut(&format!("{} see https://example.org/a?page=2 then", "word ".repeat(4000))), None);
         assert_eq!(secret_continuation_cut(&"word ".repeat(4000)), None);
         assert_eq!(secret_continuation_cut("failed at https://example.org/a: HTTP 500"), None);
     }
@@ -1284,6 +1309,8 @@ mod tests {
             "https://u:123/w@host/x?token=hidden",
             "https://alice:hidden/path@host/x",
             "https://alice/part:123@host/x",
+            "https://u:123?w@host/x",
+            "https://u:123#w@host/x",
             "https://u:123\\w@host/x",
         ] {
             let shown = address_in_message(address);
@@ -1304,6 +1331,13 @@ mod tests {
             assert_eq!(address_in_message(address), address);
             assert_eq!(message_with_address(address, "HTTP 503"), format!("{address}: HTTP 503"));
         }
+        // An `@` in a query after a path is no userinfo: the host and port stay readable.
+        let address = "https://h:80/x?email=a@b";
+        assert_eq!(message_with_address(address, "HTTP 503"), "https://h:80/x[query omitted]: HTTP 503");
+        // A fragment alone is said as one, and the label survives redacting again.
+        let shown = address_in_message("https://h.example/a#frag");
+        assert_eq!(shown, "https://h.example/a[fragment omitted]");
+        assert_eq!(redact(&shown), shown);
         let clean = message_with_address("https://alice:123%2Fw@host/x", "HTTP 503");
         assert!(clean.contains("HTTP 503") && !clean.contains("alice") && !clean.contains("123"), "{clean}");
     }
