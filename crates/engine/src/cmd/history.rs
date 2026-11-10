@@ -309,6 +309,16 @@ fn secret_pairs_emptied(t: &str) -> String {
             rest = rest.get(next..).unwrap_or("");
             continue;
         };
+        // A secret directly after a `?` in a word (`data.tif?token=abc def`) is a query, not a
+        // libpq pair: a URL query holds no raw space, so its later words may be the value's. The
+        // rest goes, said, as for an address with a scheme.
+        if let Some((k, _)) = pair.filter(|_| item.contains('?'))
+            && let Some(q) = k.find('?')
+        {
+            out.push_str(rest.get(..q).unwrap_or(""));
+            out.push_str("[query and the rest omitted]");
+            return out;
+        }
         // The name and the `=`, as they are (spaces before the value go: the separator follows).
         out.push_str(rest.get(..at).unwrap_or("").trim_end());
         // Past the value: to its closer when it opens with a quote or a brace, then to the next
@@ -444,4 +454,35 @@ fn shell(t: &str) -> String {
 /// break in it would leave the rest of it outside the comment, as code.
 fn line(t: &str) -> String {
     t.chars().map(|c| if c.is_control() || c == '\u{2028}' || c == '\u{2029}' { ' ' } else { c }).take(300).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A URL query holds no raw space: a secret in a scheme-less address's query may run on past
+    /// one, so the rest is cut, said. Spaces in other text and libpq pairs stay as they were.
+    #[test]
+    fn a_secret_query_in_a_schemeless_address_cuts_the_rest() {
+        for text in ["data.tif?token=abc def", "data.tif?token=abc def ghi", "see data.tif?access_token=abc def"] {
+            for clean in [redacted_parameter(text), redacted_text(text)] {
+                assert!(clean.ends_with("[query and the rest omitted]"), "{text} -> {clean}");
+                for private in ["abc", "def", "ghi", "token"] {
+                    assert!(!clean.contains(private), "{private} in {text} -> {clean}");
+                }
+            }
+        }
+        assert_eq!(redacted_parameter("see data.tif?token=abc def"), "see data.tif[query and the rest omitted]");
+        for text in [
+            "/data/a b.tif?x=1",
+            "/data/a.tif?sig=abc def&x=1 y",
+            "a.tif?key=abc def",
+            "data.tif?v=2 and more words",
+            "host=h dbname=g user=u",
+        ] {
+            assert_eq!(redacted_parameter(text), text, "{text}");
+        }
+        // A libpq pair has no `?`: its value ends at the space, the next word is a pair of its own.
+        assert_eq!(redacted_parameter("host=h password=abc dbname=g"), "host=h password= dbname=g");
+    }
 }

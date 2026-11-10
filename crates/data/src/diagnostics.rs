@@ -604,6 +604,30 @@ fn ambiguous_userinfo(address: &str) -> bool {
     !authority.contains('@') && !authority.starts_with('[') && (authority.contains(':') || before_at.contains(':'))
 }
 
+/// How many words after a bare `scheme://user:pass` token may still be its password's.
+const PASSWORD_WORDS: usize = 4;
+
+/// Whether an address token that ends at whitespace may be the front of `scheme://user:pass word@host`:
+/// nothing but `x:y` after the scheme (no path, query or `@` yet), and a word with an `@` before a
+/// slash on the same line. `tail` is the text after the token. When `y` can't be a port (`pass`),
+/// the word may be any of the next [`PASSWORD_WORDS`]. When it can (`12`, `8080`), `x:y` may just
+/// as well be a host and port, so only the very next word counts: `https://host:8080 failed,
+/// contact admin@example.org` keeps its reason. The caller omits the rest. `https://host:8080/x
+/// user@example.org` has a path and keeps its words.
+fn password_runs_on(address: &str, tail: &str) -> bool {
+    let Some((_, rest)) = address.split_once("://") else { return false };
+    let Some((user, pass)) = rest.split_once(':') else { return false };
+    if user.is_empty() || pass.is_empty() || rest.contains(['/', '\\', '?', '#', '@', '[', ']']) {
+        return false;
+    }
+    let digits = pass.trim_end_matches([',', ';', '.', ')', ':']);
+    let port = !digits.is_empty() && digits.len() <= 5 && digits.bytes().all(|b| b.is_ascii_digit());
+    let words = if port { 1 } else { PASSWORD_WORDS };
+    tail.split('\n').next().unwrap_or("").split_whitespace().take(words).any(|word| {
+        word.split_once('@').is_some_and(|(before, _)| !before.is_empty() && !before.contains(['/', '\\']) && !word.contains("://"))
+    })
+}
+
 /// Whether a word of text too long to scan names an address whose query or userinfo may hold
 /// a credential: a linear look at each `://` word, without the full scanner.
 fn may_hold_secret(text: &str) -> bool {
@@ -881,7 +905,7 @@ fn redact_scan(text: &str, diagnostic: bool) -> String {
                     field_before = false;
                     continue;
                 }
-                if ambiguous_userinfo(address) {
+                if ambiguous_userinfo(address) || password_runs_on(address, rest.get(url_end..).unwrap_or("")) {
                     // Its password may run on past whitespace, as a secret query's may: the rest
                     // goes too, and the marker says so.
                     out.push_str("[address and the rest omitted]");
@@ -1340,6 +1364,63 @@ mod tests {
             assert!(clean.ends_with(": HTTP 401"), "{clean}");
             assert_eq!(redact(&clean), clean);
         }
+    }
+
+    #[test]
+    fn unknown_address_passwords_with_spaces_are_cut_through_their_at_sign() {
+        for text in [
+            "see https://alice:pass word@host/x failed",
+            "see https://alice:12 word@host/x failed",
+            "https://alice:pass wo rd@host/x failed",
+            "https://alice:pa ss word@host:80/x failed",
+            "https://alice:12 word@example.org",
+            // `host:8080` reads as `alice:12`: an email right after it is cut, and the marker says so.
+            "see https://host:8080 user@example.org",
+            "see https://alice:pa\tss@host/x failed",
+        ] {
+            for clean in [redact(text), redact_parameter(text)] {
+                assert!(clean.ends_with("[address and the rest omitted]"), "{text} -> {clean}");
+                for private in ["alice", "pass", "pa ", "12", "word", "wo ", "rd@", "ss@", "@", "failed"] {
+                    assert!(!clean.contains(private), "{private} in {text} -> {clean}");
+                }
+                assert_eq!(redact(&clean), clean);
+            }
+            // A saved copy is cut the same way, and says so.
+            let saved = secret_continuation_cut(text).unwrap_or_default();
+            assert!(saved.ends_with("[address and the rest omitted]") && !saved.contains('@'), "{text} -> {saved}");
+        }
+        // The cut is on one line: the next one is another message.
+        assert_eq!(redact("https://alice:pass word\nthen user@example.org"), "[address omitted] word\nthen user@example.org");
+    }
+
+    #[test]
+    fn addresses_without_an_open_password_keep_the_words_after_them() {
+        for text in [
+            // A path ends the authority: the colon is a port's, and the email is prose.
+            "see https://host:8080/x user@example.org failed",
+            "see https://host:8080/ user@example.org failed",
+            // No colon in the authority, so no password to run on.
+            "see https://host user@example.org failed",
+            "https://host/x and mail user@example.org",
+            // No `@` within reach of the address.
+            "see https://host:8080 is down, ask your admin to restart it at ops@example.org",
+            "see https://host:8080 failed",
+            // A host and port is ambiguous with a short password: only the next word counts.
+            "see https://host:8080 failed, contact admin@example.org",
+            "see https://host:8080\nuser@example.org",
+            "https://example.org: timeout, mail ops@example.org",
+            // The local part of a word before `@` is a path, not a password's tail.
+            "see https://host:8080 /tmp/a@2x.png failed",
+        ] {
+            assert_eq!(redact(text), text, "{text}");
+            assert_eq!(redact_parameter(text), text, "{text}");
+            assert_eq!(secret_continuation_cut(text), None, "{text}");
+        }
+        // A later address is its own: only its user information goes, not the words around it.
+        assert_eq!(redact("see https://host:8080 https://u@example.org/x failed"), "see https://host:8080 https://example.org/x failed");
+        // A port followed by `:` is no valid address (omitted whole), but its reason stays.
+        let clean = redact("https://host:8080: HTTP 503 (ask ops@example.org)");
+        assert_eq!(clean, "[address omitted] HTTP 503 (ask ops@example.org)");
     }
 
     #[test]
