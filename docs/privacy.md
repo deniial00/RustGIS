@@ -28,8 +28,9 @@ fragment are omitted, including values with unescaped spaces. For an unknown URL
 free text, a secret-named query or fragment still omits the rest of that text: those later
 words might be part of the credential, not an explanation. The same rule applies to copied
 history errors, saved run messages and notebook cell output. Scheme-less text is cut only in
-copied history errors, the parameters of copied code, and the project log's saved parameters and
-errors: a secret in the query or fragment of one of its words (`data.tif?token=abc def`,
+copied history errors and the project log's saved parameters and errors (Copy as code keeps opaque
+text parameters and says so, as below):
+a secret in the query or fragment of one of its words (`data.tif?token=abc def`,
 `a.tif?x=1;token=abc def`) goes with the rest of the text, saying
 `[query and the rest omitted]`. A word alone (`data.tif?pwd=hunter2`) has only the secret's
 value emptied, with no marker. A `key`, `sig` or `sas` counts only when its value reads as a key,
