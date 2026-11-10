@@ -33,8 +33,9 @@ which goes with the rest of the text, saying `[query and the rest omitted]`. For
 `scheme://` URL, a query with no secret name (`?custom=hidden unescaped hidden`) is omitted only
 to its first space: the redactor can't tell a value's later words from prose, so they are kept.
 Ambiguous slash-containing userinfo is omitted rather than guessed to be a host, port and path.
-So is a bare `scheme://name:text` (no `/`, `\`, `?`, `#`, `@` or IPv6 `[` in it, and a `text` that
-isn't empty once trailing punctuation is trimmed) of an unknown URL when a word with an `@` (and
+So is a bare `scheme://name:text` (no `/`, `\`, `?`, `#` or `@` in it, not an IPv6 host in
+brackets, ended by whitespace rather than a quote, and a `text` that isn't empty once trailing
+punctuation is trimmed) of an unknown URL when a word with an `@` (and
 something before it, no slash, not another address) follows on its line
 (`https://alice:pass word@host/x`, `redis://:pa ss@host`): the text may be a password with a
 space in it, so the rest of the text is omitted too, saying `[address and the rest omitted]`.

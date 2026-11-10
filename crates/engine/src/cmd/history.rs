@@ -201,8 +201,9 @@ fn secret_pair(name: &str, value: &str) -> bool {
 /// Text with no scheme that has a secret pair in the query or fragment of one of its words
 /// (`data.tif?token=abc def`, `a.tif?x=1&token=abc def`, `a.tif?x=1;token=abc def`): a URL query
 /// holds no raw space, so the words after it may be the value's. The word's query and the rest of
-/// the text go, said, as for an address with a scheme. A libpq-style `password=abc` has no `?` or
-/// `#`: its value ends at the space.
+/// the text go, said, as for an address with a scheme. Only the names `secret_key` knows count,
+/// as everywhere in this file. A libpq-style `password=abc` has no `?` or `#`: its value ends at
+/// the space.
 fn schemeless_query_cut(t: &str) -> String {
     let mut start = 0;
     for word in t.split_inclusive(char::is_whitespace) {
@@ -521,5 +522,6 @@ mod tests {
         }
         // A libpq pair has no `?`: its value ends at the space, the next word is a pair of its own.
         assert_eq!(redacted_parameter("host=h password=abc dbname=g"), "host=h password= dbname=g");
+        assert_eq!(redacted_parameter("password=a b"), "password= b");
     }
 }
