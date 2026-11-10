@@ -481,6 +481,11 @@ fn compatible(
     Ok(())
 }
 
+/// `map.repairTiles`: relinks a local PMTiles or MBTiles archive after validating the new file.
+/// The desktop's menus and direct attached MCP calls validate it on the read queue's worker
+/// ([`super::reads`]) and land the prepared result here. Called any other way (a notebook cell, a
+/// task step, a script, the CLI), it validates inline on the caller's thread, like Add Data and
+/// Reload Data, because those callers run their commands in order and the next may depend on it.
 fn repair_tiles(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
@@ -687,6 +692,11 @@ fn archive_candidate_after_read(
     Ok(candidate.layer)
 }
 
+/// `map.reloadTiles`: rereads a local PMTiles or MBTiles archive at its linked path. The desktop's
+/// menus and direct attached MCP calls validate it on the read queue's worker ([`super::reads`])
+/// and land the prepared result here. Called any other way (a notebook cell, a task step, a
+/// script, the CLI), it validates inline on the caller's thread, like Add Data and Reload Data,
+/// because those callers run their commands in order and the next may depend on it.
 fn reload_tiles(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {

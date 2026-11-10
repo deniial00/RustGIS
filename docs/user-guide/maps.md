@@ -362,8 +362,9 @@ On the desktop, menu actions and direct attached MCP `run_command` calls validat
 repair on a background worker; the status bar shows the work and **Cancel**. Only one read runs
 at a time. If its project, map, archive or presentation changes before it lands, the result is
 left unapplied: retry on the intended target. A paused attached batch also rejects its remaining
-commands if the project or selected map changes. Attached MCP `run` scripts and file-bridge
-scripts validate inline, without reload status or cancellation during validation.
+commands if the project or selected map changes. Notebook cells, task steps, scripts (the Script
+pane and attached MCP `run`) and file-bridge scripts validate inline on the window thread, without
+reload status or cancellation during validation.
 Cancelling MBTiles validation also interrupts SQLite queries used to infer missing zoom metadata.
 It cannot preempt a filesystem operation blocked inside the operating system.
 

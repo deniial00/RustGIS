@@ -137,6 +137,8 @@ later entries in the same JSON-RPC batch and later relay requests wait too. Canc
 the caller or changing the original archive target prevents installation. The original agent
 still owns the resulting undo step. Arbitrary `run` scripts and file-bridge scripts retain their
 existing synchronous execution contract; this does not move their child commands to the worker.
+Notebook cells, task steps and Script pane scripts validate reload and repair inline on the window
+thread, without reload status or cancellation during validation.
 File and network commands need `--yes`, unless **Let your Agents Control RustGIS** is ticked.
 
 Without **Full access**, an attached agent cannot replace the open project:
