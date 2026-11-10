@@ -1374,6 +1374,13 @@ mod tests {
         for clean in [vec!["https://x.org/a".into()], vec!["https://x.org/a".into(), "https://x.org/b".into()]] {
             assert!(!not_started(&clean).contains("omitted]"), "no query went, none said");
         }
+        // A notice's own redaction already drops a public query and says so, whatever composed it:
+        // naming the address with `address_in_message` changes that for secret queries only.
+        let public = "https://x.org/wms?LAYER=a";
+        let old = Session::redacted(&format!("its download of {} wasn't started", crate::sources::redact(public)));
+        let new = Session::redacted(&format!("its download of {} wasn't started", crate::sources::address_in_message(public)));
+        assert_eq!(old.as_str(), new.as_str());
+        assert!(new.as_str().contains("https://x.org/wms[query omitted]"), "{}", new.as_str());
     }
 
     /// Sharing is bounded by the original plugin incarnation; duplicate clicks of that owner
