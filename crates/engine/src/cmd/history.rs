@@ -324,8 +324,9 @@ fn secret_pairs_emptied(t: &str) -> String {
         });
         let secret = |&(k, at): &(&str, usize)| {
             let value = rest.get(at..).unwrap_or("");
-            // The name after the last `?`, `&` or `#`: a word's path before it is no part of the name.
-            let name = k.rsplit(['?', '&', '#']).next().unwrap_or(k);
+            // In a word with a `?`, the name after the last `?`, `&` or `#`: its path before is no part
+            // of the name. Without one, a field name is judged whole (`password#1`).
+            let name = if k.contains('?') { k.rsplit(['?', '&', '#']).next().unwrap_or(k) } else { k };
             secret_pair(name, value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or(""))
         };
         let Some((_, at)) = pair.filter(secret) else {
@@ -540,15 +541,20 @@ mod tests {
             ("data.tif?v=2", "data.tif?v=2"),
             ("/data/tokens/a.tif?v=2", "/data/tokens/a.tif?v=2"),
             ("data.tif?sig=abc", "data.tif?sig=abc"),
+            // A field name that holds a `#` or an `&` but no `?` is judged whole.
+            ("password#1=hunter2", "password#1="),
+            ("token#x=abc", "token#x="),
+            ("password#1=hunter2 failed", "password#1= failed"),
         ] {
             assert_eq!(redacted_parameter(text), kept, "{text}");
             assert_eq!(redacted_text(text), kept, "{text}");
         }
     }
 
-    /// Copy as code and the project log pass every string of a parameter through the same cut.
+    /// The project log passes every string of a parameter through the same cut. Copy as code does
+    /// not: it keeps opaque text and says so (see `durable::output`).
     #[test]
-    fn text_parameters_of_copied_code_get_the_schemeless_cut() {
+    fn text_parameters_of_the_project_log_get_the_schemeless_cut() {
         let params = serde_json::json!({"text": "data.tif?token=abc def", "n": 1});
         assert_eq!(redacted(&params), serde_json::json!({"text": "data.tif[query and the rest omitted]", "n": 1}));
         let clean = serde_json::json!({"text": "data.tif?v=2 def", "n": 1});
