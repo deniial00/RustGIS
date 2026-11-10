@@ -27,19 +27,21 @@ token or signature does not hide the HTTP status or other explanation. The compl
 fragment are omitted, including values with unescaped spaces. For an unknown URL embedded in
 free text, a secret-named query or fragment still omits the rest of that text: those later
 words might be part of the credential, not an explanation. The same rule applies to copied
-history errors, saved run messages and notebook cell output, and to a secret in the query of a
-word of scheme-less text (`data.tif?token=abc def`, `a.tif?x=1&token=abc def`), which goes with
-the rest of the text, saying `[query and the rest omitted]`. For an unknown `scheme://` URL, a
-query with no secret name (`?custom=hidden unescaped hidden`) is omitted only to its first
-space: the redactor can't tell a value's later words from prose, so they are kept. Ambiguous
-slash-containing userinfo is omitted rather than guessed to be a host, port and path. So is a
-bare `scheme://name:text` (no path, query, `@` or IPv6 `[` in it, and a `text` that isn't empty)
-of an unknown URL when a word with an `@` (and something before it, no slash) follows on its
-line (`https://alice:pass word@host/x`, `redis://:pa ss@host`): the text may be a password with a
+history errors, saved run messages and notebook cell output, and to a secret in the query or
+fragment of a word of scheme-less text (`data.tif?token=abc def`, `a.tif?x=1;token=abc def`),
+which goes with the rest of the text, saying `[query and the rest omitted]`. For an unknown
+`scheme://` URL, a query with no secret name (`?custom=hidden unescaped hidden`) is omitted only
+to its first space: the redactor can't tell a value's later words from prose, so they are kept.
+Ambiguous slash-containing userinfo is omitted rather than guessed to be a host, port and path.
+So is a bare `scheme://name:text` (no `/`, `\`, `?`, `#`, `@` or IPv6 `[` in it, and a `text` that
+isn't empty once trailing punctuation is trimmed) of an unknown URL when a word with an `@` (and
+something before it, no slash, not another address) follows on its line
+(`https://alice:pass word@host/x`, `redis://:pa ss@host`): the text may be a password with a
 space in it, so the rest of the text is omitted too, saying `[address and the rest omitted]`.
 When `text` could be a port (one to five digits: `https://host:8080 user@example.org`,
 `https://alice:12 word@host`) only the next word counts, since a port and a short password look
-alike and prose often follows a host and port; otherwise any of the next four words. A path
+alike and prose often follows a host and port; otherwise any of the next four words, so a
+password with more spaces than that, or with a `/` in it, is not found this way. A path
 (`https://host:8080/x user@example.org`) ends the ambiguity, and the words are kept. A root
 address is shown with `/` before an omission marker or reason, so
 repeated redaction keeps its host. A message that names a known address says when its query or

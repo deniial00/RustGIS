@@ -198,17 +198,18 @@ fn secret_pair(name: &str, value: &str) -> bool {
             || crate::sources::looks_like_a_key(value.trim_matches(['\'', '"', '{', '}'])))
 }
 
-/// Text with no scheme that has a secret pair in the query of one of its words (`data.tif?token=abc
-/// def`, `a.tif?x=1&token=abc def`): a URL query holds no raw space, so the words after it may be
-/// the value's. The word's query and the rest of the text go, said, as for an address with a
-/// scheme. A libpq-style `password=abc` has no `?`: its value ends at the space.
+/// Text with no scheme that has a secret pair in the query or fragment of one of its words
+/// (`data.tif?token=abc def`, `a.tif?x=1&token=abc def`, `a.tif?x=1;token=abc def`): a URL query
+/// holds no raw space, so the words after it may be the value's. The word's query and the rest of
+/// the text go, said, as for an address with a scheme. A libpq-style `password=abc` has no `?` or
+/// `#`: its value ends at the space.
 fn schemeless_query_cut(t: &str) -> String {
     let mut start = 0;
     for word in t.split_inclusive(char::is_whitespace) {
         let w = word.trim_end_matches(char::is_whitespace);
-        if let Some(q) = w.find('?') {
+        if let Some(q) = w.find(['?', '#']) {
             let query = w.get(q + 1..).unwrap_or("");
-            if query.split('&').filter_map(|pair| pair.split_once('=')).any(|(k, v)| secret_pair(k, v)) {
+            if query.split(['&', ';', '#', '?']).filter_map(|pair| pair.split_once('=')).any(|(k, v)| secret_pair(k, v)) {
                 return format!("{}[query and the rest omitted]", t.get(..start + q).unwrap_or(""));
             }
         }
@@ -491,6 +492,10 @@ mod tests {
             "a.tif?token=abc&x=1 def",
             "data.tif?pwd=hunter2 def",
             "data.tif?sig=Ab3dE9fG7hJ2kL5mN8pQ4rS6tU1vW0xY def",
+            "a.tif?x=1;token=abc def",
+            "a.tif?x=1#token=abc def",
+            "a.tif?x=1?token=abc def",
+            "data.tif#token=abc def",
         ] {
             let clean = redacted_parameter(text);
             assert!(
@@ -509,6 +514,7 @@ mod tests {
             "/data/a.tif?sig=abc def&x=1 y",
             "a.tif?key=abc def",
             "data.tif?v=2 and more words",
+            "a.tif?x=1;y=2 def",
             "host=h dbname=g user=u",
         ] {
             assert_eq!(redacted_parameter(text), text, "{text}");

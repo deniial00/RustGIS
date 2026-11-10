@@ -622,18 +622,35 @@ fn password_runs_on(address: &str, tail: &str) -> bool {
         return false;
     }
     let digits = pass.trim_end_matches([',', ';', '.', ')', ':']);
-    let port = !digits.is_empty() && digits.len() <= 5 && digits.bytes().all(|b| b.is_ascii_digit());
-    let words = if port { 1 } else { PASSWORD_WORDS };
-    tail.split('\n').next().unwrap_or("").split_whitespace().take(words).any(|word| {
-        word.split_once('@').is_some_and(|(before, _)| !before.is_empty() && !before.contains(['/', '\\']) && !word.contains("://"))
-    })
+    if digits.is_empty() {
+        return false;
+    }
+    let port = digits.len() <= 5 && digits.bytes().all(|b| b.is_ascii_digit());
+    // Words of the token's own line, a few of them, found without scanning the rest of the text.
+    let mut rest = tail;
+    for _ in 0..if port { 1 } else { PASSWORD_WORDS } {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() && c != '\n');
+        if rest.is_empty() || rest.starts_with('\n') {
+            return false;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = rest.get(..end).unwrap_or("");
+        if word.split_once('@').is_some_and(|(before, _)| !before.is_empty() && !before.contains(['/', '\\']) && !word.contains("://")) {
+            return true;
+        }
+        rest = rest.get(end..).unwrap_or("");
+    }
+    false
 }
 
 /// Whether a word of text too long to scan names an address whose query or userinfo may hold
 /// a credential: a linear look at each `://` word, without the full scanner.
 fn may_hold_secret(text: &str) -> bool {
     text.split_whitespace().filter(|word| word.contains("://")).any(|word| {
+        // Where the word ends in the text, so the words after it can be looked at.
+        let after = (word.as_ptr() as usize).checked_sub(text.as_ptr() as usize).and_then(|at| text.get(at + word.len()..)).unwrap_or("");
         ambiguous_userinfo(word)
+            || password_runs_on(word, after)
             || word
                 .split_once(['?', '#'])
                 .is_some_and(|(_, query)| query.split(['&', ';', '#']).any(|pair| secret_name(pair.split('=').next().unwrap_or(""))))
@@ -1238,6 +1255,11 @@ mod tests {
         let ambiguous = format!("{} https://u:123?w@host/x tail", "word ".repeat(4000));
         assert!(secret_continuation_cut(&ambiguous).is_some());
         assert_eq!(secret_continuation_cut(&format!("{} see https://example.org/a?page=2 then", "word ".repeat(4000))), None);
+        // A password with a space goes whole in long text too, as in short; a port and prose keep.
+        let open = format!("{} see https://alice:pass word@host/x failed", "word ".repeat(4000));
+        assert!(secret_continuation_cut(&open).is_some_and(|cut| !cut.contains("word@")));
+        let port = format!("{} see https://host:8080 failed, contact admin@example.org", "word ".repeat(4000));
+        assert_eq!(secret_continuation_cut(&port), None);
         assert_eq!(secret_continuation_cut(&"word ".repeat(4000)), None);
         assert_eq!(secret_continuation_cut("failed at https://example.org/a: HTTP 500"), None);
     }
@@ -1426,6 +1448,8 @@ mod tests {
         }
         // A later address is its own: only its user information goes, not the words around it.
         assert_eq!(redact("see https://host:8080 https://u@example.org/x failed"), "see https://host:8080 https://example.org/x failed");
+        // Nothing left of the text once its punctuation is trimmed is no password to run on.
+        assert!(redact("https://example.org:, mail ops@example.org").ends_with("mail ops@example.org"));
         // A port followed by `:` is no valid address (omitted whole), but its reason stays.
         let clean = redact("https://host:8080: HTTP 503 (ask ops@example.org)");
         assert_eq!(clean, "[address omitted] HTTP 503 (ask ops@example.org)");
