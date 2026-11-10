@@ -637,7 +637,10 @@ pub fn address_in_message(address: &str) -> String {
     }
     // A malformed userinfo value can contain a URL-token boundary before its `@`. The generic
     // scanner cannot know those later words belong to the address; here the whole input does.
-    let before_query = address.split(['?', '#']).next().unwrap_or("");
+    // A web address keeps neither query nor fragment. A scheme-less one (often a file path,
+    // where `#` is part of a name) is cut at its query only.
+    let url = address.contains("://");
+    let before_query = if url { address.split(['?', '#']).next() } else { address.split('?').next() }.unwrap_or("");
     if before_query.contains('@')
         && before_query.chars().any(|c| c.is_whitespace() || hostile_control(c) || matches!(c, '"' | '\'' | '<' | '>' | '`'))
     {
@@ -647,10 +650,9 @@ pub fn address_in_message(address: &str) -> String {
     if ambiguous_userinfo(address) {
         return "[address omitted]".to_string();
     }
-    let url = address.contains("://");
     // Every remaining byte belongs to this known address, even if a value has unescaped
     // whitespace and an unfamiliar signing name. None of that suffix is diagnostic prose.
-    let mut shown = redact(if url { before_query } else { address });
+    let mut shown = redact(before_query);
     if url && shown.starts_with("[address omitted]") {
         // A malformed authority is omitted whole, including words after its first token.
         shown.truncate("[address omitted]".len());
@@ -672,7 +674,7 @@ pub fn address_in_message(address: &str) -> String {
     {
         shown.push('/');
     }
-    if url && let Some(cut) = address.get(before_query.len()..).filter(|cut| !cut.is_empty()) {
+    if let Some(cut) = address.get(before_query.len()..).filter(|cut| !cut.is_empty()) {
         shown.push_str(if cut.starts_with('#') { "[fragment omitted]" } else { "[query omitted]" });
     }
     shown
@@ -772,10 +774,12 @@ pub fn secret_continuation_cut(text: &str) -> Option<String> {
         return may_hold_secret(text).then(|| format!("[{} bytes of text omitted: too long to check its addresses]", text.len()));
     }
     let mut strict = redact_scan(text, true);
-    if !["[query and the rest omitted]", "[address and the rest omitted]"].iter().any(|m| strict.contains(m)) {
-        return None;
-    }
-    cut_with_ellipsis(&mut strict, MAX_DETAILS_BYTES);
+    // Cut what comes before the marker and keep the marker (and anything after it) whole, so
+    // the cut text still says what went.
+    let at = ["[query and the rest omitted]", "[address and the rest omitted]"].iter().filter_map(|m| strict.rfind(m)).max()?;
+    let tail = strict.split_off(at);
+    cut_with_ellipsis(&mut strict, MAX_DETAILS_BYTES.saturating_sub(tail.len()));
+    strict.push_str(&tail);
     Some(strict)
 }
 
@@ -1193,6 +1197,9 @@ mod tests {
         let long = format!("{} https://example.org/a?token=hidden hidden-tail", "word ".repeat(2000));
         let cut = secret_continuation_cut(&long).expect("the cut is seen past the output bound");
         assert!(!cut.contains("hidden") && cut.len() <= MAX_DETAILS_BYTES + '…'.len_utf8(), "{}", cut.len());
+        // The marker sits past the 8 KiB bound in the scan; the cut keeps it whole at the end.
+        assert!(cut.ends_with("…[query and the rest omitted]"), "{}", cut.get(cut.len().saturating_sub(60)..).unwrap_or(""));
+        assert_eq!(redact(&cut), cut);
         // An ambiguous address cuts as a secret query does.
         let ambiguous = "run failed at https://u:123/w@h/x hidden-tail: HTTP 500";
         assert_eq!(secret_continuation_cut(ambiguous).as_deref(), Some("run failed at [address and the rest omitted]"));
@@ -1222,6 +1229,9 @@ mod tests {
             "https://example.org/data#sig=hidden unescaped hidden",
             "https://example.org/data?custom=hidden unescaped hidden",
             "https://example.org/data#hidden unescaped hidden",
+            // A scheme-less address loses its whole query too, unfamiliar keys included.
+            "data.tif?custom=hidden unescaped hidden",
+            "data.tif?token=hidden unescaped hidden",
         ] {
             let clean = message_with_address(address, "HTTP 503 Service Unavailable");
             assert!(clean.contains("HTTP 503 Service Unavailable"), "{address} -> {clean}");
@@ -1231,6 +1241,9 @@ mod tests {
             assert_eq!(message_with_address(address, &format!("{address}: HTTP 503 Service Unavailable")), clean);
             assert_eq!(message_with_address(address, &clean), clean);
         }
+        // A scheme-less address says its query went; a `#` in a file name is part of the name.
+        assert_eq!(address_in_message("data.tif?custom=hidden unescaped hidden"), "data.tif[query omitted]");
+        assert_eq!(message_with_address("/data/plot#1.gpkg", "no such table"), "/data/plot#1.gpkg: no such table");
     }
 
     #[test]
