@@ -324,7 +324,9 @@ fn secret_pairs_emptied(t: &str) -> String {
         });
         let secret = |&(k, at): &(&str, usize)| {
             let value = rest.get(at..).unwrap_or("");
-            secret_pair(k, value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or(""))
+            // The name after the last `?`, `&` or `#`: a word's path before it is no part of the name.
+            let name = k.rsplit(['?', '&', '#']).next().unwrap_or(k);
+            secret_pair(name, value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or(""))
         };
         let Some((_, at)) = pair.filter(secret) else {
             // Not a secret: the item and the separator after it, as they are.
@@ -523,5 +525,33 @@ mod tests {
         // A libpq pair has no `?`: its value ends at the space, the next word is a pair of its own.
         assert_eq!(redacted_parameter("host=h password=abc dbname=g"), "host=h password= dbname=g");
         assert_eq!(redacted_parameter("password=a b"), "password= b");
+    }
+
+    /// A secret in the query of one word is judged by its own name, not by the whole word: an exact
+    /// name (`pwd`, a key-shaped `sig`) is no less a secret behind a path, and a credential word in
+    /// a folder name is no secret query.
+    #[test]
+    fn a_secret_in_the_query_of_one_word_is_emptied_by_its_own_name() {
+        for (text, kept) in [
+            ("data.tif?pwd=hunter2", "data.tif?pwd="),
+            ("data.tif?sig=Ab3dE9fG7hJ2kL5mN8pQ4rS6tU1vW0xY", "data.tif?sig="),
+            ("data.tif?token=abc", "data.tif?token="),
+            ("a.tif?x=1&pwd=hunter2", "a.tif?x=1&pwd="),
+            ("data.tif?v=2", "data.tif?v=2"),
+            ("/data/tokens/a.tif?v=2", "/data/tokens/a.tif?v=2"),
+            ("data.tif?sig=abc", "data.tif?sig=abc"),
+        ] {
+            assert_eq!(redacted_parameter(text), kept, "{text}");
+            assert_eq!(redacted_text(text), kept, "{text}");
+        }
+    }
+
+    /// Copy as code and the project log pass every string of a parameter through the same cut.
+    #[test]
+    fn text_parameters_of_copied_code_get_the_schemeless_cut() {
+        let params = serde_json::json!({"text": "data.tif?token=abc def", "n": 1});
+        assert_eq!(redacted(&params), serde_json::json!({"text": "data.tif[query and the rest omitted]", "n": 1}));
+        let clean = serde_json::json!({"text": "data.tif?v=2 def", "n": 1});
+        assert_eq!(redacted(&clean), clean);
     }
 }
