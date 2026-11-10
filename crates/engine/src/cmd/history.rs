@@ -167,7 +167,7 @@ pub(crate) fn redacted_parameter(t: &str) -> String {
     } else if structured || t.contains("://") {
         rustgis_data::diagnostics::redact_parameter(t)
     } else {
-        t.to_string()
+        schemeless_query_cut(t)
     };
     query_pairs_emptied(&private_keys_removed(&text))
 }
@@ -182,10 +182,39 @@ pub(crate) fn redacted_text(t: &str) -> String {
     } else if t.contains("://") {
         rustgis_data::diagnostics::redact(t)
     } else {
-        t.to_string()
+        schemeless_query_cut(t)
     };
     // After `redact` too: a prefix it knows may come in a form it doesn't (GDAL's `MYSQL:`).
     query_pairs_emptied(&private_keys_removed(&r))
+}
+
+/// Whether `name=value` is a secret pair. A bare `key`, `sig` or `sas` is as likely a field in an
+/// expression (`key=5`): a secret only when its value reads as one.
+fn secret_pair(name: &str, value: &str) -> bool {
+    let k = name.trim();
+    !k.is_empty()
+        && rustgis_data::source::credentials::secret_key(k)
+        && (!["key", "sig", "sas"].iter().any(|p| k.eq_ignore_ascii_case(p))
+            || crate::sources::looks_like_a_key(value.trim_matches(['\'', '"', '{', '}'])))
+}
+
+/// Text with no scheme that has a secret pair in the query of one of its words (`data.tif?token=abc
+/// def`, `a.tif?x=1&token=abc def`): a URL query holds no raw space, so the words after it may be
+/// the value's. The word's query and the rest of the text go, said, as for an address with a
+/// scheme. A libpq-style `password=abc` has no `?`: its value ends at the space.
+fn schemeless_query_cut(t: &str) -> String {
+    let mut start = 0;
+    for word in t.split_inclusive(char::is_whitespace) {
+        let w = word.trim_end_matches(char::is_whitespace);
+        if let Some(q) = w.find('?') {
+            let query = w.get(q + 1..).unwrap_or("");
+            if query.split('&').filter_map(|pair| pair.split_once('=')).any(|(k, v)| secret_pair(k, v)) {
+                return format!("{}[query and the rest omitted]", t.get(..start + q).unwrap_or(""));
+            }
+        }
+        start += word.len();
+    }
+    t.to_string()
 }
 
 /// `t` with its secret pairs emptied (`secret_pairs_emptied`), parted first at each `&` that
@@ -291,16 +320,9 @@ fn secret_pairs_emptied(t: &str) -> String {
             let next = word.get(..word.find(parts).unwrap_or(word.len())).unwrap_or("");
             if word.len() < value.len() && !next.is_empty() && !next.contains('=') { (k, at + value.len() - word.len()) } else { (k, at) }
         });
-        // A bare `key`, `sig` or `sas` is as likely a field in an expression (`key=5`): a secret
-        // only when its value reads as one.
         let secret = |&(k, at): &(&str, usize)| {
-            let k = k.trim();
             let value = rest.get(at..).unwrap_or("");
-            let v = value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or("");
-            !k.is_empty()
-                && rustgis_data::source::credentials::secret_key(k)
-                && (!["key", "sig", "sas"].iter().any(|p| k.eq_ignore_ascii_case(p))
-                    || crate::sources::looks_like_a_key(v.trim_matches(['\'', '"', '{', '}'])))
+            secret_pair(k, value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or(""))
         };
         let Some((_, at)) = pair.filter(secret) else {
             // Not a secret: the item and the separator after it, as they are.
@@ -309,16 +331,6 @@ fn secret_pairs_emptied(t: &str) -> String {
             rest = rest.get(next..).unwrap_or("");
             continue;
         };
-        // A secret directly after a `?` in a word (`data.tif?token=abc def`) is a query, not a
-        // libpq pair: a URL query holds no raw space, so its later words may be the value's. The
-        // rest goes, said, as for an address with a scheme.
-        if let Some((k, _)) = pair.filter(|_| item.contains('?'))
-            && let Some(q) = k.find('?')
-        {
-            out.push_str(rest.get(..q).unwrap_or(""));
-            out.push_str("[query and the rest omitted]");
-            return out;
-        }
         // The name and the `=`, as they are (spaces before the value go: the separator follows).
         out.push_str(rest.get(..at).unwrap_or("").trim_end());
         // Past the value: to its closer when it opens with a quote or a brace, then to the next
@@ -473,6 +485,25 @@ mod tests {
             }
         }
         assert_eq!(redacted_parameter("see data.tif?token=abc def"), "see data.tif[query and the rest omitted]");
+        // A secret anywhere in the word's query, and the exact names a path word would hide.
+        for text in [
+            "a.tif?x=1&token=abc def",
+            "a.tif?token=abc&x=1 def",
+            "data.tif?pwd=hunter2 def",
+            "data.tif?sig=Ab3dE9fG7hJ2kL5mN8pQ4rS6tU1vW0xY def",
+        ] {
+            let clean = redacted_parameter(text);
+            assert!(
+                clean.ends_with("[query and the rest omitted]") && !clean.contains("def") && !clean.contains("hunter2"),
+                "{text} -> {clean}"
+            );
+            assert!(!clean.contains("x=1"), "{text} -> {clean}");
+        }
+        // A credential word in the path is no secret query: the words after it stay.
+        for text in ["/data/tokens/a.tif?v=2 failed", r"C:\Users\me\secrets\a.tif?x=1 done"] {
+            let clean = redacted_parameter(text);
+            assert!(!clean.contains("omitted]") && (clean.ends_with("failed") || clean.ends_with("done")), "{text} -> {clean}");
+        }
         for text in [
             "/data/a b.tif?x=1",
             "/data/a.tif?sig=abc def&x=1 y",

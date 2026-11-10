@@ -613,11 +613,12 @@ const PASSWORD_WORDS: usize = 4;
 /// the word may be any of the next [`PASSWORD_WORDS`]. When it can (`12`, `8080`), `x:y` may just
 /// as well be a host and port, so only the very next word counts: `https://host:8080 failed,
 /// contact admin@example.org` keeps its reason. The caller omits the rest. `https://host:8080/x
-/// user@example.org` has a path and keeps its words.
+/// user@example.org` has a path and keeps its words. An empty `y` (`https://example.org:`) is no
+/// password, and a `[` is an IPv6 host, so neither is cut; an empty `x` (`redis://:pa ss@host`) is.
 fn password_runs_on(address: &str, tail: &str) -> bool {
     let Some((_, rest)) = address.split_once("://") else { return false };
-    let Some((user, pass)) = rest.split_once(':') else { return false };
-    if user.is_empty() || pass.is_empty() || rest.contains(['/', '\\', '?', '#', '@', '[', ']']) {
+    let Some((_, pass)) = rest.split_once(':') else { return false };
+    if pass.is_empty() || rest.contains(['/', '\\', '?', '#', '@', '[']) {
         return false;
     }
     let digits = pass.trim_end_matches([',', ';', '.', ')', ':']);
@@ -1374,6 +1375,11 @@ mod tests {
             "https://alice:pass wo rd@host/x failed",
             "https://alice:pa ss word@host:80/x failed",
             "https://alice:12 word@example.org",
+            // An empty name, a `]` in the text, the fourth word, and a number too long for a port.
+            "redis://:pa ss@host/x failed",
+            "https://alice:pa]ss word@host failed",
+            "https://alice:pass a b c d@host failed",
+            "https://alice:123456 a b c@host failed",
             // `host:8080` reads as `alice:12`: an email right after it is cut, and the marker says so.
             "see https://host:8080 user@example.org",
             "see https://alice:pa\tss@host/x failed",
@@ -1407,6 +1413,8 @@ mod tests {
             "see https://host:8080 failed",
             // A host and port is ambiguous with a short password: only the next word counts.
             "see https://host:8080 failed, contact admin@example.org",
+            "see https://[::1]:8080 user@example.org failed",
+            "https://x:12345 a b@example.org failed",
             "see https://host:8080\nuser@example.org",
             "https://example.org: timeout, mail ops@example.org",
             // The local part of a word before `@` is a path, not a password's tail.
