@@ -86,10 +86,6 @@ fn decoded(t: &TileLayer) -> Arc<cache::Payload> {
 
 fn style(t: &TileLayer) -> Arc<source::Resolved> {
     for _ in 0..100 {
-        if t.kind == rustgis_engine::map::TileKind::MbTiles {
-            // MBTiles metadata workers have their own bounded wait, not cache::in_flight.
-            let _ = mbtiles::info_ready(&t.url, Duration::from_millis(100)).unwrap();
-        }
         match source::resolve(&render::tile_spec(t)) {
             source::Resolve::Ready(r) => return r,
             source::Resolve::Failed(e) => panic!("{e}"),

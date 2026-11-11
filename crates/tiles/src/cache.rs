@@ -547,7 +547,9 @@ pub fn backoff(wait: Duration, failures: u32) -> Duration {
     wait.saturating_mul(1u32 << doublings).min(most)
 }
 
-/// How many fetches are under way. Once a fetch no longer counts, its [`generation`] shows.
+/// How many fetches are under way, with the reads the map waits for outside the fetch workers
+/// (an MBTiles file's metadata: [`Counted`]). Once a fetch no longer counts, its [`generation`]
+/// shows.
 pub fn in_flight() -> usize {
     IN_FLIGHT.load(Ordering::Acquire)
 }
@@ -1753,6 +1755,28 @@ fn finished() {
     let w = waker().lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(w) = w {
         w();
+    }
+}
+
+/// A read the map needs before it can ask for tiles that runs on its own thread, not the fetch
+/// workers (an MBTiles file's metadata), counted as a fetch under way while it lasts: an export
+/// waits for it ([`wait_for_news`]) instead of drawing again without news and giving up on a
+/// gap. Dropped, however its thread ends, it is over as a fetch is ([`finished`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Counted(());
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Counted {
+    pub(crate) fn start() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Counted {
+    fn drop(&mut self) {
+        finished();
     }
 }
 

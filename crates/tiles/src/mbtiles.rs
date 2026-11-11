@@ -322,6 +322,8 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
             let address = archive.to_string();
             let worker_key = key.clone();
             let still = crate::cache::current_still();
+            // Counted before the answer says pending, so a caller waiting for fetches waits for it.
+            let counted = crate::cache::Counted::start();
             let spawned = std::thread::Builder::new().name("rustgis-mbtiles-info".into()).spawn(move || {
                 crate::cache::with_optional_still(still, || {
                     let result = crate::cache::check_still(&crate::cache::current_still()).and_then(|_| read_info(&address));
@@ -329,7 +331,8 @@ pub fn info_ready(archive: &str, timeout: Duration) -> Result<Option<Arc<Info>>,
                 });
                 pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&worker_key);
                 ready.notify_all();
-                crate::cache::notify();
+                // Over as a fetch is: the map draws again with what was read.
+                drop(counted);
             });
             if let Err(error) = spawned {
                 all.remove(&key);

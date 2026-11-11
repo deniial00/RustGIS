@@ -100,7 +100,7 @@ fn paused_map(path: &std::path::Path, kind: TileKind) -> (Map, render::View, mps
     map.tiles.push(TileLayer::new("Below", kind, path.to_string_lossy()));
     let view = render::View { width: 128.0, height: 128.0, pixels_per_point: 1.0, camera: map.camera, sky: false };
     let old = render::render_placed(&mut map, &view).unwrap();
-    assert_eq!(old.credits, ["Old archive credits"]);
+    assert_eq!(old.credits, ["Old archive credits"], "{:?}", old.gaps);
     assert!(old.pixmap.pixel(8, 8).unwrap().red() > 200);
     let mut ds = Dataset::new("Between", GeometryType::Polyline, Vec::new());
     ds.push(Some(Geometry::Line(vec![vec![data::Coord::new(0.0, 0.0), data::Coord::new(0.1, 0.1)]])), Vec::new());
@@ -195,7 +195,7 @@ fn archive_reload_refuses_spanning_exports_without_replacing_destination() {
             resume.wait();
             let result = worker.join().unwrap();
             let fresh = fresh.unwrap();
-            assert_eq!(fresh.credits, ["New archive credits"]);
+            assert_eq!(fresh.credits, ["New archive credits"], "{:?}", fresh.gaps);
             assert!(fresh.pixmap.pixel(8, 8).unwrap().green() > 200);
             let error = result.unwrap_err();
             assert!(error.contains("archive changed during rendering") && error.contains("export again"), "{error}");
@@ -244,7 +244,7 @@ fn a_spanning_render_keeps_progressive_arrivals_and_unrelated_reloads() {
         let result = worker.join().unwrap().unwrap();
         fresh.unwrap();
         assert_ne!(cache::generation(), arrived_before);
-        assert_eq!(result.credits, ["Old archive credits"]);
+        assert_eq!(result.credits, ["Old archive credits"], "{:?}", result.gaps);
         assert!(result.pixmap.pixel(8, 8).unwrap().red() > 200);
         data::mbtiles::close(&target);
         data::mbtiles::close(&unrelated);
@@ -359,7 +359,7 @@ fn a_reload_between_series_pages_refuses_the_engine_pdf_without_replacing_destin
         let wrote = work().unwrap();
         drop(installed);
         let fresh = reloaded.join().unwrap().unwrap();
-        assert_eq!(fresh.credits, ["New archive credits"]);
+        assert_eq!(fresh.credits, ["New archive credits"], "{:?}", fresh.gaps);
         assert!(fresh.pixmap.pixel(8, 8).unwrap().green() > 200);
         assert_eq!(probe.pages.load(Ordering::SeqCst), 2, "both individually coherent pages were drawn");
         let error = wrote.then.unwrap()(&mut session, &mut serde_json::Value::Null).unwrap_err();
@@ -369,4 +369,30 @@ fn a_reload_between_series_pages_refuses_the_engine_pdf_without_replacing_destin
         let pdf = std::fs::read(&destination).unwrap();
         assert!(pdf.starts_with(b"%PDF") && pdf.windows(b"/Count 2".len()).any(|part| part == b"/Count 2"));
     }
+}
+
+/// An export waits for an MBTiles file's metadata read as for any other read it needs: one slower
+/// than a few drawings (a loaded machine, a file a virus scanner holds open) is no "tiles still on
+/// their way" gap. The read is held up here by another connection's lock.
+#[test]
+fn an_export_waits_for_a_slow_mbtiles_metadata_read() {
+    let dir = Fixture::new();
+    let path = dir.path().join("slow.mbtiles");
+    archive(&path, TileKind::MbTiles, false);
+    let lock = rusqlite::Connection::open(&path).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let mut map = Map::new("Archive");
+    map.graticule = false;
+    map.camera = Camera::new(data::Coord::new(0.0, 0.0), 100_000.0);
+    map.tiles.push(TileLayer::new("Archive", TileKind::MbTiles, path.to_string_lossy()));
+    let view = render::View { width: 32.0, height: 32.0, pixels_per_point: 1.0, camera: map.camera, sky: false };
+    let unlocked = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        lock.execute_batch("ROLLBACK").unwrap();
+    });
+    let placed = render::render_placed(&mut map, &view).unwrap();
+    unlocked.join().unwrap();
+    assert_eq!(placed.credits, ["Old archive credits"], "{:?}", placed.gaps);
+    assert!(placed.gaps.is_empty(), "{:?}", placed.gaps);
+    assert!(placed.pixmap.pixel(8, 8).unwrap().red() > 200);
 }
