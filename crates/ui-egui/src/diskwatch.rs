@@ -17,6 +17,8 @@ use crate::theme::Tokens;
 
 /// How often the files are looked at while the app is open.
 const EVERY: web_time::Duration = web_time::Duration::from_secs(5);
+/// How long a scan may go unanswered before the user is told checks are waiting.
+const STALLED: web_time::Duration = web_time::Duration::from_secs(30);
 
 /// What one scan found at a source's linked path.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,11 +44,12 @@ fn look(path: &str) -> Seen {
 }
 
 /// A reload target: a layer, or a local archive, in one map of the open project. Layer ids are
-/// map-local and reused, so a layer is known by its instance and its map's.
+/// map-local and reused, so a layer is known by its instance and its map's; an archive by its
+/// path and which of the map's archives with that path it is (`nth`, from the top).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Target {
     Layer { map: u64, layer: u64 },
-    Tiles { map: u64, url: String },
+    Tiles { map: u64, url: String, nth: usize },
 }
 
 /// What the app shows for a target.
@@ -78,8 +81,6 @@ struct Tracked {
     baseline: Option<Seen>,
     /// Not Now: the observation it was given for. A newer one notifies again.
     dismissed: Option<Seen>,
-    /// What had settled when a reload under way was asked for (`Some(None)`: nothing yet).
-    reloading: Option<Option<Seen>>,
 }
 
 /// Change detection for every target, by observations alone (no clock, no files).
@@ -87,6 +88,8 @@ struct Tracked {
 pub(crate) struct Monitor {
     sources: HashMap<String, Source>,
     targets: HashMap<Target, Tracked>,
+    /// The reload read under way (reads run one at a time) and what its file held as it started.
+    reading: Option<(Target, Seen)>,
 }
 
 impl Monitor {
@@ -99,7 +102,7 @@ impl Monitor {
             match self.targets.get_mut(&target) {
                 Some(t) if t.key == key => {}
                 _ => {
-                    self.targets.insert(target.clone(), Tracked { key: key.clone(), baseline: None, dismissed: None, reloading: None });
+                    self.targets.insert(target.clone(), Tracked { key: key.clone(), baseline: None, dismissed: None });
                 }
             }
             seen.insert(target);
@@ -192,35 +195,21 @@ impl Monitor {
         }
     }
 
-    /// What a reload asked for now reads: what has settled, or, before two scans have agreed (a
-    /// target just added), the latest scan.
-    fn current(&self, target: &Target) -> Option<Seen> {
-        let source = self.sources.get(&self.targets.get(target)?.key)?;
-        source.settled.clone().or_else(|| source.last.as_ref().map(|(seen, _)| seen.clone()))
+    /// A reload's read starts, its file holding `seen` (looked at just now).
+    pub(crate) fn reading(&mut self, target: Target, seen: Seen) {
+        self.reading = Some((target, seen));
     }
 
-    /// A reload asked for: it will read what [`Monitor::current`] says.
-    pub(crate) fn reloading(&mut self, target: &Target) {
-        let seen = self.current(target);
-        if let Some(t) = self.targets.get_mut(target) {
-            t.reloading = Some(seen);
-        }
-    }
-
-    /// A reload succeeded: only the observation it was asked with is acknowledged, so a change
-    /// that came while it read stays pending. One that ran within this frame (`asked` false:
-    /// Discard Edits, a reload run here) had no scan land between asking and reading: the
-    /// current observation is what it read, and an earlier reload's snapshot that never ran is
-    /// dropped.
-    pub(crate) fn reloaded(&mut self, target: &Target, asked: bool) {
-        let current = self.current(target);
-        if let Some(t) = self.targets.get_mut(target) {
-            let snapshot = t.reloading.take();
-            let used = if asked { snapshot.unwrap_or(current) } else { current };
-            if matches!(used, Some(Seen::Present(_))) {
-                t.baseline = used;
-                t.dismissed = None;
-            }
+    /// A reload succeeded: what its file held as its read started ([`Monitor::reading`]) is
+    /// acknowledged, so a change that came while it read stays pending. A reload with no such
+    /// observation (run some other way) leaves the mark as it is: what it read isn't known.
+    pub(crate) fn reloaded(&mut self, target: &Target) {
+        let used = self.reading.take_if(|(reading, _)| reading == target).map(|(_, seen)| seen);
+        if let Some(t) = self.targets.get_mut(target)
+            && matches!(used, Some(Seen::Present(_)))
+        {
+            t.baseline = used;
+            t.dismissed = None;
         }
     }
 
@@ -284,10 +273,13 @@ fn targets(s: &Session) -> Vec<Found> {
                 out.push(Found { target, key: key(path), path: path.to_string(), map: m.name.clone(), name: l.name.clone(), repairable });
             }
         }
+        let mut archives: HashMap<&str, usize> = HashMap::new();
         for tile in &m.tiles {
             if let Some(url) = tile.archive_file() {
+                let nth = archives.entry(url).or_default();
                 let path = url.strip_prefix("file://").unwrap_or(url);
-                let target = Target::Tiles { map: m.instance_id(), url: url.to_string() };
+                let target = Target::Tiles { map: m.instance_id(), url: url.to_string(), nth: *nth };
+                *nth += 1;
                 out.push(Found {
                     target,
                     key: key(path),
@@ -312,10 +304,13 @@ pub struct Watch {
     opened: u64,
     revision: Option<u64>,
     scans: u64,
-    scan: Option<(u64, Scanned)>,
+    scan: Option<(u64, Scanned, web_time::Instant)>,
     due: Option<web_time::Instant>,
     wanted: bool,
     focused: bool,
+    /// A scan couldn't start, or one hasn't answered for [`STALLED`]: said once each.
+    said_failed: bool,
+    said_stalled: bool,
 }
 
 impl Watch {
@@ -329,10 +324,18 @@ pub(crate) fn layer_status(app: &RustGisApp, layer: &rustgis_engine::map::Layer)
     app.diskwatch.status(&Target::Layer { map: app.session.map().instance_id(), layer: layer.instance_id() })
 }
 
-/// What the Layers pane says of a tile layer of the active map.
-pub(crate) fn tiles_status(app: &RustGisApp, tile: &rustgis_engine::map::TileLayer) -> Status {
-    match tile.archive_file() {
-        Some(url) => app.diskwatch.status(&Target::Tiles { map: app.session.map().instance_id(), url: url.to_string() }),
+/// The target of tile layer `i` of `map`: its archive and which of the map's archives with that
+/// path it is.
+fn tiles_target(map: &rustgis_engine::map::Map, i: usize) -> Option<Target> {
+    let url = map.tiles.get(i)?.archive_file()?;
+    let nth = map.tiles.iter().take(i).filter(|t| t.archive_file() == Some(url)).count();
+    Some(Target::Tiles { map: map.instance_id(), url: url.to_string(), nth })
+}
+
+/// What the Layers pane says of tile layer `i` of the active map.
+pub(crate) fn tiles_status(app: &RustGisApp, i: usize) -> Status {
+    match tiles_target(app.session.map(), i) {
+        Some(target) => app.diskwatch.status(&target),
         None => Status::Unchanged,
     }
 }
@@ -378,7 +381,7 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
     let focused = ctx.input(|i| i.focused);
     w.wanted |= focused && !w.focused;
     w.focused = focused;
-    if let Some((scan, slot)) = &w.scan {
+    if let Some((scan, slot, _)) = &w.scan {
         let done = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(results) = done {
             let scan = *scan;
@@ -390,22 +393,46 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
             }
         }
     }
-    if w.found.is_empty() {
-        return;
-    }
     let now = web_time::Instant::now();
-    if w.due.is_none_or(|due| now >= due) {
-        w.wanted = true;
+    // A file that never answers (a network drive gone away) holds the scan, and with it every
+    // later one: said, once, rather than shown as up to date.
+    let mut say = None;
+    if !w.said_stalled && w.scan.as_ref().is_some_and(|(_, _, started)| now.saturating_duration_since(*started) >= STALLED) {
+        w.said_stalled = true;
+        say = Some(tl!("Checking linked files for changes on disk is waiting for a file that doesn't answer (a network drive?). Changes aren't reported until it does; Reload Data still works.").to_string());
     }
-    if w.wanted && w.scan.is_none() {
-        start(w, now);
+    if !w.found.is_empty() {
+        if w.due.is_none_or(|due| now >= due) {
+            w.wanted = true;
+        }
+        if w.wanted
+            && w.scan.is_none()
+            && let Err(e) = start(w, now)
+        {
+            log::warn!("changed-on-disk scan could not start: {e}");
+            if !w.said_failed {
+                w.said_failed = true;
+                say = Some(crate::i18n::fmt(
+                    "Checking linked files for changes on disk couldn't start ({error}); it is tried again every few seconds.",
+                    &[("error", &e)],
+                ));
+            }
+        }
+        let wait = if w.scan.is_some() {
+            web_time::Duration::from_millis(100)
+        } else {
+            w.due.map_or(EVERY, |due| due.saturating_duration_since(now))
+        };
+        ctx.request_repaint_after(wait);
     }
-    let wait =
-        if w.scan.is_some() { web_time::Duration::from_millis(100) } else { w.due.map_or(EVERY, |due| due.saturating_duration_since(now)) };
-    ctx.request_repaint_after(wait);
+    if let Some(text) = say {
+        app.session.notify(text, true);
+    }
 }
 
-fn start(w: &mut Watch, now: web_time::Instant) {
+/// Starts a scan of every watched path on a thread of its own; why not, when the OS refuses one
+/// (that costs this scan, not the app: the next is tried when due).
+fn start(w: &mut Watch, now: web_time::Instant) -> Result<(), String> {
     // The linked path is observed as given (one per key), never a resolved copy of it.
     let mut paths: HashMap<String, String> = HashMap::new();
     for f in &w.found {
@@ -418,46 +445,42 @@ fn start(w: &mut Watch, now: web_time::Instant) {
         *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(results);
     });
     w.due = Some(now + EVERY);
-    match spawned {
-        Ok(_) => {
-            w.scans += 1;
-            w.scan = Some((w.scans, slot));
-            w.wanted = false;
-        }
-        // A thread the OS refuses costs this scan, not the app: the next is tried when due.
-        Err(e) => {
-            w.wanted = false;
-            log::warn!("changed-on-disk scan could not start: {e}");
-        }
-    }
+    w.wanted = false;
+    spawned.map_err(|e| e.to_string())?;
+    w.scans += 1;
+    w.scan = Some((w.scans, slot, now));
+    Ok(())
 }
 
 /// The target a reload command names in the active map, if it's watched.
 fn target_of(app: &RustGisApp, command: &str, params: &Value, answer: Option<&Value>) -> Option<Target> {
-    let map = app.session.map().instance_id();
+    let map = app.session.map();
     match command {
         "layer.reloadData" | "gpkg.discardEdits" => {
             let id = answer.and_then(|a| a.get("layer")).and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok());
             let id = id.or_else(|| app.session.layer_id(params).ok())?;
-            Some(Target::Layer { map, layer: app.session.map().layer(id)?.instance_id() })
+            Some(Target::Layer { map: map.instance_id(), layer: map.layer(id)?.instance_id() })
         }
         "map.reloadTiles" => {
-            let url = match answer.and_then(|a| a.get("path")).and_then(Value::as_str) {
-                Some(path) => path.to_string(),
-                None => rustgis_engine::cmd::reads::archive_target(&app.session, params)?.1.archive_file()?.to_string(),
+            let i = match answer.and_then(|a| a.get("index")).and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()) {
+                Some(i) => i,
+                None => rustgis_engine::cmd::reads::archive_target(&app.session, params)?.0,
             };
-            Some(Target::Tiles { map, url })
+            tiles_target(map, i)
         }
         _ => None,
     }
 }
 
-/// A reload is asked for (whatever asked: the notification, a menu, Command Search): the
-/// observation it will read is the one settled now.
-pub(crate) fn reloading(app: &mut RustGisApp, command: &str, params: &Value) {
-    if let Some(target) = target_of(app, command, params, None) {
-        app.diskwatch.monitor.reloading(&target);
+/// A reload's read starts (on its thread, or here): what its file holds now is what it reads,
+/// and what it acknowledges once it lands (one metadata read of one file).
+pub(crate) fn reading(app: &mut RustGisApp, command: &str, params: &Value) {
+    if !app.watch_files {
+        return;
     }
+    let Some(target) = target_of(app, command, params, None) else { return };
+    let Some(path) = app.diskwatch.found.iter().find(|f| f.target == target).map(|f| f.path.clone()) else { return };
+    app.diskwatch.monitor.reading(target, look(&path));
 }
 
 /// The file a save or export is about to write, if it's watched, and what is there now: taken
@@ -501,7 +524,7 @@ pub(crate) fn ran(app: &mut RustGisApp, command: &str, params: &Value, answer: &
     match command {
         "layer.reloadData" | "gpkg.discardEdits" | "map.reloadTiles" => {
             if let Some(target) = target_of(app, command, params, Some(answer)) {
-                app.diskwatch.monitor.reloaded(&target, command != "gpkg.discardEdits");
+                app.diskwatch.monitor.reloaded(&target);
             }
         }
         // A save that wrote nothing (no edits) isn't a write; an export started on its thread
@@ -543,8 +566,9 @@ fn place(app: &mut RustGisApp, target: &Target) -> Result<Place, String> {
         Target::Layer { layer, .. } => {
             app.session.map().layers.iter().find(|l| l.instance_id() == *layer).map(|l| Place::Layer(l.id)).ok_or_else(gone)
         }
-        Target::Tiles { url, .. } => {
-            app.session.map().tiles.iter().position(|t| t.archive_file() == Some(url.as_str())).map(Place::Tiles).ok_or_else(gone)
+        Target::Tiles { .. } => {
+            let map = app.session.map();
+            (0..map.tiles.len()).find(|&i| tiles_target(map, i).as_ref() == Some(target)).map(Place::Tiles).ok_or_else(gone)
         }
     }
 }
@@ -698,43 +722,62 @@ mod tests {
         assert_eq!((m.status(&layer(1)), m.status(&layer(2)), m.status(&layer(3))), (Status::Changed, Status::Changed, Status::Unchanged));
         assert!(m.notifies(&layer(1)) && m.notifies(&layer(2)));
         // Reloading one target leaves the other reading the same file pending.
-        m.reloading(&layer(1));
-        m.reloaded(&layer(1), true);
+        m.reading(layer(1), v2.clone());
+        m.reloaded(&layer(1));
         assert_eq!((m.status(&layer(1)), m.status(&layer(2))), (Status::Unchanged, Status::Changed));
     }
 
     #[test]
     fn a_reload_acknowledges_only_what_it_read() {
-        let [v0, v1, v2] = observations(3).try_into().unwrap();
+        let [v0, v1, v2, v3] = observations(4).try_into().unwrap();
         let (mut m, scan) = monitor(&v0);
         m.observed("a", v1.clone(), scan);
         m.observed("a", v1.clone(), scan + 1);
-        m.reloading(&layer(1));
+        m.reading(layer(1), v1.clone());
         // Written again while the reload read.
         m.observed("a", v2.clone(), scan + 2);
         m.observed("a", v2.clone(), scan + 3);
-        m.reloaded(&layer(1), true);
+        m.reloaded(&layer(1));
         assert_eq!(m.status(&layer(1)), Status::Changed, "the newer change stays pending");
         // A failed reload (no `reloaded`) keeps it pending too; a later success clears it.
-        m.reloading(&layer(1));
+        m.reading(layer(1), v2.clone());
         assert_eq!(m.status(&layer(1)), Status::Changed);
-        m.reloaded(&layer(1), true);
+        m.reading(layer(1), v2.clone());
+        m.reloaded(&layer(1));
         assert_eq!(m.status(&layer(1)), Status::Unchanged);
-        // A snapshot from a reload that never ran isn't taken by one that ran here (Discard Edits).
-        m.observed("a", v1.clone(), scan + 4);
-        m.observed("a", v1.clone(), scan + 5);
-        m.reloading(&layer(1));
-        m.observed("a", v0.clone(), scan + 6);
-        m.observed("a", v0.clone(), scan + 7);
-        m.reloaded(&layer(1), false);
-        assert_eq!(m.status(&layer(1)), Status::Unchanged, "what had settled when it ran is what it read");
-        // A reload before two scans have agreed (a target just added) reads the latest scan.
+        // Two reloads queued, the file changing between them: each acknowledges what its own
+        // read started with (reads run one at a time).
+        m.reading(layer(1), v2.clone());
+        m.observed("a", v3.clone(), scan + 4);
+        m.observed("a", v3.clone(), scan + 5);
+        m.reloaded(&layer(1));
+        assert_eq!(m.status(&layer(1)), Status::Changed, "the first read didn't see v3");
+        m.reading(layer(1), v3.clone());
+        m.reloaded(&layer(1));
+        assert_eq!(m.status(&layer(1)), Status::Unchanged);
+        // A reload of a change no scan has seen yet (b.gpkg now v2) acknowledges what it read,
+        // not what the scans last agreed on (v0).
+        m.reading(layer(3), v2.clone());
+        m.reloaded(&layer(3));
+        m.observed("b", v2.clone(), scan + 6);
+        m.observed("b", v2.clone(), scan + 7);
+        assert_eq!(m.status(&layer(3)), Status::Unchanged, "it read v2, which then settled");
+        // A read started for another target isn't taken: a reload with no observation of its own
+        // (run some other way) leaves the mark, since what it read isn't known.
+        m.observed("a", v1.clone(), scan + 8);
+        m.observed("a", v1.clone(), scan + 9);
+        m.reading(layer(2), v3.clone());
+        m.reloaded(&layer(1));
+        assert_eq!(m.status(&layer(1)), Status::Changed);
+        m.reloaded(&layer(2));
+        assert_eq!(m.status(&layer(2)), Status::Changed, "layer 2's read started at v3, not v1");
+        // A reload before two scans have agreed (a target just added) acknowledges what it read.
         let mut m = Monitor::default();
         m.track([(layer(9), "c".into())]);
         m.observed("c", v0.clone(), 1);
         m.observed("c", v1.clone(), 2);
-        m.reloading(&layer(9));
-        m.reloaded(&layer(9), true);
+        m.reading(layer(9), v1.clone());
+        m.reloaded(&layer(9));
         m.observed("c", v1.clone(), 3);
         assert_eq!(m.status(&layer(9)), Status::Unchanged, "the early reload read the change");
     }
@@ -861,6 +904,25 @@ mod tests {
         m.track([(layer(3), "b".into())]);
         m.observed("a", v0.clone(), scan + 3);
         assert!(!m.keys().contains("a"));
+    }
+
+    #[test]
+    fn two_tile_layers_on_one_archive_are_separate_targets() {
+        use rustgis_engine::map::{Map, TileKind, TileLayer};
+        let path = std::env::temp_dir().join("rustgis-diskwatch-same.pmtiles").display().to_string();
+        let mut map = Map::new("m");
+        map.tiles = vec![
+            TileLayer::new("first", TileKind::PmTiles, path.clone()),
+            TileLayer::new("web", TileKind::Raster, "https://tiles.invalid/{z}/{x}/{y}.png"),
+            TileLayer::new("second", TileKind::PmTiles, path.clone()),
+        ];
+        let [first, web, second] = [0, 1, 2].map(|i| tiles_target(&map, i));
+        assert!(web.is_none(), "a web service isn't watched");
+        let (Some(first), Some(second)) = (first, second) else { panic!("local archives are targets") };
+        assert_ne!(first, second);
+        // The second still names the second after the web layer goes.
+        map.tiles.remove(1);
+        assert_eq!(tiles_target(&map, 1), Some(second));
     }
 
     #[test]

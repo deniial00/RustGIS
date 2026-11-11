@@ -1614,7 +1614,7 @@ fn visibility_box(ui: &Ui, cb: Rect, visible: bool, t: &Tokens) {
 /// opacity, moves it up or down (not with `reorder` off: the list is filtered), or removes it.
 fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reorder: bool, tile: &TileLayer, t: &Tokens) -> Rect {
     let mut shown = if tile.overlay { format!("{} · {}", tile.name, tl!("overlay")) } else { tile.name.clone() };
-    let disk = disk_note(app, None, Some(tile));
+    let disk = disk_note(app, None, Some(i));
     if let Some((note, _, _)) = disk.as_ref().filter(|(note, _, _)| !note.is_empty()) {
         shown = format!("{shown}  {note}");
     }
@@ -1881,9 +1881,9 @@ impl RowName {
     }
 }
 
-/// The changed-on-disk note for a layer or a tile layer of the active map (the desktop app
+/// The changed-on-disk note for a layer or tile layer `tile` of the active map (the desktop app
 /// watches linked files: see `diskwatch`), as `diskwatch::row_note` words it.
-fn disk_note(app: &RustGisApp, layer: Option<&Layer>, tile: Option<&TileLayer>) -> Option<(String, String, Option<bool>)> {
+fn disk_note(app: &RustGisApp, layer: Option<&Layer>, tile: Option<usize>) -> Option<(String, String, Option<bool>)> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         if !app.watch_files {
@@ -1891,7 +1891,7 @@ fn disk_note(app: &RustGisApp, layer: Option<&Layer>, tile: Option<&TileLayer>) 
         }
         let status = match (layer, tile) {
             (Some(l), _) => crate::diskwatch::layer_status(app, l),
-            (None, Some(tile)) => crate::diskwatch::tiles_status(app, tile),
+            (None, Some(i)) => crate::diskwatch::tiles_status(app, i),
             (None, None) => return None,
         };
         crate::diskwatch::row_note(&status)

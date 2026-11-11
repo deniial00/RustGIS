@@ -94,11 +94,11 @@ fn run_presented(
     then: Option<Then>,
     presentation: Option<(String, Option<String>)>,
 ) -> Result<Value, String> {
-    // What a reload reads is what the monitor saw settle as it was asked for.
-    if matches!(command, "layer.reloadData" | "map.reloadTiles") {
-        crate::diskwatch::reloading(app, command, &p);
-    }
     if !app.reads_off_frame {
+        // Read here and now: what its file holds now is what it reads.
+        if matches!(command, "layer.reloadData" | "map.reloadTiles") {
+            crate::diskwatch::reading(app, command, &p);
+        }
         let r = app.run(command, p);
         return answered(app, then, r);
     }
@@ -362,6 +362,10 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
         return complete_here(app, asked, p, Err(tl!("This read was already started").to_string()));
     };
     let name = ahead.name;
+    // A reload reads its file from now on: what the file holds now is what it acknowledges.
+    if matches!(asked.command, "layer.reloadData" | "map.reloadTiles") {
+        crate::diskwatch::reading(app, asked.command, &p);
+    }
     let control = Control::stoppable();
     if !ahead.reads() {
         let read = ahead.run(&control);

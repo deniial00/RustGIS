@@ -2464,6 +2464,11 @@ impl RustGisApp {
         // What a watched file a save or export writes holds just before it does.
         #[cfg(not(target_arch = "wasm32"))]
         let before_write = diskwatch::before_write(self, id, &params);
+        // Discard Edits reads its table as it runs: what the file holds now is what it reads.
+        #[cfg(not(target_arch = "wasm32"))]
+        if id == "gpkg.discardEdits" {
+            diskwatch::reading(self, id, &params);
+        }
         let mut r = match dispatch {
             AppDispatch::Prepared(prepared) => self.session.run_prepared(*prepared),
             AppDispatch::InPlace(id) => self.session.add_in_place_for(id, &params),
