@@ -417,6 +417,8 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
         if let Some(results) = done {
             let scan = *scan;
             w.scan = None;
+            // A scan answered: a later stall is a new episode, said again.
+            w.said_stalled = false;
             for (key, seen) in results {
                 if exporting.as_deref() != Some(key.as_str()) {
                     w.monitor.observed(&key, seen, scan);
@@ -436,20 +438,27 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
         if w.due.is_none_or(|due| now >= due) {
             w.wanted = true;
         }
-        if w.wanted
-            && w.scan.is_none()
-            && let Err(e) = start(w, now)
-        {
-            log::warn!("changed-on-disk scan could not start: {e}");
-            if !w.said_failed {
-                w.said_failed = true;
-                say = Some(crate::i18n::fmt(
-                    "Checking linked files for changes on disk couldn't start ({error}); it is tried again every few seconds.",
-                    &[("error", &e)],
-                ));
+        if w.wanted && w.scan.is_none() {
+            match start(w, now) {
+                // Started again: a later failure is a new episode, said again.
+                Ok(()) => w.said_failed = false,
+                Err(e) => {
+                    log::warn!("changed-on-disk scan could not start: {e}");
+                    if !w.said_failed {
+                        w.said_failed = true;
+                        say = Some(crate::i18n::fmt(
+                            "Checking linked files for changes on disk couldn't start ({error}); it is tried again every few seconds.",
+                            &[("error", &e)],
+                        ));
+                    }
+                }
             }
         }
-        let wait = if w.scan.is_some() {
+        // A scan under way is looked at often, until it has stalled: then every few seconds.
+        let stalled = w.scan.as_ref().is_some_and(|(_, _, started)| now.saturating_duration_since(*started) >= STALLED);
+        let wait = if stalled {
+            EVERY
+        } else if w.scan.is_some() {
             web_time::Duration::from_millis(100)
         } else {
             w.due.map_or(EVERY, |due| due.saturating_duration_since(now))
@@ -540,7 +549,8 @@ pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> O
         // An existing GeoPackage written into; a new file isn't watched yet.
         "share.exportLayer" | "share.exportTable" => {
             let path = params.get("path").and_then(Value::as_str)?.to_string();
-            let named = params.get("tableName").and_then(Value::as_str).filter(|n| !n.is_empty());
+            // Trimmed as the engine trims it.
+            let named = params.get("tableName").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
             let table = match (named, command) {
                 (Some(name), _) => name.to_string(),
                 (None, "share.exportLayer") => {
@@ -1156,5 +1166,19 @@ mod tests {
             stale(&app, "share.exportTable", json!({"table": 7, "path": package, "mode": "addTable", "tableName": "other"})),
             Some(0)
         );
+        // Named with spaces the engine trims: still the table the layer reads.
+        assert_eq!(
+            stale(&app, "share.exportTable", json!({"table": 7, "path": package, "mode": "replaceTable", "tableName": " rows "})),
+            Some(1)
+        );
+        // A real export: once the scans agree, the layer on the replaced table is marked, and
+        // nothing marks the layer on the GeoJSON the export didn't touch.
+        let ctx = egui::Context::default();
+        scan(&mut app, &ctx, 2);
+        let geo = app.diskwatch.found.iter().find(|f| f.key == key(&geojson.display().to_string())).map(|f| f.target.clone()).unwrap();
+        app.run("share.exportTable", json!({"table": 7, "path": package, "mode": "replaceTable"})).unwrap();
+        scan(&mut app, &ctx, 3);
+        assert_eq!(app.diskwatch.status(&table), Status::Changed, "the layer still shows the replaced table's old rows");
+        assert_eq!(app.diskwatch.status(&geo), Status::Unchanged);
     }
 }
