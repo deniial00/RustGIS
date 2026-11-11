@@ -94,6 +94,10 @@ fn run_presented(
     then: Option<Then>,
     presentation: Option<(String, Option<String>)>,
 ) -> Result<Value, String> {
+    // What a reload reads is what the monitor saw settle as it was asked for.
+    if matches!(command, "layer.reloadData" | "map.reloadTiles") {
+        crate::diskwatch::reloading(app, command, &p);
+    }
     if !app.reads_off_frame {
         let r = app.run(command, p);
         return answered(app, then, r);

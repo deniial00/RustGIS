@@ -275,9 +275,36 @@ tile archives have their own **Reload Data** on their Layers row; see
 
 Supported targets are linked vectors, rasters (including time-following Zarr variables),
 GDAL/DuckDB file-backed layers and editable local GeoPackage tables. GDAL-linked File
-Geodatabases and Zarr folders can be reloaded manually. **This is manual reload only**:
-RustGIS does not detect or notify about changes on disk. Folder sources are not monitored;
-use Reload Data even when the folder's timestamp has not changed.
+Geodatabases and Zarr folders can be reloaded manually. Folder sources are not monitored
+(**Folder source — changes are not monitored. Use Reload Data.** in the Layers row's tooltip): use
+Reload Data even when the folder's timestamp has not changed.
+
+**Changed on disk (desktop).** While the app is open, RustGIS looks at the files its linked
+layers and local tile archives read every 5 seconds and when its window regains focus, in every
+map of the project. It reads only metadata (size, modification time and the file's identity and
+status-change time), never the data: a Shapefile's `.dbf`, `.shx`, `.prj` and `.cpg` count with its
+`.shp`, a MapInfo file's `.mid` with its `.mif`, and a GeoPackage, MBTiles or `.sqlite` file's
+`-wal` and `-journal` with it. Other
+sidecars (a raster's `.aux.xml` or `.prj`) aren't watched. A change is reported once two looks in a row agree,
+so a write under way isn't. The Layers pane marks the row **(changed on disk)**, **(missing on
+disk)** or **(can't be checked)**, and a notification lists each affected file with **Reload Data**
+for each layer or archive reading it (**Repair Data Source…** when a linked file is missing) and
+**Not Now**. Nothing is reread until you choose; Reload Data reloads only that layer, opening its map
+first, and asks before discarding GeoPackage edits as above. **Not Now** hides the notification
+for that version of the file; the row stays marked, and a later change notifies again. A reload
+clears the mark for what it read; a change that came while it read stays marked. Saving edits to a
+GeoPackage, or exporting into one, from RustGIS's menus and commands isn't reported as an outside
+change. None of this changes the
+project or adds an undo step.
+
+Limits: a write that keeps the size, modification time and identity of every watched file isn't
+seen; nor is one made while the layer is being opened, before its first look, which RustGIS takes
+as what the layer read. Reload Data stays available whether or not a change was reported. A
+reload, a GeoPackage save or an export run from a script, a model, the AI Assistant pane, the file
+bridge or the command line doesn't clear the mark or count as RustGIS's own write (an archive
+reload from an attached MCP client does clear it). Another program writing the same GeoPackage
+while RustGIS saves or exports into it isn't told apart from RustGIS's own write.
+
 Saved GDAL/DuckDB links reread their original selected table when restoring a disposable
 converted copy, including compatible empty tables. If the original cannot be read, RustGIS
 does not borrow another session's temporary conversion. A durable saved conversion outside the

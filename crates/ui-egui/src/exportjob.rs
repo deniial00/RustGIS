@@ -19,6 +19,15 @@ pub struct ExportJob {
     name: &'static str,
     control: Arc<Control>,
     slot: crate::Slot<Result<Wrote, String>>,
+    /// The watched file it writes and what was there before: an export into a watched
+    /// GeoPackage is RustGIS's own write.
+    before: Option<crate::diskwatch::Write>,
+}
+
+/// The watched file the export under way writes into: what scans see there meanwhile is the
+/// export's own work, not another program's.
+pub(crate) fn writing(app: &RustGisApp) -> Option<&str> {
+    app.export_job.as_ref()?.before.as_ref().map(crate::diskwatch::Write::key)
 }
 
 /// Refuses another export while one runs, whichever way it would run (one at a time).
@@ -33,6 +42,7 @@ pub fn idle(app: &RustGisApp) -> Result<(), String> {
 /// time: a second is refused while the first runs.
 pub fn start(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Value, String> {
     idle(app)?;
+    let before = crate::diskwatch::before_write(app, command, &p);
     let run = exports::export_start(&mut app.session, command, &p)?;
     let (started, name) = (run.started(), run.name);
     // Cancel stops it.
@@ -50,7 +60,7 @@ pub fn start(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Va
             *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wrote);
         })
         .map_err(|e| e.to_string())?;
-    app.export_job = Some(ExportJob { started, name, control, slot });
+    app.export_job = Some(ExportJob { started, name, control, slot, before });
     Ok(json!({"started": name}))
 }
 
@@ -61,10 +71,15 @@ pub fn land(app: &mut RustGisApp) -> bool {
     let done = job.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
     let Some(done) = done else { return true };
     let started = job.started.clone();
+    let before = job.before.clone();
     app.export_job = None;
     // Its notices (a failure among them) are the command's; the answer was for a script, which
     // waits for its own.
-    let _ = exports::export_land(&mut app.session, started, done);
+    if exports::export_land(&mut app.session, started, done).is_ok()
+        && let Some(before) = before
+    {
+        crate::diskwatch::wrote(app, before);
+    }
     false
 }
 
