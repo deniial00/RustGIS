@@ -32,8 +32,8 @@ copied history errors and the project log's saved parameters and errors (Copy as
 text parameters and says so, as below):
 a secret in the query or fragment of one of its words (`data.tif?token=abc def`,
 `a.tif?x=1;token=abc def`) goes with the rest of the text, saying
-`[query and the rest omitted]`. A word alone (`data.tif?pwd=hunter2`) has only the secret's
-value emptied, with no marker. A `key`, `sig` or `sas` counts only when its value reads as a key,
+`[query and the rest omitted]`. A word alone (`data.tif?pwd=hunter2`, `data.tif#pwd=hunter2`) has
+only the secret's value emptied, with no marker. A `key`, `sig` or `sas` counts only when its value reads as a key,
 so `a.tif?key=abc def` stays. Notices and notebook output cut only `scheme://` addresses and
 keep scheme-less text as written. For an unknown
 `scheme://` URL, a query with no secret name (`?custom=hidden unescaped hidden`) is omitted only
