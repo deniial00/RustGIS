@@ -295,8 +295,9 @@ for that version of the file; the row stays marked, and a later change notifies 
 clears the mark for what it read; a change that came while it read stays marked. Saving edits, or
 exporting into a watched file, from RustGIS's menus, ribbon and Command Search isn't reported as an
 outside change, except for other layers reading the table that was written, or the file an export
-replaced (a GeoJSON, a Shapefile): they still show the old rows and stay marked. None of this
-changes the project or adds an undo step.
+replaced (a GeoJSON, a Shapefile): they still show the old rows and stay marked. (A layer read in
+place from a GeoPackage table RustGIS wrote reads it again, so it isn't marked.) Watching for
+changes, the marks and Not Now don't change the project or add undo steps.
 
 Limits: a write that keeps the size, modification time and identity of every watched file isn't
 seen; nor is one made while the layer is being opened, before its first look, which RustGIS takes

@@ -140,16 +140,14 @@ impl Monitor {
         }
         let source = self.sources.entry(key.to_string()).or_default();
         let agreed = source.last.as_ref().is_some_and(|(last, _)| *last == seen);
-        let since = source.last.as_ref().map(|(_, n)| *n);
         source.last = Some((seen.clone(), scan));
         if agreed {
             source.settled = Some(seen.clone());
         }
-        // Self-write: acknowledged once two scans, both started after it, agree.
+        // Self-write: acknowledged once two scans agree, the later started after it (the earlier,
+        // perhaps in flight across the write, saw the same, so it is the write's result too).
         let acknowledged = match &source.wrote {
-            Some((before, after, result, stale)) if agreed && since.is_some_and(|n| n >= *after) => {
-                Some((before.clone(), result.clone(), stale.clone()))
-            }
+            Some((before, after, result, stale)) if agreed && scan >= *after => Some((before.clone(), result.clone(), stale.clone())),
             _ => None,
         };
         if acknowledged.is_some() {
@@ -280,6 +278,9 @@ struct Found {
     name: String,
     /// Repair Data Source can relink it (an editable GeoPackage layer without a linked file can't).
     repairable: bool,
+    /// Read in place: a RustGIS write into its GeoPackage table reads it again
+    /// (`gpkg::reset_sources`), so that write leaves nothing stale on it.
+    streamed: bool,
 }
 
 /// The linked local sources in every map: layers Reload Data reads and local archives. Remote,
@@ -300,6 +301,7 @@ fn targets(s: &Session) -> Vec<Found> {
                     map: m.name.clone(),
                     name: l.name.clone(),
                     repairable,
+                    streamed: l.gpkg.is_none() && l.source.is_some(),
                 });
             }
         }
@@ -318,6 +320,7 @@ fn targets(s: &Session) -> Vec<Found> {
                     map: m.name.clone(),
                     name: tile.name.clone(),
                     repairable: true,
+                    streamed: false,
                 });
             }
         }
@@ -571,13 +574,16 @@ pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> O
     }
     // Other layers reading the table written still hold its old rows: they stay marked. An
     // export over a single-dataset file (a GeoJSON, a Shapefile) replaces what every layer on it
-    // reads.
+    // reads. A layer read in place from the GeoPackage table written is read again by the
+    // command itself (`gpkg::reset_sources`): it holds the new rows.
     let export = writer.is_none();
+    let geopackage = std::path::Path::new(&path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gpkg"));
     let stale = app
         .diskwatch
         .found
         .iter()
         .filter(|f| f.key == key && Some(&f.target) != writer.as_ref())
+        .filter(|f| !(geopackage && f.streamed))
         .filter(|f| match f.table.as_deref() {
             Some(t) => t.eq_ignore_ascii_case(&table),
             None => export,
@@ -1005,6 +1011,14 @@ mod tests {
         m.observed("a", v2.clone(), scan);
         m.observed("a", v2.clone(), scan + 1);
         assert_eq!((m.status(&layer(1)), m.status(&layer(2))), (Status::Changed, Status::Unchanged), "layer 1 hasn't read layer 2's rows");
+        // A scan in flight across the write (numbered before it) sees the result; the next agrees:
+        // that is RustGIS's own write, not a change, at no point in between.
+        let (mut m, scan) = monitor(&v0);
+        m.wrote("b", v0.clone(), v1.clone(), HashSet::new(), None, scan + 1);
+        m.observed("b", v1.clone(), scan);
+        assert_eq!(m.status(&layer(3)), Status::Unchanged);
+        m.observed("b", v1.clone(), scan + 1);
+        assert_eq!(m.status(&layer(3)), Status::Unchanged, "no false mark while the in-flight scan agrees");
     }
 
     #[test]
@@ -1180,5 +1194,105 @@ mod tests {
         scan(&mut app, &ctx, 3);
         assert_eq!(app.diskwatch.status(&table), Status::Changed, "the layer still shows the replaced table's old rows");
         assert_eq!(app.diskwatch.status(&geo), Status::Unchanged);
+    }
+
+    fn target_of_layer(app: &RustGisApp, id: u32) -> Target {
+        Target::Layer { map: app.session.map().instance_id(), layer: app.session.map().layer(id).unwrap().instance_id() }
+    }
+
+    fn layer_id(answer: Value) -> u32 {
+        answer["layer"].as_u64().unwrap() as u32
+    }
+
+    #[test]
+    fn a_background_export_marks_only_the_layers_it_left_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let geojson = dir.path().join("points.geojson");
+        std::fs::write(
+            &geojson,
+            r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+        )
+        .unwrap();
+        let package = dir.path().join("places.gpkg");
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        let points = layer_id(app.run("layer.addData", json!({"path": geojson})).unwrap());
+        for table in ["rows", "other"] {
+            let mode = if package.exists() { "addTable" } else { "newFile" };
+            app.run("share.exportLayer", json!({"layer": points, "path": package, "mode": mode, "tableName": table})).unwrap();
+        }
+        let rows = layer_id(app.run("gpkg.addLayer", json!({"path": package, "table": "rows"})).unwrap());
+        let other = layer_id(app.run("gpkg.addLayer", json!({"path": package, "table": "other"})).unwrap());
+        let (rows, other) = (target_of_layer(&app, rows), target_of_layer(&app, other));
+        app.watch_files = true;
+        let ctx = egui::Context::default();
+        scan(&mut app, &ctx, 2);
+        // Replaced on the export's thread, as the desktop's Export Features does.
+        crate::exportjob::start(
+            &mut app,
+            "share.exportLayer",
+            json!({"layer": points, "path": package, "mode": "replaceTable", "tableName": "rows"}),
+        )
+        .unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while crate::exportjob::land(&mut app) {
+            assert!(std::time::Instant::now() < end, "the export never landed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        scan(&mut app, &ctx, 3);
+        assert_eq!(app.diskwatch.status(&rows), Status::Changed, "the editable layer on the replaced table holds its old rows");
+        assert_eq!(app.diskwatch.status(&other), Status::Unchanged, "RustGIS's own export isn't an outside change for another table");
+    }
+
+    #[test]
+    fn a_queued_reload_that_is_refused_leaves_a_later_change_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("places.geojson");
+        // Replaced whole, as an editor saving does: a read on its thread never sees half a file.
+        let replace = |n: usize| {
+            let features: Vec<String> = (0..n)
+                .map(|i| format!(r#"{{"type":"Feature","properties":{{}},"geometry":{{"type":"Point","coordinates":[{i},0]}}}}"#))
+                .collect();
+            let beside = dir.path().join("places.tmp");
+            std::fs::write(&beside, format!(r#"{{"type":"FeatureCollection","features":[{}]}}"#, features.join(","))).unwrap();
+            std::fs::rename(&beside, dir.path().join("places.geojson")).unwrap();
+        };
+        replace(1);
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.watch_files = true;
+        app.reads_off_frame = true;
+        let id = layer_id(app.run("layer.addData", json!({"path": path, "stream": true})).unwrap());
+        let target = target_of_layer(&app, id);
+        let ctx = egui::Context::default();
+        scan(&mut app, &ctx, 2);
+        replace(2);
+        scan(&mut app, &ctx, 2);
+        assert_eq!(app.diskwatch.status(&target), Status::Changed);
+        // The first reload starts on its thread; the file changes; a second waits behind it. The
+        // second's read was prepared before the first replaced the source, so the engine refuses
+        // it when it lands (nothing is discarded).
+        app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        replace(3);
+        app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        let land_all = |app: &mut RustGisApp| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while crate::readjob::land(app) {
+                assert!(std::time::Instant::now() < end, "the reads never landed");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let mark = app.session.notice_mark();
+        land_all(&mut app);
+        assert!(app.session.notices_since(mark).iter().any(|n| n.error), "the queued reload was refused");
+        scan(&mut app, &ctx, 2);
+        assert_eq!(
+            app.diskwatch.status(&target),
+            Status::Changed,
+            "the first reload started before the last change, the second never read"
+        );
+        // Asked again: it reads what is there now, and the mark clears.
+        app.run("ui.reloadData", json!({"layer": id})).unwrap();
+        land_all(&mut app);
+        scan(&mut app, &ctx, 2);
+        assert_eq!(app.diskwatch.status(&target), Status::Unchanged);
     }
 }
