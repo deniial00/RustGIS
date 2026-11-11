@@ -112,8 +112,9 @@ impl Observation {
 
     /// A monitored source at its linked path, with the companions its reader reads or sizes: a
     /// Shapefile's lowercase `.dbf`, `.shx` and `.prj` and every ASCII-case `.cpg`
-    /// (`rustgis_data::dbf`), a MapInfo file's `.mid` (`rustgis_data::io`), or a SQLite file's
-    /// `-wal` and `-journal`. A missing source is
+    /// (`rustgis_data::dbf`), a MapInfo file's `.mid` (`rustgis_data::io`), a SQLite file's
+    /// `-wal` and `-journal`, or a DuckDB database's `.wal` (commits not yet checkpointed, as the
+    /// DuckDB conversion's cache key counts them). A missing source is
     /// [`Observation::missing`], not an error.
     pub fn source(path: &str) -> Result<Self, String> {
         let path = Path::new(path);
@@ -130,6 +131,10 @@ impl Observation {
             }
         } else if has_extension(path, &["gpkg", "mbtiles", "sqlite"]) {
             sqlite_sidecars(path, "source", &mut companions)?;
+        } else if has_extension(path, &["duckdb", "ddb", "db"]) {
+            let mut wal = path.as_os_str().to_owned();
+            wal.push(".wal");
+            companions.push(FileRevision::read(Path::new(&wal), Presence::Sidecar, "source")?);
         }
         Ok(Self { primary, companions })
     }
@@ -155,18 +160,24 @@ mod tests {
     #[test]
     fn empty_sqlite_sidecars_match_absent_ones_but_commits_do_not() {
         let dir = dir("sidecars");
-        for name in ["clean.mbtiles", "clean.gpkg"] {
+        // (file, its sidecars: watched or not)
+        let cases: [(&str, &[(&str, bool)]); 3] = [
+            ("clean.mbtiles", &[("-wal", true), ("-journal", true), ("-shm", false)]),
+            ("clean.gpkg", &[("-wal", true), ("-journal", true), ("-shm", false)]),
+            ("clean.duckdb", &[(".wal", true), ("-wal", false)]),
+        ];
+        for (name, sidecars) in cases {
             let path = dir.join(name);
             std::fs::write(&path, b"main database").unwrap();
             let path = path.display().to_string();
             let observe = |p: &str| if name.ends_with("mbtiles") { Observation::archive(p) } else { Observation::source(p) };
             let observed = observe(&path).unwrap();
-            for sidecar in ["-wal", "-journal", "-shm"] {
+            for (sidecar, watched) in sidecars {
                 let sidecar = format!("{path}{sidecar}");
                 std::fs::write(&sidecar, b"").unwrap();
                 assert_eq!(observe(&path).unwrap(), observed, "an empty sidecar created by a reader is not a commit");
                 std::fs::write(&sidecar, b"committed frame").unwrap();
-                assert_eq!(observe(&path).unwrap() != observed, !sidecar.ends_with("-shm"), "{sidecar}");
+                assert_eq!(observe(&path).unwrap() != observed, *watched, "{sidecar}");
                 std::fs::remove_file(&sidecar).unwrap();
                 assert_eq!(observe(&path).unwrap(), observed);
             }

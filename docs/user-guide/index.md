@@ -283,8 +283,8 @@ Reload Data even when the folder's timestamp has not changed.
 layers and local tile archives read every 5 seconds and when its window regains focus, in every
 map of the project. It reads only metadata (size, modification time and the file's identity: on
 Linux and macOS its status-change time too, on Windows its creation time), never the data: a Shapefile's `.dbf`, `.shx`, `.prj` and `.cpg` count with its
-`.shp`, a MapInfo file's `.mid` with its `.mif`, and a GeoPackage, MBTiles or `.sqlite` file's
-`-wal` and `-journal` with it. Other
+`.shp`, a MapInfo file's `.mid` with its `.mif`, a GeoPackage, MBTiles or `.sqlite` file's `-wal`
+and `-journal` with it, and a DuckDB database's `.wal` with it. Other
 sidecars (a raster's `.aux.xml` or `.prj`) aren't watched. A change is reported once two looks in a row agree,
 so a write under way isn't. The Layers pane marks the row **(changed on disk)**, **(missing on
 disk)** or **(can't be checked)**, and a notification lists each affected file with **Reload Data**
