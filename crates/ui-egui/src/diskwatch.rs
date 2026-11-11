@@ -404,7 +404,7 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
     let mut say = None;
     if !w.said_stalled && w.scan.as_ref().is_some_and(|(_, _, started)| now.saturating_duration_since(*started) >= STALLED) {
         w.said_stalled = true;
-        say = Some(tl!("Checking linked files for changes on disk is waiting for a file that doesn't answer (a network drive?). Changes aren't reported until it does, and reloading or saving a file there may wait for it too.").to_string());
+        say = Some(tl!("Checking linked files for changes on disk is waiting for a file that doesn't answer (a network drive?). Changes aren't reported until it does, and reloading, saving or exporting a file there may wait for it too.").to_string());
     }
     if !w.found.is_empty() {
         if w.due.is_none_or(|due| now >= due) {
