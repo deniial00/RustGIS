@@ -325,9 +325,11 @@ fn secret_pairs_emptied(t: &str) -> String {
         let secret = |&(k, at): &(&str, usize)| {
             let value = rest.get(at..).unwrap_or("");
             // In a word with a `?`, the name after the last `?`, `&` or `#`: its path before is no part
-            // of the name. Without one, a field name is judged whole (`password#1`).
-            let name = if k.contains('?') { k.rsplit(['?', '&', '#']).next().unwrap_or(k) } else { k };
-            secret_pair(name, value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or(""))
+            // of the name. Without one, the whole field name (`password#1`) or the part after its last
+            // `&` or `#` (`data.tif#pwd`) makes it a secret.
+            let tail = k.rsplit(['?', '&', '#']).next().unwrap_or(k);
+            let value = value.get(..value.find(parts).unwrap_or(value.len())).unwrap_or("");
+            if k.contains('?') { secret_pair(tail, value) } else { secret_pair(k, value) || secret_pair(tail, value) }
         };
         let Some((_, at)) = pair.filter(secret) else {
             // Not a secret: the item and the separator after it, as they are.
@@ -545,6 +547,9 @@ mod tests {
             ("password#1=hunter2", "password#1="),
             ("token#x=abc", "token#x="),
             ("password#1=hunter2 failed", "password#1= failed"),
+            // A word with no `?` is secret by its whole name or by the part after its last `&` or `#`.
+            ("data.tif#pwd=hunter2", "data.tif#pwd="),
+            ("data.tif#v=2", "data.tif#v=2"),
         ] {
             assert_eq!(redacted_parameter(text), kept, "{text}");
             assert_eq!(redacted_text(text), kept, "{text}");
@@ -559,5 +564,18 @@ mod tests {
         assert_eq!(redacted(&params), serde_json::json!({"text": "data.tif[query and the rest omitted]", "n": 1}));
         let clean = serde_json::json!({"text": "data.tif?v=2 def", "n": 1});
         assert_eq!(redacted(&clean), clean);
+    }
+
+    /// A scheme-less secret query in text that also holds a `://` address goes through `redact`'s
+    /// field rule: the secret and the words after it are gone.
+    #[test]
+    fn a_schemeless_secret_beside_an_address_is_cut_by_the_field_rule() {
+        let secret = "see https://example.org/ok and data.tif?token=abc def";
+        let clean = "see https://example.org/ok and data.tif?v=2 def";
+        for cut in [redacted_text(secret), redacted_parameter(secret)] {
+            assert_eq!(cut, "see https://example.org/ok and data.tif?[REDACTED]");
+        }
+        assert_eq!(redacted_text(clean), clean);
+        assert_eq!(redacted_parameter(clean), clean);
     }
 }
