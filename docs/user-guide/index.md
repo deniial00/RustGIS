@@ -292,10 +292,10 @@ for each layer or archive reading it (**Repair Data Source…** when a linked fi
 **Not Now**. Nothing is reread until you choose; Reload Data reloads only that layer, opening its map
 first, and asks before discarding GeoPackage edits as above. **Not Now** hides the notification
 for that version of the file; the row stays marked, and a later change notifies again. A reload
-clears the mark for what it read; a change that came while it read stays marked. Saving edits to a
-GeoPackage, or exporting into one, from RustGIS's menus, ribbon and Command Search isn't reported as an outside
-change. None of this changes the
-project or adds an undo step.
+clears the mark for what it read; a change that came while it read stays marked. Saving edits, or
+exporting into a watched file, from RustGIS's menus, ribbon and Command Search isn't reported as an
+outside change, except for other layers reading the table that was written: they still show the
+old rows and stay marked. None of this changes the project or adds an undo step.
 
 Limits: a write that keeps the size, modification time and identity of every watched file isn't
 seen; nor is one made while the layer is being opened, before its first look, which RustGIS takes

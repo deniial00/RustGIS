@@ -70,8 +70,9 @@ struct Source {
     /// What two consecutive scans agreed on: a write still under way isn't offered.
     settled: Option<Seen>,
     /// RustGIS wrote the file itself: what was there just before, the number of the first scan
-    /// that started after the write, and what was there just after it (RustGIS's result).
-    wrote: Option<(Seen, u64, Seen)>,
+    /// that started after the write, what was there just after it (RustGIS's result), and the
+    /// targets whose data the write left behind (another layer on the table it wrote).
+    wrote: Option<(Seen, u64, Seen, HashSet<Target>)>,
 }
 
 struct Tracked {
@@ -146,21 +147,28 @@ impl Monitor {
         }
         // Self-write: acknowledged once two scans, both started after it, agree.
         let acknowledged = match &source.wrote {
-            Some((before, after, result)) if agreed && since.is_some_and(|n| n >= *after) => Some((before.clone(), result.clone())),
+            Some((before, after, result, stale)) if agreed && since.is_some_and(|n| n >= *after) => {
+                Some((before.clone(), result.clone(), stale.clone()))
+            }
             _ => None,
         };
         if acknowledged.is_some() {
             source.wrote = None;
         }
-        for t in self.targets.values_mut().filter(|t| t.key == key) {
+        for (target, t) in self.targets.iter_mut().filter(|(_, t)| t.key == key) {
             // A target added since: the first scan is what it was read with.
             if t.baseline.is_none() {
                 t.baseline = Some(seen.clone());
             }
-            if let Some((before, result)) = &acknowledged
+            if let Some((before, result, stale)) = &acknowledged
                 && t.baseline.as_ref() == Some(before)
+                && !stale.contains(target)
             {
                 t.baseline = Some(result.clone());
+            }
+            // Up to date again: a Not Now given for an earlier episode doesn't hide the next one.
+            if agreed && t.baseline.as_ref() == Some(&seen) {
+                t.dismissed = None;
             }
         }
     }
@@ -222,18 +230,21 @@ impl Monitor {
     /// just before the write and `next_scan` the number the next scan will have. Only targets
     /// whose data matched `before` take `result` (what was there just after the write) as
     /// theirs, once two scans after the write agree; a change another program makes before or
-    /// after the save then still differs from what they hold.
-    pub(crate) fn wrote(&mut self, key: &str, before: Seen, result: Seen, next_scan: u64) {
+    /// after the save then still differs from what they hold. `stale` are targets whose data
+    /// the write didn't refresh (another layer on the table it wrote): they stay marked.
+    pub(crate) fn wrote(&mut self, key: &str, before: Seen, result: Seen, stale: HashSet<Target>, next_scan: u64) {
         if !self.watches(key) {
             return;
         }
         let source = self.sources.entry(key.to_string()).or_default();
         // A second write right after the first, with nothing between them, continues it.
-        let before = match source.wrote.take() {
-            Some((first_before, _, first_result)) if first_result == before => first_before,
-            _ => before,
+        let (before, stale) = match source.wrote.take() {
+            Some((first_before, _, first_result, first_stale)) if first_result == before => {
+                (first_before, first_stale.union(&stale).cloned().collect())
+            }
+            _ => (before, stale),
         };
-        source.wrote = Some((before, next_scan, result));
+        source.wrote = Some((before, next_scan, result, stale));
     }
 }
 
@@ -259,6 +270,8 @@ struct Found {
     target: Target,
     key: String,
     path: String,
+    /// The table or dataset in its container that it reads, when there is one.
+    table: Option<String>,
     map: String,
     name: String,
     /// Repair Data Source can relink it (an editable GeoPackage layer without a linked file can't).
@@ -272,10 +285,18 @@ fn targets(s: &Session) -> Vec<Found> {
     let mut out = Vec::new();
     for m in &s.project.maps {
         for l in &m.layers {
-            if let Some((path, _, _)) = crate::reloaddata::source(l) {
+            if let Some((path, table, _)) = crate::reloaddata::source(l) {
                 let target = Target::Layer { map: m.instance_id(), layer: l.instance_id() };
                 let repairable = l.linked_file().is_some();
-                out.push(Found { target, key: key(path), path: path.to_string(), map: m.name.clone(), name: l.name.clone(), repairable });
+                out.push(Found {
+                    target,
+                    key: key(path),
+                    path: path.to_string(),
+                    table: table.map(str::to_string),
+                    map: m.name.clone(),
+                    name: l.name.clone(),
+                    repairable,
+                });
             }
         }
         let mut archives: HashMap<&str, usize> = HashMap::new();
@@ -289,6 +310,7 @@ fn targets(s: &Session) -> Vec<Found> {
                     target,
                     key: key(path),
                     path: path.to_string(),
+                    table: None,
                     map: m.name.clone(),
                     name: tile.name.clone(),
                     repairable: true,
@@ -502,17 +524,44 @@ pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> O
     if !app.watch_files {
         return None;
     }
-    let path = match command {
+    let s = &app.session;
+    // The file written, the table in it, and the layer whose data the write refreshes (a save
+    // keeps the saving layer's rows; an export refreshes none).
+    let (path, table, writer) = match command {
         "gpkg.saveEdits" => {
-            let id = app.session.layer_id(params).ok()?;
-            app.session.map().layer(id)?.gpkg.as_ref()?.path.clone()
+            let l = s.map().layer(s.layer_id(params).ok()?)?;
+            let edit = l.gpkg.as_ref()?;
+            (edit.path.clone(), edit.table.clone(), Some(Target::Layer { map: s.map().instance_id(), layer: l.instance_id() }))
         }
         // An existing GeoPackage written into; a new file isn't watched yet.
-        "share.exportLayer" | "share.exportTable" => params.get("path").and_then(Value::as_str)?.to_string(),
+        "share.exportLayer" | "share.exportTable" => {
+            let path = params.get("path").and_then(Value::as_str)?.to_string();
+            let named = params.get("tableName").and_then(Value::as_str).filter(|n| !n.is_empty());
+            let table = match (named, command) {
+                (Some(name), _) => name.to_string(),
+                (None, "share.exportLayer") => {
+                    s.layer_id(params).ok().and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or_default()
+                }
+                (None, _) => params.get("table").and_then(Value::as_str).unwrap_or_default().to_string(),
+            };
+            (path, table, None)
+        }
         _ => return None,
     };
     let key = key(&path);
-    app.diskwatch.monitor.watches(&key).then(|| Write { before: look(&path), key, path })
+    if !app.diskwatch.monitor.watches(&key) {
+        return None;
+    }
+    // Other layers reading the table written still hold its old rows: they stay marked.
+    let stale = app
+        .diskwatch
+        .found
+        .iter()
+        .filter(|f| f.key == key && Some(&f.target) != writer.as_ref())
+        .filter(|f| f.table.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(&table)))
+        .map(|f| f.target.clone())
+        .collect();
+    Some(Write { before: look(&path), key, path, stale })
 }
 
 /// A write RustGIS is about to make into a watched file ([`before_write`]).
@@ -521,6 +570,8 @@ pub(crate) struct Write {
     key: String,
     path: String,
     before: Seen,
+    /// Targets whose data the write doesn't refresh.
+    stale: HashSet<Target>,
 }
 
 impl Write {
@@ -557,7 +608,7 @@ pub(crate) fn wrote(app: &mut RustGisApp, write: Write) {
     let result = look(&write.path);
     let w = &mut app.diskwatch;
     // A scan under way started before the write; the next one is the first after it.
-    w.monitor.wrote(&write.key, write.before, result, w.scans + 1);
+    w.monitor.wrote(&write.key, write.before, result, write.stale, w.scans + 1);
 }
 
 /// Activates the target's map and returns the target's layer id or tile index there.
@@ -643,7 +694,12 @@ pub(crate) fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                         ui.label(tl!("The file may have changed since it was read. The map shows the data read before."));
                     }
                     Status::Missing => {
-                        ui.colored_label(t.red, tl!("The file is missing. Restore it, or use Repair Data Source."));
+                        let text = if found.iter().any(|f| f.repairable) {
+                            tl!("The file is missing. Restore it, or use Repair Data Source.")
+                        } else {
+                            tl!("The file is missing. Restore it.")
+                        };
+                        ui.colored_label(t.red, text);
                     }
                     Status::Unreadable(e) => {
                         ui.colored_label(t.red, crate::i18n::fmt("The file can't be checked: {error}", &[("error", e)]));
@@ -827,6 +883,13 @@ mod tests {
         m.observed("a", v0.clone(), scan + 4);
         m.observed("a", v0.clone(), scan + 5);
         assert_eq!(m.status(&layer(1)), Status::Unchanged);
+        // Missing again after it was up to date: a new episode, so Not Now from the last one
+        // doesn't hide it.
+        m.observed("a", Seen::Missing, scan + 4);
+        m.observed("a", Seen::Missing, scan + 5);
+        assert!(m.notifies(&layer(1)), "the earlier dismissal cleared once the file was back");
+        m.observed("a", v0.clone(), scan + 4);
+        m.observed("a", v0.clone(), scan + 5);
         m.observed("a", Seen::Missing, scan + 6);
         m.observed("a", Seen::Missing, scan + 7);
         m.observed("a", v1.clone(), scan + 8);
@@ -846,34 +909,34 @@ mod tests {
         let [v0, v1, v2, v3, v4] = observations(5).try_into().unwrap();
         let (mut m, scan) = monitor(&v0);
         // A scan started before the save sees the file mid-write; the save's result (v2) settles.
-        m.wrote("b", v0.clone(), v2.clone(), scan + 1);
+        m.wrote("b", v0.clone(), v2.clone(), HashSet::new(), scan + 1);
         m.observed("b", v1.clone(), scan);
         m.observed("b", v2.clone(), scan + 1);
         m.observed("b", v2.clone(), scan + 2);
         assert_eq!(m.status(&layer(3)), Status::Unchanged, "the self-save is not an external change");
         // Saved, then nothing changed on disk at all (the write was a no-op): still acknowledged,
         // and a later external change is still seen.
-        m.wrote("b", v2.clone(), v2.clone(), scan + 3);
+        m.wrote("b", v2.clone(), v2.clone(), HashSet::new(), scan + 3);
         m.observed("b", v2.clone(), scan + 3);
         m.observed("b", v2.clone(), scan + 4);
         m.observed("b", v3.clone(), scan + 5);
         m.observed("b", v3.clone(), scan + 6);
         assert_eq!(m.status(&layer(3)), Status::Changed);
         // A change pending before the save stays pending after it.
-        m.wrote("b", v3.clone(), v1.clone(), scan + 7);
+        m.wrote("b", v3.clone(), v1.clone(), HashSet::new(), scan + 7);
         m.observed("b", v1.clone(), scan + 7);
         m.observed("b", v1.clone(), scan + 8);
         assert_eq!(m.status(&layer(3)), Status::Changed);
         // An outside change no scan saw (v4), then a save at once: the save doesn't absorb it.
         let (mut m, scan) = monitor(&v0);
-        m.wrote("b", v4.clone(), v1.clone(), scan);
+        m.wrote("b", v4.clone(), v1.clone(), HashSet::new(), scan);
         m.observed("b", v1.clone(), scan);
         m.observed("b", v1.clone(), scan + 1);
         assert_eq!(m.status(&layer(3)), Status::Changed, "the outside write is still offered");
         // RustGIS saves (v1), then another program writes (v2) before any scan, or between scans.
         for scans in [[v2.clone(), v2.clone(), v2.clone()], [v1.clone(), v2.clone(), v2.clone()]] {
             let (mut m, scan) = monitor(&v0);
-            m.wrote("b", v0.clone(), v1.clone(), scan);
+            m.wrote("b", v0.clone(), v1.clone(), HashSet::new(), scan);
             for (n, seen) in scans.into_iter().enumerate() {
                 m.observed("b", seen, scan + n as u64);
             }
@@ -881,17 +944,24 @@ mod tests {
         }
         // Two saves in a row continue one write; another program writing between them doesn't.
         let (mut m, scan) = monitor(&v0);
-        m.wrote("b", v0.clone(), v1.clone(), scan);
-        m.wrote("b", v1.clone(), v2.clone(), scan);
+        m.wrote("b", v0.clone(), v1.clone(), HashSet::new(), scan);
+        m.wrote("b", v1.clone(), v2.clone(), HashSet::new(), scan);
         m.observed("b", v2.clone(), scan);
         m.observed("b", v2.clone(), scan + 1);
         assert_eq!(m.status(&layer(3)), Status::Unchanged);
         let (mut m, scan) = monitor(&v0);
-        m.wrote("b", v0.clone(), v1.clone(), scan);
-        m.wrote("b", v3.clone(), v2.clone(), scan);
+        m.wrote("b", v0.clone(), v1.clone(), HashSet::new(), scan);
+        m.wrote("b", v3.clone(), v2.clone(), HashSet::new(), scan);
         m.observed("b", v2.clone(), scan);
         m.observed("b", v2.clone(), scan + 1);
         assert_eq!(m.status(&layer(3)), Status::Changed, "the write between the saves is offered");
+        // Another layer on the table a save wrote still holds its old rows: it stays marked,
+        // while the saving layer and nothing else on the file take the result.
+        let (mut m, scan) = monitor(&v0);
+        m.wrote("a", v0.clone(), v1.clone(), HashSet::from([layer(2)]), scan);
+        m.observed("a", v1.clone(), scan);
+        m.observed("a", v1.clone(), scan + 1);
+        assert_eq!((m.status(&layer(1)), m.status(&layer(2))), (Status::Unchanged, Status::Changed));
     }
 
     #[test]
