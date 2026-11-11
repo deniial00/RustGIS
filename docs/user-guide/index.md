@@ -281,8 +281,8 @@ Reload Data even when the folder's timestamp has not changed.
 
 **Changed on disk (desktop).** While the app is open, RustGIS looks at the files its linked
 layers and local tile archives read every 5 seconds and when its window regains focus, in every
-map of the project. It reads only metadata (size, modification time and the file's identity and
-status-change time), never the data: a Shapefile's `.dbf`, `.shx`, `.prj` and `.cpg` count with its
+map of the project. It reads only metadata (size, modification time and the file's identity: on
+Linux and macOS its status-change time too, on Windows its creation time), never the data: a Shapefile's `.dbf`, `.shx`, `.prj` and `.cpg` count with its
 `.shp`, a MapInfo file's `.mid` with its `.mif`, and a GeoPackage, MBTiles or `.sqlite` file's
 `-wal` and `-journal` with it. Other
 sidecars (a raster's `.aux.xml` or `.prj`) aren't watched. A change is reported once two looks in a row agree,
@@ -293,7 +293,7 @@ for each layer or archive reading it (**Repair Data Source…** when a linked fi
 first, and asks before discarding GeoPackage edits as above. **Not Now** hides the notification
 for that version of the file; the row stays marked, and a later change notifies again. A reload
 clears the mark for what it read; a change that came while it read stays marked. Saving edits to a
-GeoPackage, or exporting into one, from RustGIS's menus and commands isn't reported as an outside
+GeoPackage, or exporting into one, from RustGIS's menus, ribbon and Command Search isn't reported as an outside
 change. None of this changes the
 project or adds an undo step.
 
@@ -303,7 +303,10 @@ as what the layer read. Reload Data stays available whether or not a change was 
 reload, a GeoPackage save or an export run from a script, a model, the AI Assistant pane, the file
 bridge or the command line doesn't clear the mark or count as RustGIS's own write (an archive
 reload from an attached MCP client does clear it). Another program writing the same GeoPackage
-while RustGIS saves or exports into it isn't told apart from RustGIS's own write.
+while RustGIS saves or exports into it isn't told apart from RustGIS's own write. A file that
+doesn't answer (a network drive gone away) pauses the checks of every file until it does; a
+notice says so. When one map shows the same tile archive twice, removing or reordering those
+two can move a mark from one to the other.
 
 Saved GDAL/DuckDB links reread their original selected table when restoring a disposable
 converted copy, including compatible empty tables. If the original cannot be read, RustGIS

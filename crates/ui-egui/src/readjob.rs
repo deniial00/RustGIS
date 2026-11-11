@@ -230,6 +230,9 @@ pub fn admitted(app: &mut RustGisApp, ahead: reads::ReadAhead, relay: rustgis_as
 
 fn not_run_asked(app: &mut RustGisApp, asked: &Asked, why: String) {
     service_result(app, asked, Err(why.clone()));
+    if matches!(asked.command, "layer.reloadData" | "map.reloadTiles") {
+        crate::diskwatch::not_read(app, asked.command, &asked.params);
+    }
     not_run(app, asked.then, why.clone());
     if let Some(relay) = &asked.relay {
         relay.begin_archive_landing(&app.session);

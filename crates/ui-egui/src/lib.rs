@@ -2485,8 +2485,10 @@ impl RustGisApp {
         r = self.deliver_gp_files(r);
         // A reload acknowledges what it read; a save into a watched file is RustGIS's own write.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(answer) = &r {
-            diskwatch::ran(self, id, &params, answer, before_write);
+        match &r {
+            Ok(answer) => diskwatch::ran(self, id, &params, answer, before_write),
+            Err(_) if matches!(id, "layer.reloadData" | "map.reloadTiles" | "gpkg.discardEdits") => diskwatch::not_read(self, id, &params),
+            Err(_) => {}
         }
         if r.is_ok() && id == "tool.set" {
             self.map.cancel_sketch();

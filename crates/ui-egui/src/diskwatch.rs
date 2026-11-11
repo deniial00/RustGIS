@@ -88,8 +88,8 @@ struct Tracked {
 pub(crate) struct Monitor {
     sources: HashMap<String, Source>,
     targets: HashMap<Target, Tracked>,
-    /// The reload read under way (reads run one at a time) and what its file held as it started.
-    reading: Option<(Target, Seen)>,
+    /// Each reload read under way and what its file held as it started.
+    reading: HashMap<Target, Seen>,
 }
 
 impl Monitor {
@@ -197,14 +197,19 @@ impl Monitor {
 
     /// A reload's read starts, its file holding `seen` (looked at just now).
     pub(crate) fn reading(&mut self, target: Target, seen: Seen) {
-        self.reading = Some((target, seen));
+        self.reading.insert(target, seen);
+    }
+
+    /// A read started for `target` ended without a result (it failed, or never ran).
+    pub(crate) fn not_read(&mut self, target: &Target) {
+        self.reading.remove(target);
     }
 
     /// A reload succeeded: what its file held as its read started ([`Monitor::reading`]) is
     /// acknowledged, so a change that came while it read stays pending. A reload with no such
     /// observation (run some other way) leaves the mark as it is: what it read isn't known.
     pub(crate) fn reloaded(&mut self, target: &Target) {
-        let used = self.reading.take_if(|(reading, _)| reading == target).map(|(_, seen)| seen);
+        let used = self.reading.remove(target);
         if let Some(t) = self.targets.get_mut(target)
             && matches!(used, Some(Seen::Present(_)))
         {
@@ -399,7 +404,7 @@ pub(crate) fn tick(app: &mut RustGisApp, ctx: &egui::Context) {
     let mut say = None;
     if !w.said_stalled && w.scan.as_ref().is_some_and(|(_, _, started)| now.saturating_duration_since(*started) >= STALLED) {
         w.said_stalled = true;
-        say = Some(tl!("Checking linked files for changes on disk is waiting for a file that doesn't answer (a network drive?). Changes aren't reported until it does; Reload Data still works.").to_string());
+        say = Some(tl!("Checking linked files for changes on disk is waiting for a file that doesn't answer (a network drive?). Changes aren't reported until it does, and reloading or saving a file there may wait for it too.").to_string());
     }
     if !w.found.is_empty() {
         if w.due.is_none_or(|due| now >= due) {
@@ -481,6 +486,13 @@ pub(crate) fn reading(app: &mut RustGisApp, command: &str, params: &Value) {
     let Some(target) = target_of(app, command, params, None) else { return };
     let Some(path) = app.diskwatch.found.iter().find(|f| f.target == target).map(|f| f.path.clone()) else { return };
     app.diskwatch.monitor.reading(target, look(&path));
+}
+
+/// A reload's read failed or never ran: what it started with is forgotten.
+pub(crate) fn not_read(app: &mut RustGisApp, command: &str, params: &Value) {
+    if let Some(target) = target_of(app, command, params, None) {
+        app.diskwatch.monitor.not_read(&target);
+    }
 }
 
 /// The file a save or export is about to write, if it's watched, and what is there now: taken
@@ -631,7 +643,7 @@ pub(crate) fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                         ui.label(tl!("The file may have changed since it was read. The map shows the data read before."));
                     }
                     Status::Missing => {
-                        ui.colored_label(t.red, tl!("The file is missing. Restore it, or repair the data source."));
+                        ui.colored_label(t.red, tl!("The file is missing. Restore it, or use Repair Data Source."));
                     }
                     Status::Unreadable(e) => {
                         ui.colored_label(t.red, crate::i18n::fmt("The file can't be checked: {error}", &[("error", e)]));
@@ -985,5 +997,31 @@ mod tests {
         app.run("gpkg.saveEdits", json!({"layer": id})).unwrap();
         scan(&mut app, &ctx, 3);
         assert_eq!(app.diskwatch.status(&target), Status::Unchanged, "RustGIS's own write is not an outside change");
+    }
+
+    #[test]
+    fn a_scan_that_never_answers_is_said_once_and_one_that_answers_isnt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("places.geojson");
+        std::fs::write(&path, r#"{"type":"FeatureCollection","features":[]}"#).unwrap();
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.watch_files = true;
+        app.run("layer.addData", json!({"path": path, "stream": true})).unwrap();
+        let ctx = egui::Context::default();
+        let said = |app: &RustGisApp, mark| app.session.notices_since(mark).iter().filter(|n| n.text.contains("doesn't answer")).count();
+        // Scans that answer say nothing.
+        let mark = app.session.notice_mark();
+        scan(&mut app, &ctx, 2);
+        assert_eq!(said(&app, mark), 0);
+        // A scan in flight for longer than `STALLED` whose slot never fills: said once, and no
+        // second scan is started over it.
+        let started = web_time::Instant::now().checked_sub(STALLED * 2).unwrap();
+        app.diskwatch.scan = Some((app.diskwatch.scans + 1, Scanned::default(), started));
+        let scans = app.diskwatch.scans;
+        for _ in 0..3 {
+            tick(&mut app, &ctx);
+        }
+        assert_eq!(said(&app, mark), 1);
+        assert_eq!(app.diskwatch.scans, scans, "no scan starts while one is in flight");
     }
 }
