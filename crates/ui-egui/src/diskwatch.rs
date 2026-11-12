@@ -639,8 +639,8 @@ pub(crate) fn ran(app: &mut RustGisApp, command: &str, params: &Value, answer: &
 /// RustGIS wrote a watched file: what is there now (one metadata read) is its result.
 pub(crate) fn wrote(app: &mut RustGisApp, mut write: Write) {
     let result = look(&write.path);
-    // A layer read in place that the write's own re-read couldn't reopen (`gpkg::reset_sources`
-    // left an error on it) wasn't refreshed: it stays marked.
+    // A layer read in place from the table written that has an error now (the write's own re-read
+    // couldn't reopen it, or it was already failing) didn't read the new rows: it stays marked.
     let unopened: Vec<Target> = app
         .diskwatch
         .found
@@ -1320,5 +1320,54 @@ mod tests {
         land_all(&mut app);
         scan(&mut app, &ctx, 2);
         assert_eq!(app.diskwatch.status(&target), Status::Unchanged);
+    }
+
+    #[test]
+    fn a_streamed_layer_with_an_error_on_the_table_written_stays_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let geojson = dir.path().join("points.geojson");
+        std::fs::write(
+            &geojson,
+            r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+        )
+        .unwrap();
+        let package = dir.path().join("places.gpkg");
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        let points = layer_id(app.run("layer.addData", json!({"path": geojson})).unwrap());
+        for table in ["rows", "other"] {
+            let mode = if package.exists() { "addTable" } else { "newFile" };
+            app.run("share.exportLayer", json!({"layer": points, "path": package, "mode": mode, "tableName": table})).unwrap();
+        }
+        for table in ["rows", "other"] {
+            app.run("layer.addData", json!({"path": package, "table": table, "stream": true})).unwrap();
+        }
+        app.watch_files = true;
+        scan(&mut app, &egui::Context::default(), 2);
+        let write = before_write(
+            &app,
+            "share.exportLayer",
+            &json!({"layer": points, "path": package, "mode": "replaceTable", "tableName": "rows"}),
+        )
+        .unwrap();
+        assert!(write.stale.is_empty(), "the command re-reads layers read in place from the table it writes");
+        // Every layer read in place from the file fails after the write; only those on the table
+        // written are the write's to answer for.
+        let map = app.session.map().instance_id();
+        let mut on = |table: &str| -> Vec<Target> {
+            let mut out = Vec::new();
+            for l in app.session.map_mut().layers.iter_mut() {
+                if let Some(s) = l.source.as_mut().filter(|s| s.table.as_deref() == Some(table)) {
+                    s.error = Some("couldn't reopen".into());
+                    out.push(Target::Layer { map, layer: l.instance_id() });
+                }
+            }
+            out
+        };
+        let (rows, other) = (on("rows"), on("other"));
+        assert!(!rows.is_empty() && !other.is_empty());
+        let key = write.key.clone();
+        wrote(&mut app, write);
+        let stale = &app.diskwatch.monitor.sources[&key].wrote.as_ref().unwrap().3;
+        assert!(rows.iter().all(|t| stale.contains(t)) && other.iter().all(|t| !stale.contains(t)), "{stale:?}");
     }
 }
