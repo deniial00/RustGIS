@@ -2611,7 +2611,7 @@ fn plugin_settings_are_kept_per_plugin_across_updates_and_toggles() {
     assert_eq!(remember("settings-a", json!({"unit": null, "limit": 5})).unwrap(), both);
     assert_eq!(remembered("settings-a").unwrap(), both);
     let on_disk = std::fs::read_to_string(settings_dir().join("settings-a.json")).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&on_disk).unwrap(), both);
+    assert_eq!(serde_json::from_str::<Value>(&on_disk).unwrap(), json!({"version": 1, "values": both}));
     assert!(!on_disk.contains(char::is_whitespace), "compact: {on_disk}");
 
     // Another plugin has its own, and a request can't name whose to read.

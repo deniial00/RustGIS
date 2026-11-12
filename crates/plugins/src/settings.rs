@@ -10,7 +10,8 @@
 //! replaces the whole value saved under its key, `null` removes the key, other keys stay. The
 //! answer is the whole object as saved. A change that would pass the limit, or can't be saved,
 //! is an error and leaves what was saved as it was. Saved settings that can't be read are an
-//! error too, and a change never replaces them.
+//! error too, and a change never replaces them. Each is saved as `{"version": 1, "values":
+//! {...}}`: a RustGIS refuses a newer version than it reads and never writes over it.
 //!
 //! Settings are preferences, not part of the project: a change holds as soon as the request
 //! succeeds, whatever happens to the command later and whatever undo does. They survive
@@ -36,6 +37,13 @@ use crate::{Host, manifest};
 /// The most a plugin's settings may take, as compact JSON: 64 KiB.
 pub const MAX_BYTES: usize = 64 * 1024;
 
+/// The version of the saved record this RustGIS reads and writes.
+const VERSION: u64 = 1;
+/// What a saved record holds before the plugin's object: `{"version":1,"values":<object>}`.
+const HEAD: &str = "{\"version\":1,\"values\":";
+/// The most a saved record takes: the plugin's object and what is around it.
+const MAX_SAVED: usize = MAX_BYTES + HEAD.len() + 1;
+
 /// The request that reads a plugin's settings.
 pub const READ: &str = "host.settings";
 /// The request that changes a plugin's settings.
@@ -43,7 +51,7 @@ pub const WRITE: &str = "host.setSettings";
 
 /// Where settings are kept: one saved text per plugin id.
 trait Backing {
-    /// The text saved for `id`, or `None` when nothing was. At most one byte past [`MAX_BYTES`]
+    /// The text saved for `id`, or `None` when nothing was. At most one byte past [`MAX_SAVED`]
     /// is read from where it is kept (too much is told by [`parse`]).
     fn load(&self, id: &str) -> Result<Option<String>, String>;
     /// Replaces the text saved for `id`; a failure leaves what was saved as it was.
@@ -60,8 +68,17 @@ fn damaged(id: &str) -> String {
     format!("the saved settings of '{id}' are damaged or larger than {MAX_BYTES} bytes: uninstalling the plugin erases them")
 }
 
+fn newer(id: &str) -> String {
+    format!("the saved settings of '{id}' are from a newer RustGIS: this one leaves them as they are")
+}
+
 fn too_big() -> String {
     format!("plugin settings exceed {MAX_BYTES} bytes")
+}
+
+/// The record saved for a plugin whose object is `values` (compact JSON).
+fn record(values: &str) -> String {
+    format!("{HEAD}{values}}}")
 }
 
 /// A writer that keeps what it is given up to [`MAX_BYTES`] and fails past it, so a hostile value
@@ -90,13 +107,20 @@ fn compact(value: &impl serde::Serialize) -> Option<String> {
     String::from_utf8(out.0).ok()
 }
 
-/// What was saved for `id` as an object: it must be one, within the limit as written and as
-/// compact JSON (a hand-edited file may spell its numbers longer than they are saved).
+/// The plugin's object in what was saved for `id`: a record of this version, within the limit as
+/// written and, its object, as compact JSON (a hand-edited file may spell its numbers longer than
+/// they are saved). A newer version is refused, so it is never written over.
 fn parse(id: &str, text: &str) -> Result<Map<String, Value>, String> {
-    if text.len() > MAX_BYTES {
+    if text.len() > MAX_SAVED {
         return Err(damaged(id));
     }
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) else { return Err(damaged(id)) };
+    let Ok(Value::Object(mut saved)) = serde_json::from_str::<Value>(text) else { return Err(damaged(id)) };
+    match saved.get("version").and_then(Value::as_u64) {
+        Some(VERSION) => {}
+        Some(v) if v > VERSION => return Err(newer(id)),
+        _ => return Err(damaged(id)),
+    }
+    let Some(Value::Object(map)) = saved.remove("values") else { return Err(damaged(id)) };
     compact(&map).ok_or_else(|| damaged(id))?;
     Ok(map)
 }
@@ -126,7 +150,7 @@ fn patch_in(backing: &dyn Backing, id: &str, params: &Value) -> Result<Value, St
         }
     }
     let text = compact(&merged).ok_or_else(too_big)?;
-    backing.save(id, &text)?;
+    backing.save(id, &record(&text))?;
     // Within the limit by now: cheap to own.
     Ok(Value::Object(merged.into_iter().map(|(k, v)| (k.to_string(), v.clone())).collect()))
 }
@@ -194,7 +218,7 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use super::{Backing, MAX_BYTES, damaged};
+    use super::{Backing, MAX_SAVED, damaged};
 
     /// Held while settings are read, changed or erased, so one change never interleaves with
     /// another in this process (a command and a session program can both write). Other RustGIS
@@ -228,7 +252,7 @@ mod native {
             }
             let file = std::fs::File::open(&path).map_err(|e| format!("couldn't read the settings of '{id}': {e}"))?;
             let mut bytes = Vec::new();
-            file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| format!("couldn't read the settings of '{id}': {e}"))?;
+            file.take(MAX_SAVED as u64 + 1).read_to_end(&mut bytes).map_err(|e| format!("couldn't read the settings of '{id}': {e}"))?;
             String::from_utf8(bytes).map(Some).map_err(|_| damaged(id))
         }
 
@@ -408,11 +432,11 @@ mod tests {
         // `{"x":"` and `"}` are 8 bytes: exactly the limit fits.
         let exactly = "a".repeat(MAX_BYTES - 8);
         assert_eq!(set(&b, "a", x(&exactly)).unwrap(), x(&exactly));
-        assert_eq!(b.saved.borrow()["a"].len(), MAX_BYTES);
+        assert_eq!(b.saved.borrow()["a"].len(), MAX_SAVED);
         // One more byte doesn't, and what was saved stays.
         let e = set(&b, "a", x(&format!("{exactly}a"))).unwrap_err();
         assert_eq!(e, format!("plugin settings exceed {MAX_BYTES} bytes"));
-        assert_eq!(b.saved.borrow()["a"].len(), MAX_BYTES);
+        assert_eq!(b.saved.borrow()["a"].len(), MAX_SAVED);
         // Another key past the limit is refused the same way.
         assert!(set(&b, "a", json!({"y": 1})).is_err());
         // What is replaced is measured as replaced: smaller in place is fine, and a patch
@@ -425,7 +449,7 @@ mod tests {
             let b = Memory::default();
             let fit = (MAX_BYTES - 8) / bytes;
             assert!(set(&b, "a", x(&unit.repeat(fit))).is_ok(), "{unit:?} x {fit}");
-            let used = b.saved.borrow()["a"].len();
+            let used = b.saved.borrow()["a"].len() - (MAX_SAVED - MAX_BYTES);
             assert!(used <= MAX_BYTES && used > MAX_BYTES - 8 - bytes, "{unit:?}: {used}");
             // Counted as characters it would still fit; counted as bytes it doesn't.
             assert!(set(&b, "a", x(&unit.repeat(fit + 1))).is_err(), "{unit:?} x {}", fit + 1);
@@ -448,8 +472,16 @@ mod tests {
     #[test]
     fn plugin_settings_that_are_damaged_are_errors_not_empty() {
         let b = Memory::default();
-        let big = format!("{{\"x\":\"{}\"}}", "a".repeat(MAX_BYTES));
-        for text in ["", "not json", "[1]", "null", "\"s\"", "{\"a\":", &big] {
+        let big = record(&format!("{{\"x\":\"{}\"}}", "a".repeat(MAX_BYTES)));
+        // Not a record, not of a version this reads, not holding an object, or too large.
+        let records = [
+            "{\"a\":1}",
+            "{\"version\":\"1\",\"values\":{}}",
+            "{\"version\":0,\"values\":{}}",
+            "{\"version\":1}",
+            "{\"version\":1,\"values\":[]}",
+        ];
+        for text in ["", "not json", "[1]", "null", "\"s\"", "{\"a\":", &big].into_iter().chain(records) {
             b.saved.borrow_mut().insert("a".into(), text.to_string());
             let e = current(&b, "a").unwrap_err();
             assert!(e.contains("'a'") && e.contains("damaged"), "{e}");
@@ -464,10 +496,17 @@ mod tests {
         b.saved.borrow_mut().insert("a".into(), "{\"secret\": tr".into());
         assert!(!current(&b, "a").unwrap_err().contains("secret"));
         // Saved by hand with numbers spelled shorter than they are written back: over the limit.
-        let numbers = format!("{{\"n\":[{}]}}", vec!["1e2"; (MAX_BYTES - 8) / 4].join(","));
-        assert!(numbers.len() <= MAX_BYTES);
+        let numbers = record(&format!("{{\"n\":[{}]}}", vec!["1e2"; (MAX_BYTES - 8) / 4].join(",")));
+        assert!(numbers.len() <= MAX_SAVED);
         b.saved.borrow_mut().insert("a".into(), numbers);
         assert!(current(&b, "a").is_err());
+        // Saved by a newer RustGIS: refused, never written over, still erased by an uninstall.
+        let newer = "{\"version\":2,\"values\":{\"a\":1},\"more\":true}";
+        b.saved.borrow_mut().insert("a".into(), newer.into());
+        assert!(current(&b, "a").unwrap_err().contains("from a newer RustGIS"));
+        assert!(set(&b, "a", json!({"y": 1})).is_err());
+        assert_eq!(b.saved.borrow()["a"], newer);
+        b.delete("a").unwrap();
         // Missing records are fine to erase.
         assert!(b.delete("nobody").is_ok());
     }
@@ -511,9 +550,9 @@ mod tests {
         let saved = json!({"favourites": ["l:123", "l:456"], "unit": "m", "nested": {"x": null}});
         set(&dir, "one", saved.clone()).unwrap();
         set(&dir, "two", json!({"unit": "ft"})).unwrap();
-        // Compact JSON in `<id>.json`; a new store over the same folder reads the same.
+        // A compact record in `<id>.json`; a new store over the same folder reads the same.
         let text = std::fs::read_to_string(folder.0.join("one.json")).unwrap();
-        assert_eq!(text, compact(&saved.as_object().unwrap()).unwrap());
+        assert_eq!(text, record(&compact(&saved.as_object().unwrap()).unwrap()));
         assert_eq!(Value::Object(current(&Dir(&folder.0), "one").unwrap()), saved);
         assert_eq!(Value::Object(current(&dir, "two").unwrap()), json!({"unit": "ft"}));
         // Erasing one leaves the other, and erasing twice is fine.

@@ -732,6 +732,8 @@ copy of the project, so a tool's output must not depend on what was saved.
   last write wins.
 - The web app keeps them in the browser's localStorage (`rustgis.plugin-settings.<id>`); embedded
   in another page, in memory for the visit.
+- Each is saved as `{"version": 1, "values": {...}}`. A RustGIS refuses settings saved by a newer
+  one that it can't read (the request is an error) and never writes over them.
 - Settings that can't be read or saved (a damaged file, a full or blocked browser storage) make
   the request an error that names the plugin, never an empty answer, and a failed change leaves
   what was saved as it was.
