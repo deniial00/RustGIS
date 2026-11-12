@@ -253,8 +253,9 @@ impl Monitor {
 }
 
 /// A path as the targets reading it are grouped: absolute, without resolving links (the linked
-/// path itself is what is watched). `..` is kept: after a link to a folder it leads somewhere a
-/// lexical step back wouldn't, so two spellings of one file may be watched as two.
+/// path itself is what is watched). On Linux and macOS `..` is kept: after a link to a folder it
+/// leads somewhere a lexical step back wouldn't, so two spellings of one file may be watched as
+/// two. (Windows resolves `..` lexically, and so does `absolute` there.)
 pub(crate) fn key(path: &str) -> String {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.into());
     // Rebuilt from its components: a `.` step is dropped.
@@ -370,7 +371,8 @@ pub(crate) fn tiles_status(app: &RustGisApp, i: usize) -> Status {
 
 /// The Layers pane's words for a status: a note after the name (`""` for none), a line for its
 /// details, and how the name is tinted: `Some(true)` red, `Some(false)` amber, `None` as it is.
-pub(crate) fn row_note(status: &Status) -> Option<(String, String, Option<bool>)> {
+/// `repairable`: Repair Data Source can relink it, as the notification offers.
+pub(crate) fn row_note(status: &Status, repairable: bool) -> Option<(String, String, Option<bool>)> {
     match status {
         Status::Unchanged => None,
         Status::Changed => Some((
@@ -380,7 +382,12 @@ pub(crate) fn row_note(status: &Status) -> Option<(String, String, Option<bool>)
         )),
         Status::Missing => Some((
             tl!("(missing on disk)").to_string(),
-            tl!("The file is missing. Restore it, or use Repair Data Source.").to_string(),
+            if repairable {
+                tl!("The file is missing. Restore it, or use Repair Data Source.")
+            } else {
+                tl!("The file is missing. Restore it.")
+            }
+            .to_string(),
             Some(true),
         )),
         Status::Unreadable(e) => Some((

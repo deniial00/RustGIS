@@ -1889,12 +1889,14 @@ fn disk_note(app: &RustGisApp, layer: Option<&Layer>, tile: Option<usize>) -> Op
         if !app.watch_files {
             return None;
         }
-        let status = match (layer, tile) {
-            (Some(l), _) => crate::diskwatch::layer_status(app, l),
-            (None, Some(i)) => crate::diskwatch::tiles_status(app, i),
+        // As the notification decides it: a layer with no linked file (an editable GeoPackage
+        // table) can't be relinked.
+        let (status, repairable) = match (layer, tile) {
+            (Some(l), _) => (crate::diskwatch::layer_status(app, l), l.linked_file().is_some()),
+            (None, Some(i)) => (crate::diskwatch::tiles_status(app, i), true),
             (None, None) => return None,
         };
-        crate::diskwatch::row_note(&status)
+        crate::diskwatch::row_note(&status, repairable)
     }
     #[cfg(target_arch = "wasm32")]
     {
