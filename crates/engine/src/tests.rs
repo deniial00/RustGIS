@@ -23459,6 +23459,7 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
 #[test]
 fn a_project_raster_downloaded_in_the_background_says_its_losses_once_it_lands() {
     // The fixture changes process-wide S3 accounts; keep parallel readers in their own store.
+    #[cfg(not(target_arch = "wasm32"))]
     if isolate_process_test("tests::a_project_raster_downloaded_in_the_background_says_its_losses_once_it_lands") {
         return;
     }
