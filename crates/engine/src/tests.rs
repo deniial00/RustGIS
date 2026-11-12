@@ -23423,9 +23423,10 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
     }
 }
 
-/// A dated series of cloud-optimised GeoTIFFs says what each date's file leaves out of its header
-/// as the slider first shows it, not only the first date's (#1331); a date shown again, or after an
-/// undo or a redo, isn't said again; a clean series says nothing.
+/// A dated series of cloud-optimised GeoTIFFs says what each date's file leaves out of its header,
+/// named by the file: the first date's as it is added, each later date's once the slider shows it
+/// and its header lands, not only the first date's (#1331); a date shown again, or after an undo or
+/// a redo, isn't said again; a clean series says nothing.
 #[test]
 fn a_dated_cog_series_says_each_dates_header_losses_once() {
     use rustgis_data::raster::cog::{Example, example_with};
@@ -23436,7 +23437,9 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
         let (base, _) = serve_ranges(file);
         let mut s = Session::new(Project::default());
         let mark = s.notice_mark();
-        let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2001});
+        // A token in the address stays out of what is said: the file is named by its path alone.
+        let url = format!("{base}/{{YYYY}}.tif?token=hidden-1331");
+        let p = json!({"url": url, "kind": "cog", "name": "Series", "start": 2000, "end": 2001});
         s.run("map.addTiles", &p).unwrap();
         // Said with the date's file: the layer's name says which series, the file which date.
         let said = |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Series (")).count();
@@ -23446,6 +23449,7 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
         draw_until(&mut s, files(1));
         assert!(files(1)(&s), "the first date's header never landed");
         assert_eq!((said(&s), said_of(&s, "2000.tif")), (per_file, per_file), "{:?}", s.notices_since(mark));
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("hidden-1331")), "{:?}", s.notices_since(mark));
         // An edit made before the next date is shown, then undone: the date said since isn't said
         // again.
         s.run("map.setTiles", &json!({"index": 0, "opacity": 0.5})).unwrap();
@@ -23498,7 +23502,9 @@ fn a_project_raster_downloaded_in_the_background_says_its_losses_once_it_lands()
         t.run("project.openText", &json!({"text": text})).unwrap();
         let rl = |t: &Session| t.map().layer_by_name("Classes").and_then(|l| l.raster.clone()).unwrap();
         assert!(rl(&t).data.is_none() && rl(&t).error.is_none(), "not read in the background: {:?}", rl(&t).error);
-        let said = |t: &Session| t.notices_since(mark).iter().filter(|n| n.text.contains("no colour table")).count();
+        let said = |t: &Session| {
+            t.notices_since(mark).iter().filter(|n| n.text.ends_with("it is a palette image with no colour table: drawn grey")).count()
+        };
         assert_eq!(said(&t), 0, "said before it landed");
         draw_until(&mut t, |t| rl(t).data.is_some());
         assert!(rl(&t).data.is_some(), "{:?}", rl(&t).error);

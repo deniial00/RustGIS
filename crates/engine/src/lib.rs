@@ -2519,9 +2519,12 @@ impl Session {
     /// copy was made isn't said again.
     fn keep_headers_said(&mut self, before: &Project) {
         use render::rustgis_tiles::cog::split;
+        let names: Vec<String> = self.project.maps.iter().map(|m| m.name.clone()).collect();
         for (i, m) in self.project.maps.iter_mut().enumerate() {
-            // By its name, else (a map rename undone) the map in the same place.
-            let Some(old) = before.maps.iter().find(|o| o.name == m.name).or_else(|| before.maps.get(i)) else { continue };
+            // By its name, else (a map rename undone) the map in the same place, when no map of
+            // the restored project has that one's name.
+            let renamed = || before.maps.get(i).filter(|o| !names.contains(&o.name));
+            let Some(old) = before.maps.iter().find(|o| o.name == m.name).or_else(renamed) else { continue };
             for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
                 let same =
                     |o: &&rustgis_map::tiles::TileLayer| o.kind == t.kind && (o.name == t.name || split(&o.url).0 == split(&t.url).0);
