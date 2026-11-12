@@ -590,7 +590,7 @@ pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> O
         })
         .map(|f| f.target.clone())
         .collect();
-    Some(Write { before: look(&path), key, path, stale, writer })
+    Some(Write { before: look(&path), key, path, stale, writer, table })
 }
 
 /// A write RustGIS is about to make into a watched file ([`before_write`]).
@@ -603,6 +603,8 @@ pub(crate) struct Write {
     stale: HashSet<Target>,
     /// The target whose data it does refresh (the saving layer), if any.
     writer: Option<Target>,
+    /// The table written, as the engine names it.
+    table: String,
 }
 
 impl Write {
@@ -653,6 +655,8 @@ pub(crate) fn wrote(app: &mut RustGisApp, mut write: Write) {
                 .find(|m| m.instance_id() == *map)
                 .and_then(|m| m.layers.iter().find(|l| l.instance_id() == *layer))
                 .and_then(|l| l.source.as_ref())
+                // The layers the write's own re-read touched: those on the table written.
+                .filter(|s| s.table.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(&write.table)))
                 .is_some_and(|s| s.error.is_some()),
             Target::Tiles { .. } => false,
         })
