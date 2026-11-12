@@ -135,7 +135,8 @@ programs. Review the permissions and publisher before installing; see [Plugins](
 
 Plugins can keep settings of their own on your computer: a file per plugin in the desktop app's
 plugins folder, or the browser's localStorage in the web app. They are not sent anywhere by
-RustGIS, and uninstalling a plugin erases them.
+RustGIS, and uninstalling a plugin erases them (for a development folder, see
+[Plugins](plugins.md)).
 
 On the desktop, **Help › Check for Updates** contacts GitHub's latest-release API only when
 you ask. It does not upload your project. On Windows, **Download and Install** then downloads

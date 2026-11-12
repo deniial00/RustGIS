@@ -2694,7 +2694,7 @@ fn plugin_settings_are_for_commands_not_tools() {
     }
     assert_eq!(remembered("settings-tool").unwrap(), json!({}));
     assert!(!settings_dir().join("settings-tool.json").exists());
-    // A process plugin's tool reaches the host (which refuses, as a tool's host does), not the settings.
+    // A process plugin's tool request goes to the host it was given (a tool's host refuses it), not the settings.
     let dir = process_folder("proc-settings-tool", &[]);
     let p = crate::prepare(Package::from_dir(&dir).unwrap(), "test").unwrap();
     let tool = json!({"abi": 1, "kind": "tool", "id": "f", "params": {"op": "host.setSettings", "params": {"values": {"a": 1}}}, "layers": {}, "lang": "en"});
