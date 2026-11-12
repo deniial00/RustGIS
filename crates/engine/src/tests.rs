@@ -23425,9 +23425,9 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
 }
 
 /// A dated series of cloud-optimised GeoTIFFs says what each date's file leaves out of its header,
-/// named by the file: the first date's as it is added, each later date's once the slider shows it
-/// and its header lands, not only the first date's (#1331); a date shown again, or after an undo or
-/// a redo, isn't said again; a clean series says nothing.
+/// named by the file, each date's once its header lands, the first included, not only the first
+/// date's (#1331); a date shown again, or after an undo or a redo, isn't said again; a clean series
+/// says nothing.
 #[test]
 fn a_dated_cog_series_says_each_dates_header_losses_once() {
     use rustgis_data::raster::cog::{Example, example_with};
