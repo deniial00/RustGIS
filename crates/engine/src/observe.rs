@@ -132,6 +132,10 @@ impl Observation {
         } else if has_extension(path, &["gpkg", "mbtiles", "sqlite"]) {
             sqlite_sidecars(path, "source", &mut companions)?;
         } else if has_extension(path, &["duckdb", "ddb", "db"]) {
+            // A `.db` may be either a DuckDB or a SQLite database: both logs are watched.
+            if has_extension(path, &["db"]) {
+                sqlite_sidecars(path, "source", &mut companions)?;
+            }
             let mut wal = path.as_os_str().to_owned();
             wal.push(".wal");
             companions.push(FileRevision::read(Path::new(&wal), Presence::Sidecar, "source")?);
@@ -161,10 +165,12 @@ mod tests {
     fn empty_sqlite_sidecars_match_absent_ones_but_commits_do_not() {
         let dir = dir("sidecars");
         // (file, its sidecars: watched or not)
-        let cases: [(&str, &[(&str, bool)]); 3] = [
+        let cases: [(&str, &[(&str, bool)]); 4] = [
             ("clean.mbtiles", &[("-wal", true), ("-journal", true), ("-shm", false)]),
             ("clean.gpkg", &[("-wal", true), ("-journal", true), ("-shm", false)]),
             ("clean.duckdb", &[(".wal", true), ("-wal", false)]),
+            // Either a DuckDB or a SQLite database.
+            ("clean.db", &[(".wal", true), ("-wal", true), ("-journal", true), ("-shm", false)]),
         ];
         for (name, sidecars) in cases {
             let path = dir.join(name);

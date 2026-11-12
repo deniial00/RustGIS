@@ -635,8 +635,30 @@ pub(crate) fn ran(app: &mut RustGisApp, command: &str, params: &Value, answer: &
 }
 
 /// RustGIS wrote a watched file: what is there now (one metadata read) is its result.
-pub(crate) fn wrote(app: &mut RustGisApp, write: Write) {
+pub(crate) fn wrote(app: &mut RustGisApp, mut write: Write) {
     let result = look(&write.path);
+    // A layer read in place that the write's own re-read couldn't reopen (`gpkg::reset_sources`
+    // left an error on it) wasn't refreshed: it stays marked.
+    let unopened: Vec<Target> = app
+        .diskwatch
+        .found
+        .iter()
+        .filter(|f| f.key == write.key && f.streamed)
+        .filter(|f| match &f.target {
+            Target::Layer { map, layer } => app
+                .session
+                .project
+                .maps
+                .iter()
+                .find(|m| m.instance_id() == *map)
+                .and_then(|m| m.layers.iter().find(|l| l.instance_id() == *layer))
+                .and_then(|l| l.source.as_ref())
+                .is_some_and(|s| s.error.is_some()),
+            Target::Tiles { .. } => false,
+        })
+        .map(|f| f.target.clone())
+        .collect();
+    write.stale.extend(unopened);
     let w = &mut app.diskwatch;
     // A scan under way started before the write; the next one is the first after it.
     w.monitor.wrote(&write.key, write.before, result, write.stale, write.writer.as_ref(), w.scans + 1);
