@@ -250,18 +250,15 @@ impl Monitor {
     }
 }
 
-/// A path as the targets reading it are grouped: absolute and lexically normal, without
-/// resolving links (the linked path itself is what is watched).
+/// A path as the targets reading it are grouped: absolute, without resolving links (the linked
+/// path itself is what is watched). `..` is kept: after a link to a folder it leads somewhere a
+/// lexical step back wouldn't, so two spellings of one file may be watched as two.
 pub(crate) fn key(path: &str) -> String {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.into());
     let mut out = std::path::PathBuf::new();
     for part in absolute.components() {
-        match part {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
+        if part != std::path::Component::CurDir {
+            out.push(part);
         }
     }
     out.display().to_string()
@@ -515,15 +512,33 @@ fn target_of(app: &RustGisApp, command: &str, params: &Value, answer: Option<&Va
     }
 }
 
-/// A reload's read starts (on its thread, or here): what its file holds now is what it reads,
-/// and what it acknowledges once it lands (one metadata read of one file).
-pub(crate) fn reading(app: &mut RustGisApp, command: &str, params: &Value) {
+/// The target a reload names and the file its read will look at, with no file access.
+pub(crate) fn read_target(app: &RustGisApp, command: &str, params: &Value) -> Option<(Target, String)> {
     if !app.watch_files {
-        return;
+        return None;
     }
-    let Some(target) = target_of(app, command, params, None) else { return };
-    let Some(path) = app.diskwatch.found.iter().find(|f| f.target == target).map(|f| f.path.clone()) else { return };
-    app.diskwatch.monitor.reading(target, look(&path));
+    let target = target_of(app, command, params, None)?;
+    let path = app.diskwatch.found.iter().find(|f| f.target == target)?.path.clone();
+    Some((target, path))
+}
+
+/// A reload reads its file here, on the UI thread (no thread of its own): what the file holds
+/// now is what it reads, and what it acknowledges once it lands. The one metadata read is taken
+/// here because the read itself runs here too, on the same file.
+pub(crate) fn reading(app: &mut RustGisApp, command: &str, params: &Value) {
+    if let Some((target, path)) = read_target(app, command, params) {
+        app.diskwatch.monitor.reading(target, look(&path));
+    }
+}
+
+/// A reload's read thread looked at its file (`seen`, [`observe`]) just before reading it.
+pub(crate) fn read_started(app: &mut RustGisApp, target: Target, seen: Seen) {
+    app.diskwatch.monitor.reading(target, seen);
+}
+
+/// One metadata read of a watched file, for a worker thread to take before or after its work.
+pub(crate) fn observe(path: &str) -> Seen {
+    look(path)
 }
 
 /// A reload's read failed or never ran: what it started with is forgotten.
@@ -533,10 +548,29 @@ pub(crate) fn not_read(app: &mut RustGisApp, command: &str, params: &Value) {
     }
 }
 
-/// The file a save or export is about to write, if it's watched, and what is there now: taken
-/// just before the command runs (one metadata read of one file), so a change another program
-/// made before the save is still reported after it.
-pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> Option<Write> {
+/// The targets on `key` whose data a write of `table` into `path` leaves old: other layers
+/// reading the table written keep its old rows; an export over a single-dataset file (a GeoJSON,
+/// a Shapefile) replaces what every layer on it reads. A layer read in place from the GeoPackage
+/// table written is read again by the command itself (`gpkg::reset_sources`): it holds the new
+/// rows.
+fn stale_for(found: &[Found], key: &str, path: &str, table: &str, writer: Option<&Target>) -> HashSet<Target> {
+    let export = writer.is_none();
+    let geopackage = std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gpkg"));
+    found
+        .iter()
+        .filter(|f| f.key == key && Some(&f.target) != writer)
+        .filter(|f| !(geopackage && f.streamed))
+        .filter(|f| match f.table.as_deref() {
+            Some(t) => t.eq_ignore_ascii_case(table),
+            None => export,
+        })
+        .map(|f| f.target.clone())
+        .collect()
+}
+
+/// The watched file a save or export is about to write, with no file access yet: what it
+/// predicts it writes is corrected from the command's answer as the write lands.
+pub(crate) fn plan_write(app: &RustGisApp, command: &str, params: &Value) -> Option<Write> {
     if !app.watch_files {
         return None;
     }
@@ -572,38 +606,31 @@ pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> O
     if !app.diskwatch.monitor.watches(&key) {
         return None;
     }
-    // Other layers reading the table written still hold its old rows: they stay marked. An
-    // export over a single-dataset file (a GeoJSON, a Shapefile) replaces what every layer on it
-    // reads. A layer read in place from the GeoPackage table written is read again by the
-    // command itself (`gpkg::reset_sources`): it holds the new rows.
-    let export = writer.is_none();
-    let geopackage = std::path::Path::new(&path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gpkg"));
-    let stale = app
-        .diskwatch
-        .found
-        .iter()
-        .filter(|f| f.key == key && Some(&f.target) != writer.as_ref())
-        .filter(|f| !(geopackage && f.streamed))
-        .filter(|f| match f.table.as_deref() {
-            Some(t) => t.eq_ignore_ascii_case(&table),
-            None => export,
-        })
-        .map(|f| f.target.clone())
-        .collect();
-    Some(Write { before: look(&path), key, path, stale, writer, table })
+    let stale = stale_for(&app.diskwatch.found, &key, &path, &table, writer.as_ref());
+    Some(Write { before: None, result: None, key, path, stale, writer, table })
 }
 
-/// A write RustGIS is about to make into a watched file ([`before_write`]).
+/// [`plan_write`] for a save or export that writes here, on the UI thread: the file is written
+/// on this thread anyway, so its one metadata read just before is taken here too.
+pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> Option<Write> {
+    let mut write = plan_write(app, command, params)?;
+    write.observe_before();
+    Some(write)
+}
+
+/// A write RustGIS is about to make into a watched file ([`plan_write`]).
 #[derive(Clone)]
 pub(crate) struct Write {
     key: String,
     path: String,
-    before: Seen,
+    /// What the file held just before the write, and just after it.
+    before: Option<Seen>,
+    result: Option<Seen>,
     /// Targets whose data the write doesn't refresh.
     stale: HashSet<Target>,
     /// The target whose data it does refresh (the saving layer), if any.
     writer: Option<Target>,
-    /// The table written, as the engine names it.
+    /// The table written, as predicted, then as the engine named it.
     table: String,
 }
 
@@ -611,6 +638,16 @@ impl Write {
     /// The watched file it writes.
     pub(crate) fn key(&self) -> &str {
         &self.key
+    }
+
+    /// Looks at the file just before the write (on the thread that writes it).
+    pub(crate) fn observe_before(&mut self) {
+        self.before = Some(look(&self.path));
+    }
+
+    /// Looks at the file just after the write (on the thread that wrote it).
+    pub(crate) fn observe_after(&mut self) {
+        self.result = Some(look(&self.path));
     }
 }
 
@@ -629,16 +666,27 @@ pub(crate) fn ran(app: &mut RustGisApp, command: &str, params: &Value, answer: &
         "share.exportLayer" | "share.exportTable" if answer.get("started").is_some() => {}
         "gpkg.saveEdits" | "share.exportLayer" | "share.exportTable" => {
             if let Some(write) = before {
-                wrote(app, write);
+                wrote(app, write, answer);
             }
         }
         _ => {}
     }
 }
 
-/// RustGIS wrote a watched file: what is there now (one metadata read) is its result.
-pub(crate) fn wrote(app: &mut RustGisApp, mut write: Write) {
-    let result = look(&write.path);
+/// RustGIS wrote a watched file; `answer` is the command's. The table the engine actually wrote
+/// (`answer.table`: it renames reserved and control-character names) decides which layers it
+/// left stale. A write here (not on a thread) is looked at once more, here: it ran here.
+pub(crate) fn wrote(app: &mut RustGisApp, mut write: Write, answer: &Value) {
+    if let Some(table) = answer.get("table").and_then(Value::as_str)
+        && !table.eq_ignore_ascii_case(&write.table)
+    {
+        write.table = table.to_string();
+        write.stale = stale_for(&app.diskwatch.found, &write.key, &write.path, &write.table, write.writer.as_ref());
+    }
+    let result = write.result.take().unwrap_or_else(|| look(&write.path));
+    // Not looked at before the write (its thread couldn't): nothing to tell it from an outside
+    // change, so it acknowledges nothing.
+    let Some(before) = write.before.take() else { return };
     // A layer read in place from the table written that has an error now (the write's own re-read
     // couldn't reopen it, or it was already failing) didn't read the new rows: it stays marked.
     let unopened: Vec<Target> = app
@@ -665,7 +713,7 @@ pub(crate) fn wrote(app: &mut RustGisApp, mut write: Write) {
     write.stale.extend(unopened);
     let w = &mut app.diskwatch;
     // A scan under way started before the write; the next one is the first after it.
-    w.monitor.wrote(&write.key, write.before, result, write.stale, write.writer.as_ref(), w.scans + 1);
+    w.monitor.wrote(&write.key, before, result, write.stale, write.writer.as_ref(), w.scans + 1);
 }
 
 /// Activates the target's map and returns the target's layer id or tile index there.
@@ -1091,11 +1139,13 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_lexical_and_hostile_paths_are_observed_without_panicking() {
+    fn keys_keep_parent_steps_and_hostile_paths_are_observed_without_panicking() {
         let base = std::env::temp_dir().join("rustgis-diskwatch-key");
-        let a = base.join("x").join("..").join("data.fgb").display().to_string();
-        let b = base.join(".").join("data.fgb").display().to_string();
-        assert_eq!(key(&a), key(&b));
+        let plain = base.join("data.fgb").display().to_string();
+        assert_eq!(key(&base.join(".").join("data.fgb").display().to_string()), key(&plain));
+        // `x` may be a link to another folder: `x/..` isn't `base` unless the system says so.
+        #[cfg(unix)]
+        assert_ne!(key(&base.join("x").join("..").join("data.fgb").display().to_string()), key(&plain));
         for hostile in ["", "\0", "/nonexistent/\u{202e}/x.shp", "relative/../../..", &"a".repeat(5000)] {
             let _ = key(hostile);
             assert!(!matches!(look(hostile), Seen::Present(_)), "{hostile:?}");
@@ -1366,8 +1416,37 @@ mod tests {
         let (rows, other) = (on("rows"), on("other"));
         assert!(!rows.is_empty() && !other.is_empty());
         let key = write.key.clone();
-        wrote(&mut app, write);
+        wrote(&mut app, write, &json!({}));
         let stale = &app.diskwatch.monitor.sources[&key].wrote.as_ref().unwrap().3;
         assert!(rows.iter().all(|t| stale.contains(t)) && other.iter().all(|t| !stale.contains(t)), "{stale:?}");
+    }
+
+    #[test]
+    fn an_export_under_a_reserved_table_name_marks_the_layer_on_the_table_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let geojson = dir.path().join("pts.geojson");
+        std::fs::write(
+            &geojson,
+            r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[1,2]}}]}"#,
+        )
+        .unwrap();
+        let package = dir.path().join("places.gpkg");
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        let points = layer_id(app.run("layer.addData", json!({"path": geojson})).unwrap());
+        let first =
+            app.run("share.exportLayer", json!({"layer": points, "path": package, "mode": "newFile", "tableName": "gpkg_cities"})).unwrap();
+        // The engine doesn't write a reserved name as given.
+        assert_eq!(first["table"], "layer_gpkg_cities");
+        app.watch_files = true;
+        let reader =
+            app.run("gpkg.addLayer", json!({"path": package, "table": "layer_gpkg_cities"})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let reader = Target::Layer { map: app.session.map().instance_id(), layer: app.session.map().layer(reader).unwrap().instance_id() };
+        let ctx = egui::Context::default();
+        scan(&mut app, &ctx, 2);
+        assert_eq!(app.diskwatch.status(&reader), Status::Unchanged);
+        app.run("share.exportLayer", json!({"layer": points, "path": package, "mode": "replaceTable", "tableName": "gpkg_cities"}))
+            .unwrap();
+        scan(&mut app, &ctx, 3);
+        assert_eq!(app.diskwatch.status(&reader), Status::Changed, "the layer still shows the replaced table's old rows");
     }
 }

@@ -63,6 +63,8 @@ struct ReadJob {
     name: &'static str,
     control: Arc<Control>,
     slot: crate::Slot<Result<reads::Read, String>>,
+    /// A reload's target and what its file held, looked at on its thread as the read started.
+    seen: Option<(crate::diskwatch::Target, crate::Slot<crate::diskwatch::Seen>)>,
 }
 
 /// Runs Add Data, Load All, Reload Data, Convert To Annotation, archive reload/repair, model/script
@@ -365,15 +367,22 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
         return complete_here(app, asked, p, Err(tl!("This read was already started").to_string()));
     };
     let name = ahead.name;
-    // A reload reads its file from now on: what the file holds now is what it acknowledges.
-    if matches!(asked.command, "layer.reloadData" | "map.reloadTiles") {
-        crate::diskwatch::reading(app, asked.command, &p);
-    }
+    let reload = matches!(asked.command, "layer.reloadData" | "map.reloadTiles");
     let control = Control::stoppable();
     if !ahead.reads() {
+        // Read here and now: what its file holds now is what it reads.
+        if reload {
+            crate::diskwatch::reading(app, asked.command, &p);
+        }
         let read = ahead.run(&control);
         return complete_here(app, asked, p, read);
     }
+    // A reload's file is looked at on its thread, just before it reads it: a stalled drive holds
+    // the read, not the window.
+    let watched = if reload { crate::diskwatch::read_target(app, asked.command, &p) } else { None };
+    let looked = crate::Slot::default();
+    let look_out = looked.clone();
+    let look_path = watched.as_ref().map(|(_, path)| path.clone());
     let (ctl, slot) = (control.clone(), crate::Slot::default());
     let out = slot.clone();
     // Retain the admitted operation if the OS cannot start its worker: the synchronous
@@ -384,6 +393,9 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
     let diagnostics = app.session.diagnostics.capture();
     let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
         let _diagnostics = diagnostics.enter();
+        if let Some(path) = look_path {
+            *look_out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(crate::diskwatch::observe(&path));
+        }
         let ahead = work.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         let read = ahead.ok_or_else(|| tl!("This read was already started").to_string()).and_then(|ahead| ahead.run(&ctl));
         *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
@@ -396,6 +408,9 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
             return Err(why);
         }
         log::warn!("{name} reads here: its thread didn't start: {e}");
+        if reload {
+            crate::diskwatch::reading(app, asked.command, &p);
+        }
         // Here, where its Cancel can't be clicked, the topology check takes the work limit of a
         // run that can't be cancelled; it has none on its thread.
         let control = if asked.command == "topology.validate" { Control::new() } else { control };
@@ -407,7 +422,8 @@ fn start(app: &mut RustGisApp, mut asked: Asked, p: Value) -> Result<Value, Stri
             .and_then(|ahead| ahead.run(&control));
         return complete_here(app, asked, p, read);
     }
-    app.reads.job = Some(ReadJob { asked, gone: None, name, control, slot });
+    let seen = watched.map(|(target, _)| (target, looked));
+    app.reads.job = Some(ReadJob { asked, gone: None, name, control, slot, seen });
     Ok(json!({"started": name}))
 }
 
@@ -490,6 +506,13 @@ pub fn land(app: &mut RustGisApp) -> bool {
                         not_run_asked(app, &asked, left_too.clone());
                     }
                 } else {
+                    // What its file held as its read started is what this reload acknowledges.
+                    if let Some((target, looked)) = job.seen {
+                        let seen = looked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                        if let Some(seen) = seen {
+                            crate::diskwatch::read_started(app, target, seen);
+                        }
+                    }
                     // The engine consumes the original owner before the callback sees its result.
                     let _ = complete_here(app, job.asked, p, done);
                     app.map.invalidate();
