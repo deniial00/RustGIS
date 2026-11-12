@@ -2442,6 +2442,7 @@ impl Session {
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
+        self.keep_headers_said(&cur);
         self.redo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files, old_trust));
         self.touch_all_geometry();
         true
@@ -2466,6 +2467,7 @@ impl Session {
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
+        self.keep_headers_said(&cur);
         self.undo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files, old_trust));
         self.touch_all_geometry();
         true
@@ -2507,6 +2509,24 @@ impl Session {
             };
             if let Some(t) = at.and_then(|at| like.get_mut(at)) {
                 t.selected = true;
+            }
+        }
+    }
+
+    /// After undo or redo swaps the project: a cloud-optimised GeoTIFF tile layer keeps the files
+    /// whose header losses were said (saying them isn't an undo step), found again on the map of its
+    /// name by its name and kind, so a file said since the restored copy was made isn't said again.
+    fn keep_headers_said(&mut self, before: &Project) {
+        for m in &mut self.project.maps {
+            let Some(old) = before.maps.iter().find(|o| o.name == m.name) else { continue };
+            for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
+                let said: Vec<&String> =
+                    old.tiles.iter().filter(|o| o.kind == t.kind && o.name == t.name).flat_map(|o| &o.headers_said).collect();
+                for file in said {
+                    if !t.headers_said.contains(file) {
+                        t.headers_said.push(file.clone());
+                    }
+                }
             }
         }
     }

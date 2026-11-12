@@ -23388,27 +23388,29 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
         let p = json!({"name": "Cube", "cube": true});
         let r = crate::cmd::layer::add_cog(&mut s, &p, &format!("{base}/cube-2020.tif"), false).unwrap();
         assert_eq!(r["kind"], "cog", "{r}");
+        let cube = |s: &Session, mark: u64| {
+            s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.starts_with("Cube: ")).collect::<Vec<_>>()
+        };
         s.notice_landed_rasters();
-        assert!(s.notices_since(mark).is_empty(), "said before its header is in: {:?}", s.notices_since(mark));
+        assert!(cube(&s, mark).is_empty(), "said before its header is in: {:?}", cube(&s, mark));
         gate.store(true, Ordering::Relaxed);
         let landed = |s: &Session| s.map().tiles.first().is_some_and(|t| !t.headers_said.is_empty());
         draw_until(&mut s, landed);
         assert!(landed(&s), "its header never landed");
-        let said = |s: &Session, mark: u64| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<String>>();
         let check = |said: Vec<String>| {
             for message in &expected {
                 assert_eq!(said.iter().filter(|t| t.starts_with("Cube: ") && t.contains(message)).count(), 1, "{said:?}");
             }
             assert_eq!(said.len(), expected.len(), "{said:?}");
         };
-        check(said(&s, mark));
+        check(cube(&s, mark));
         // A project opened again says it again, once.
         let text = serde_json::to_string(&s.project).unwrap();
         let mut t = Session::new(Project::default());
         let mark = t.notice_mark();
         t.run("project.openText", &json!({"text": text})).unwrap();
         draw_until(&mut t, landed);
-        check(said(&t, mark).into_iter().filter(|n| n.starts_with("Cube: ")).collect());
+        check(cube(&t, mark));
     }
 }
 
@@ -23429,9 +23431,17 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
     let files = |n: usize| move |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= n);
     draw_until(&mut s, files(1));
     assert_eq!(said(&s), 1, "{:?}", s.notices_since(mark));
+    // An edit made before the next date is shown, then undone: the date said since isn't said again.
+    s.run("map.setTiles", &json!({"index": 0, "opacity": 0.5})).unwrap();
     s.run("time.goTo", &json!({"date": 2001})).unwrap();
     draw_until(&mut s, files(2));
     assert_eq!(said(&s), 2, "{:?}", s.notices_since(mark));
+    assert!(s.undo());
+    s.notice_landed_rasters();
+    assert_eq!(said(&s), 2, "said again after an undo: {:?}", s.notices_since(mark));
+    assert!(s.redo());
+    s.notice_landed_rasters();
+    assert_eq!(said(&s), 2, "said again after a redo: {:?}", s.notices_since(mark));
     s.run("time.goTo", &json!({"date": 2000})).unwrap();
     s.notice_landed_rasters();
     assert_eq!(s.map().tiles[0].headers_said.len(), 2);
@@ -23508,12 +23518,13 @@ fn a_tile_layer_says_its_wavelengths_need_a_window() {
     let mut s = Session::new(Project::default());
     let mark = s.notice_mark();
     s.run("layer.addUrl", &json!({"url": format!("{base}/cube-2020.tif"), "cube": true})).unwrap();
-    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-    assert!(
-        said.iter()
-            .any(|t| t.ends_with("drawn in place without its band names, class names or wavelengths: a window (\"bbox\") reads them")),
-        "{said:?}"
-    );
+    let tail = "drawn in place without its band names, class names or wavelengths: a window (\"bbox\") reads them";
+    let said = |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.ends_with(tail)).count();
+    assert_eq!(said(&s), 1, "{:?}", s.notices_since(mark));
+    // Said as it was added, so not again as the map draws.
+    s.notice_landed_rasters();
+    s.notice_landed_rasters();
+    assert_eq!(said(&s), 1, "{:?}", s.notices_since(mark));
 }
 
 /// Dated-series keys given as `null` (a script's unused ones) ask for nothing: the GeoTIFF is a
