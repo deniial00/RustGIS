@@ -43,6 +43,13 @@ fn isolate_plugins() {
     });
 }
 
+/// Held by the tests that install and uninstall: reloading what is installed (`load_installed`)
+/// in one would load another's plugin between its install and its uninstall.
+fn plugin_store_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn world() -> Session {
     isolate_plugins();
     let mut s = Session::new(Project::default());
@@ -11851,6 +11858,7 @@ fn plugin_settings_are_kept_per_plugin_across_sessions_updates_and_toggles() {
 
 #[test]
 fn plugin_settings_are_erased_by_uninstalling_the_plugin() {
+    let _turn = plugin_store_turn();
     let mut s = world();
     let dir = std::env::temp_dir().join(format!("rustgis-test-settings-pkg-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -11873,16 +11881,14 @@ fn plugin_settings_are_erased_by_uninstalling_the_plugin() {
     install(&mut s);
     assert_eq!(read(&mut s).unwrap(), json!({}));
 
-    // Settings that can't be erased stop the uninstall, and the plugin stays installed.
+    // Settings that can't be erased once the plugin is gone: said, with where they are.
     write(&mut s, "l:2").unwrap();
     std::fs::remove_file(&record).unwrap();
     std::fs::create_dir(&record).unwrap();
     let e = s.run("plugin.uninstall", &json!({"id": "eng-set-install"})).unwrap_err();
-    assert!(e.contains("couldn't erase the saved settings of 'eng-set-install'"), "{e}");
-    assert!(rustgis_plugins::get("eng-set-install").is_some());
-    std::fs::remove_dir(&record).unwrap();
-    s.run("plugin.uninstall", &json!({"id": "eng-set-install"})).unwrap();
+    assert!(e.contains("couldn't erase the saved settings of 'eng-set-install'") && e.contains("by hand"), "{e}");
     assert!(rustgis_plugins::get("eng-set-install").is_none());
+    std::fs::remove_dir(&record).unwrap();
 
     // A development folder that shadows an installed copy: removing it leaves the copy, and what
     // the copy remembered.
@@ -13344,6 +13350,7 @@ fn session_plugin_downloads_between_commands_are_left_to_the_app() {
 
 #[test]
 fn plugins_install_and_uninstall_from_files() {
+    let _turn = plugin_store_turn();
     isolate_plugins();
     let mut s = Session::new(Project::default());
     let dir = std::env::temp_dir().join(format!("rustgis-test-pkg-{}", std::process::id()));
@@ -13385,6 +13392,7 @@ fn plugins_install_and_uninstall_from_files() {
 
 #[test]
 fn registry_downloads_are_checked() {
+    let _turn = plugin_store_turn();
     let bytes = rustgis_plugins::testing::package("eng-reg", &[]);
     let mut e = rustgis_plugins::registry::Entry {
         id: "eng-reg".into(),

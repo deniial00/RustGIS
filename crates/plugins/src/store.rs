@@ -318,12 +318,6 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     // what the copy remembered.
     let package = dir().map(|d| d.join(format!("{id}.rgplugin"))).filter(|p| p.is_file());
     let is_package = package.as_ref().is_some_and(|p| p.display().to_string() == plugin.source);
-    // Its settings go first: a failure to erase them leaves the plugin installed, so the user
-    // can try again, and a plugin that is gone never leaves its settings behind for a later
-    // install of the same id.
-    if is_package || package.is_none() {
-        crate::settings::remove(id)?;
-    }
     let mut st = read_state();
     st.folders.retain(|f| *f != plugin.source);
     st.disabled.retain(|d| d != id);
@@ -332,8 +326,19 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     // installed copy leaves the copy).
     write_state(&st)?;
     crate::unload(id);
-    if let Some(path) = package.filter(|_| is_package) {
-        std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Some(path) = package.as_ref().filter(|_| is_package) {
+        std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    // Its settings go once it can't come back: a step above that fails leaves them with the
+    // plugin. Erasing that fails now can't be tried again by uninstalling, so it says where they
+    // are (a later install of the id would find them).
+    if is_package || package.is_none() {
+        crate::settings::remove(id).map_err(|e| {
+            let file = dir().map(|d| d.join("settings").join(format!("{id}.json")).display().to_string()).unwrap_or_default();
+            format!("{id} was uninstalled, but {e}; remove {file} by hand")
+        })?;
+    }
+    if is_package {
         if let Some(unpacked) = unpacked_dir(id).filter(|u| u.is_dir()) {
             std::fs::remove_dir_all(&unpacked).map_err(|e| format!("{}: {e}", unpacked.display()))?;
         }

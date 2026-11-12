@@ -2777,17 +2777,39 @@ fn plugin_settings_are_erased_only_by_uninstalling() {
     crate::store::install_bytes(&package).unwrap();
     assert_eq!(remembered("settings-store").unwrap(), json!({}));
 
-    // A record that can't be erased stops the uninstall, with the plugin still installed.
+    // A step of the uninstall that fails (here the plugins folder can't be written) leaves the
+    // settings with the plugin still installed.
     remember("settings-store", json!({"favourites": ["l:2"]})).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&plugins).unwrap().permissions();
+        std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = crate::store::uninstall("settings-store");
+        std::fs::set_permissions(&plugins, mode).unwrap();
+        // Root writes anyway: then it was uninstalled, and that is checked below instead.
+        if failed.is_err() {
+            assert!(file.is_file() && plugins.join("settings-store.rgplugin").is_file());
+            assert_eq!(remembered("settings-store").unwrap(), json!({"favourites": ["l:2"]}));
+        } else {
+            crate::store::install_bytes(&package).unwrap();
+        }
+    }
+
+    // A record that can't be erased: said once the plugin is gone, and the record stays.
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let e = crate::store::uninstall("settings-store").unwrap_err();
-    assert!(e.contains("couldn't erase the saved settings of 'settings-store'"), "{e}");
-    assert!(crate::get("settings-store").is_some() && plugins.join("settings-store.rgplugin").is_file());
+    assert!(
+        e.contains("settings-store was uninstalled, but couldn't erase the saved settings of 'settings-store'") && e.contains("by hand"),
+        "{e}"
+    );
+    assert!(crate::get("settings-store").is_none() && !plugins.join("settings-store.rgplugin").exists() && file.is_dir());
 
     // A damaged record doesn't: erasing is what clears it.
     std::fs::remove_dir(&file).unwrap();
     std::fs::write(&file, "{").unwrap();
+    crate::store::install_bytes(&package).unwrap();
     crate::store::uninstall("settings-store").unwrap();
     assert!(!file.exists() && crate::get("settings-store").is_none() && !plugins.join("settings-store.rgplugin").exists());
 
