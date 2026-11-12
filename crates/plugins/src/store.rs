@@ -6,6 +6,7 @@
 //! <data>/plugins/unpacked/<id>/   an installed process plugin's files, where its program runs
 //! <data>/plugins/state.json       {"disabled": [ids], "folders": [plugin folders]}
 //! <data>/plugins/blocklist.json   the registry's blocklist, as last fetched
+//! <data>/plugins/settings/<id>.json  what a plugin remembered (see [`crate::settings`])
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -308,9 +309,21 @@ pub fn install_path(path: &Path) -> Result<Arc<Plugin>, String> {
     Ok(plugin)
 }
 
-/// Uninstalls a plugin: unloads it, deletes its package, or forgets its folder.
+/// Uninstalls a plugin: unloads it, deletes its package, or forgets its folder. What it
+/// remembered (its settings) goes with its package, or when nothing installed remains for the id.
 pub fn uninstall(id: &str) -> Result<(), String> {
     let plugin = crate::get(id).ok_or_else(|| format!("no plugin '{id}'"))?;
+    // The installed package, if there is one, and whether it is the plugin that is loaded.
+    // Uninstalling a development folder that shadows an installed copy leaves the copy, and so
+    // what the copy remembered.
+    let package = dir().map(|d| d.join(format!("{id}.rgplugin"))).filter(|p| p.is_file());
+    let is_package = package.as_ref().is_some_and(|p| p.display().to_string() == plugin.source);
+    // Its settings go first: a failure to erase them leaves the plugin installed, so the user
+    // can try again, and a plugin that is gone never leaves its settings behind for a later
+    // install of the same id.
+    if is_package || package.is_none() {
+        crate::settings::remove(id)?;
+    }
     let mut st = read_state();
     st.folders.retain(|f| *f != plugin.source);
     st.disabled.retain(|d| d != id);
@@ -319,15 +332,12 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     // installed copy leaves the copy).
     write_state(&st)?;
     crate::unload(id);
-    if let Some(d) = dir() {
-        let path = d.join(format!("{id}.rgplugin"));
-        if path.is_file() && path.display().to_string() == plugin.source {
-            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            if let Some(unpacked) = unpacked_dir(id).filter(|u| u.is_dir()) {
-                std::fs::remove_dir_all(&unpacked).map_err(|e| format!("{}: {e}", unpacked.display()))?;
-            }
-            crate::pyenv::remove(id)?;
+    if let Some(path) = package.filter(|_| is_package) {
+        std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(unpacked) = unpacked_dir(id).filter(|u| u.is_dir()) {
+            std::fs::remove_dir_all(&unpacked).map_err(|e| format!("{}: {e}", unpacked.display()))?;
         }
+        crate::pyenv::remove(id)?;
     }
     Ok(())
 }
