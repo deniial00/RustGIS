@@ -285,11 +285,14 @@ map of the project. It reads only metadata (size, modification time and the file
 Linux and macOS its status-change time too, on Windows its creation time), never the data: a Shapefile's `.dbf`, `.shx`, `.prj` and `.cpg` count with its
 `.shp`, a MapInfo file's `.mid` with its `.mif`, a GeoPackage, MBTiles or `.sqlite` file's `-wal`
 and `-journal` with it, and a DuckDB database's `.wal` with it (a `.db` file gets both). Other
-sidecars (a raster's `.aux.xml` or `.prj`) aren't watched. A change is reported once two looks in a row agree,
-so a write under way isn't. The Layers pane marks the row **(changed on disk)**, **(missing on
+sidecars (a raster's `.aux.xml` or `.prj`) aren't watched. A change is reported once two looks in a row agree:
+a stability check, not proof the writer has finished (one that pauses for longer may be reported
+mid-write, and again when it's done). The Layers pane marks the row **(changed on disk)**, **(missing on
 disk)** or **(can't be checked)**, and a notification lists each affected file with **Reload Data**
 for each layer or archive reading it (**Repair Data Source…** when a linked file is missing) and
-**Not Now**. Nothing is reread until you choose; Reload Data reloads only that layer, opening its map
+**Not Now**. RustGIS doesn't reload anything until you choose, though a layer read in place
+(streamed) reads its file as you pan and zoom, so it may already show some of the new data; Reload
+Data reloads only that layer, opening its map
 first, and asks before discarding GeoPackage edits (see below). **Not Now** hides the notification
 for that version of the file; the row stays marked, and a later change notifies again. A reload
 clears the mark for what it read; a change that came while it read stays marked. Saving edits, or
