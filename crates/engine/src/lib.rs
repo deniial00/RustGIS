@@ -2058,6 +2058,26 @@ impl Session {
         }
         // What a header left out, as adding the layer says it (one notice a kind, with counts).
         cmd::raster::say_losses(self, lost);
+        // A cloud-optimised GeoTIFF drawn as a tile layer (a dated series, a data cube's file,
+        // AlphaEarth) whose header wasn't in as it was added (the browser, a project opened):
+        // what its header leaves out, as adding it says it, once its header lands. Asking starts
+        // the header's read, which drawing the layer needs anyway.
+        let mut tile_lost = Vec::new();
+        for m in &mut self.project.maps {
+            for t in &mut m.tiles {
+                // By its file: a look changed at the address's end (`#bands=…`) reads no new header.
+                let file = render::rustgis_tiles::cog::split(&t.url).0;
+                if t.kind != rustgis_map::tiles::TileKind::Cog || t.headers_said.iter().any(|f| f == file) {
+                    continue;
+                }
+                let Ok(Some(info)) = render::rustgis_tiles::cog::info(&t.url) else { continue };
+                t.headers_said.push(file.to_string());
+                tile_lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| format!("{}: {line}", t.name)));
+            }
+        }
+        for line in tile_lost {
+            self.notify(line, false);
+        }
         // The browser uses its own trust; only native clients can fall back.
         #[cfg(not(target_arch = "wasm32"))]
         self.notice_trust();

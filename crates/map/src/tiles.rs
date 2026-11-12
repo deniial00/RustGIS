@@ -198,6 +198,12 @@ pub struct TileLayer {
     /// doesn't offer) it is drawn in tiles. Off in a project saved before: tiles, as then.
     #[serde(default, skip_serializing_if = "is_false")]
     pub single_image: bool,
+    /// A cloud-optimised GeoTIFF's files whose header losses have been said (as it was added, or
+    /// once a header landed: the engine's `Session::notice_landed_rasters`): each date's file of a
+    /// dated series, as the slider shows it. For the session only, so a project opened again says
+    /// them again.
+    #[serde(skip)]
+    pub headers_said: Vec<String>,
 }
 
 /// The longest legend address kept.
@@ -401,6 +407,7 @@ impl TileLayer {
             expanded: false,
             selected: false,
             single_image: false,
+            headers_said: Vec::new(),
         }
     }
 
@@ -670,6 +677,7 @@ impl TileLayer {
             expanded: _,
             selected: _,
             single_image: _,
+            headers_said: _,
         } = self;
         use crate::TileRole as R;
         let mut out = vec![(R::Url, url.as_str(), self.archive_file().is_some())];

@@ -23316,6 +23316,172 @@ fn a_palette_without_its_table_says_so_when_its_pixels_land() {
     }
 }
 
+/// Draws the map as the app does each frame (the view over the example files), until `landed`
+/// or 20 seconds, then a few frames more: what lands is said on the frame it lands, and never again.
+fn draw_until(s: &mut Session, landed: impl Fn(&Session) -> bool) {
+    use std::time::Duration;
+    let view = rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0);
+    let draw = |s: &mut Session| {
+        crate::render::rustgis_tiles::cache::wait(Duration::from_millis(50));
+        s.read_in_place_again();
+        s.map_mut().sync_sources(&view, 1000.0, false);
+        s.notice_landed_rasters();
+    };
+    let start = std::time::Instant::now();
+    while !landed(s) && start.elapsed() < Duration::from_secs(20) {
+        draw(s);
+    }
+    for _ in 0..3 {
+        draw(s);
+    }
+}
+
+/// A cloud-optimised GeoTIFF with losses in its header, added without waiting before its header is
+/// in (the browser, where nothing may wait), says them once its pixels land as the map draws: once,
+/// however often the map draws after; a clean file says nothing (#1331).
+#[test]
+fn a_cog_added_before_its_header_is_in_says_its_losses_once_it_lands() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let clean = example_with(&Example { size: 64, tile: 16, classes: true, ..Example::default() });
+    let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
+    for (file, expected) in [(lossy, vec!["384 entries, short of the 768", "1 CLASS_ item(s)"]), (clean, Vec::new())] {
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let (base, _) = serve_gated(file, true, Some(gate.clone()));
+        let mut s = Session::new(Project::default());
+        s.in_place_wait = false;
+        let mark = s.notice_mark();
+        let r = crate::cmd::layer::add_cog(&mut s, &json!({"name": "Classes"}), &format!("{base}/classes.tif"), false).unwrap();
+        assert_eq!(r["reading"], json!(true), "{r}");
+        s.notice_landed_rasters();
+        assert!(s.notices_since(mark).is_empty(), "said before its header is in: {:?}", s.notices_since(mark));
+        gate.store(true, Ordering::Relaxed);
+        let landed = |s: &Session| s.map().layer_by_name("Classes").and_then(|l| l.raster.as_ref()).is_some_and(|r| r.data.is_some());
+        draw_until(&mut s, landed);
+        assert!(landed(&s), "{:?}", s.map().layer_by_name("Classes").and_then(|l| l.raster.as_ref()).map(|r| r.error.clone()));
+        let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        for message in &expected {
+            assert_eq!(said.iter().filter(|t| t.contains(message)).count(), 1, "{said:?}");
+        }
+        if expected.is_empty() {
+            assert!(said.is_empty(), "{said:?}");
+        }
+    }
+}
+
+/// A cloud-optimised GeoTIFF drawn as a tile layer (here a data cube's file; a dated series and
+/// AlphaEarth alike), added before its header is in (the browser), says what its header leaves out
+/// once the header lands as the map draws: once, however often the map draws after, and again in
+/// a project opened again; a clean file says nothing (#1331).
+#[test]
+fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let clean = example_with(&Example { size: 64, tile: 16, ..Example::default() });
+    let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
+    let lossy_said = vec!["384 entries, short of the 768", "1 CLASS_ item(s)", "drawn in place without its band names"];
+    for (file, expected) in [(lossy, lossy_said), (clean, Vec::new())] {
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let (base, _) = serve_gated(file, true, Some(gate.clone()));
+        let mut s = Session::new(Project::default());
+        let mark = s.notice_mark();
+        let p = json!({"name": "Cube", "cube": true});
+        let r = crate::cmd::layer::add_cog(&mut s, &p, &format!("{base}/cube-2020.tif"), false).unwrap();
+        assert_eq!(r["kind"], "cog", "{r}");
+        s.notice_landed_rasters();
+        assert!(s.notices_since(mark).is_empty(), "said before its header is in: {:?}", s.notices_since(mark));
+        gate.store(true, Ordering::Relaxed);
+        let landed = |s: &Session| s.map().tiles.first().is_some_and(|t| !t.headers_said.is_empty());
+        draw_until(&mut s, landed);
+        assert!(landed(&s), "its header never landed");
+        let said = |s: &Session, mark: u64| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<String>>();
+        let check = |said: Vec<String>| {
+            for message in &expected {
+                assert_eq!(said.iter().filter(|t| t.starts_with("Cube: ") && t.contains(message)).count(), 1, "{said:?}");
+            }
+            assert_eq!(said.len(), expected.len(), "{said:?}");
+        };
+        check(said(&s, mark));
+        // A project opened again says it again, once.
+        let text = serde_json::to_string(&s.project).unwrap();
+        let mut t = Session::new(Project::default());
+        let mark = t.notice_mark();
+        t.run("project.openText", &json!({"text": text})).unwrap();
+        draw_until(&mut t, landed);
+        check(said(&t, mark).into_iter().filter(|n| n.starts_with("Cube: ")).collect());
+    }
+}
+
+/// A dated series of cloud-optimised GeoTIFFs says what each date's file leaves out of its header
+/// as the slider first shows it, not only the first date's (#1331); a date shown again isn't said
+/// again.
+#[test]
+fn a_dated_cog_series_says_each_dates_header_losses_once() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
+    let (base, _) = serve_ranges(lossy);
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    s.run("map.addTiles", &json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2001}))
+        .unwrap();
+    let said =
+        |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Series: ") && n.text.contains("384 entries")).count();
+    let files = |n: usize| move |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= n);
+    draw_until(&mut s, files(1));
+    assert_eq!(said(&s), 1, "{:?}", s.notices_since(mark));
+    s.run("time.goTo", &json!({"date": 2001})).unwrap();
+    draw_until(&mut s, files(2));
+    assert_eq!(said(&s), 2, "{:?}", s.notices_since(mark));
+    s.run("time.goTo", &json!({"date": 2000})).unwrap();
+    s.notice_landed_rasters();
+    assert_eq!(s.map().tiles[0].headers_said.len(), 2);
+    assert_eq!(said(&s), 2, "said again for a date shown before: {:?}", s.notices_since(mark));
+}
+
+/// A project's raster that isn't read in place (on S3, so downloaded whole) lands as the map draws,
+/// not as the project opens, and says what reading it lost then: once, however often the map draws
+/// after; a clean file says nothing (#1331).
+#[test]
+fn a_project_raster_downloaded_in_the_background_says_its_losses_once_it_lands() {
+    // The fixture changes process-wide S3 accounts; keep parallel readers in their own store.
+    if isolate_process_test("tests::a_project_raster_downloaded_in_the_background_says_its_losses_once_it_lands") {
+        return;
+    }
+    use rustgis_data::raster::cog::{Example, example_with};
+    let clean = example_with(&Example { size: 64, tile: 16, classes: true, ..Example::default() });
+    let lossy = example_with(&Example { size: 64, tile: 16, classes: true, no_table: true, ..Example::default() });
+    for (bucket, file, want) in [("s3-landing-lossy", lossy, 1), ("s3-landing-clean", clean, 0)] {
+        let pixels = rustgis_data::raster::read_bytes("classes.tif", &file).unwrap();
+        let base = serve_s3_together(vec![("classes.tif", file)]);
+        let mut s = Session::new(Project::default());
+        let layer = rustgis_map::raster::RasterLayer::from_path(pixels, format!("s3://{bucket}/classes.tif"));
+        assert!(!layer.in_place);
+        s.map_mut().add_raster("Classes".to_string(), layer);
+        let text = serde_json::to_string(&s.project).unwrap();
+        let mut t = Session::new(Project::default());
+        t.in_place_wait = false;
+        let c = t
+            .run(
+                "connection.new",
+                &json!({"kind": "s3", "name": bucket, "address": base, "options": {"credentials": "none", "buckets": bucket}}),
+            )
+            .unwrap();
+        let mark = t.notice_mark();
+        t.run("project.openText", &json!({"text": text})).unwrap();
+        let rl = |t: &Session| t.map().layer_by_name("Classes").and_then(|l| l.raster.clone()).unwrap();
+        assert!(rl(&t).data.is_none() && rl(&t).error.is_none(), "not read in the background: {:?}", rl(&t).error);
+        let said = |t: &Session| t.notices_since(mark).iter().filter(|n| n.text.contains("no colour table")).count();
+        assert_eq!(said(&t), 0, "said before it landed");
+        draw_until(&mut t, |t| rl(t).data.is_some());
+        assert!(rl(&t).data.is_some(), "{:?}", rl(&t).error);
+        assert_eq!(said(&t), want, "{:?}", t.notices_since(mark));
+        if want == 0 {
+            assert!(!t.notices_since(mark).iter().any(|n| n.text.contains("Classes")), "{:?}", t.notices_since(mark));
+        }
+        t.run("connection.remove", &json!({"id": c["id"].as_str().unwrap_or_default()})).unwrap();
+    }
+}
+
 /// A data cube's file (`"cube": true`) is a tile layer, and stays one when its project opens
 /// again: its address keeps the marker, which the migration respects.
 #[test]
