@@ -23415,37 +23415,42 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
 }
 
 /// A dated series of cloud-optimised GeoTIFFs says what each date's file leaves out of its header
-/// as the slider first shows it, not only the first date's (#1331); a date shown again isn't said
-/// again.
+/// as the slider first shows it, not only the first date's (#1331); a date shown again, or after an
+/// undo or a redo, isn't said again; a clean series says nothing.
 #[test]
 fn a_dated_cog_series_says_each_dates_header_losses_once() {
     use rustgis_data::raster::cog::{Example, example_with};
     let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
-    let (base, _) = serve_ranges(lossy);
-    let mut s = Session::new(Project::default());
-    let mark = s.notice_mark();
-    s.run("map.addTiles", &json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2001}))
-        .unwrap();
-    let said =
-        |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Series: ") && n.text.contains("384 entries")).count();
-    let files = |n: usize| move |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= n);
-    draw_until(&mut s, files(1));
-    assert_eq!(said(&s), 1, "{:?}", s.notices_since(mark));
-    // An edit made before the next date is shown, then undone: the date said since isn't said again.
-    s.run("map.setTiles", &json!({"index": 0, "opacity": 0.5})).unwrap();
-    s.run("time.goTo", &json!({"date": 2001})).unwrap();
-    draw_until(&mut s, files(2));
-    assert_eq!(said(&s), 2, "{:?}", s.notices_since(mark));
-    assert!(s.undo());
-    s.notice_landed_rasters();
-    assert_eq!(said(&s), 2, "said again after an undo: {:?}", s.notices_since(mark));
-    assert!(s.redo());
-    s.notice_landed_rasters();
-    assert_eq!(said(&s), 2, "said again after a redo: {:?}", s.notices_since(mark));
-    s.run("time.goTo", &json!({"date": 2000})).unwrap();
-    s.notice_landed_rasters();
-    assert_eq!(s.map().tiles[0].headers_said.len(), 2);
-    assert_eq!(said(&s), 2, "said again for a date shown before: {:?}", s.notices_since(mark));
+    let clean = example_with(&Example { size: 64, tile: 16, ..Example::default() });
+    // A lossy file's lines: its short colour table, its CLASS_ item, its class names not drawn.
+    for (file, per_file) in [(lossy, 3), (clean, 0)] {
+        let (base, _) = serve_ranges(file);
+        let mut s = Session::new(Project::default());
+        let mark = s.notice_mark();
+        let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2001});
+        s.run("map.addTiles", &p).unwrap();
+        let said = |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Series: ")).count();
+        let files = |n: usize| move |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= n);
+        draw_until(&mut s, files(1));
+        assert!(files(1)(&s), "the first date's header never landed");
+        assert_eq!(said(&s), per_file, "{:?}", s.notices_since(mark));
+        // An edit made before the next date is shown, then undone: the date said since isn't said again.
+        s.run("map.setTiles", &json!({"index": 0, "opacity": 0.5})).unwrap();
+        s.run("time.goTo", &json!({"date": 2001})).unwrap();
+        draw_until(&mut s, files(2));
+        assert!(files(2)(&s), "the second date's header never landed");
+        assert_eq!(said(&s), 2 * per_file, "{:?}", s.notices_since(mark));
+        assert!(s.undo());
+        s.notice_landed_rasters();
+        assert_eq!(said(&s), 2 * per_file, "said again after an undo: {:?}", s.notices_since(mark));
+        assert!(s.redo());
+        s.notice_landed_rasters();
+        assert_eq!(said(&s), 2 * per_file, "said again after a redo: {:?}", s.notices_since(mark));
+        s.run("time.goTo", &json!({"date": 2000})).unwrap();
+        s.notice_landed_rasters();
+        assert_eq!(s.map().tiles[0].headers_said.len(), 2);
+        assert_eq!(said(&s), 2 * per_file, "said again for a date shown before: {:?}", s.notices_since(mark));
+    }
 }
 
 /// A project's raster that isn't read in place (on S3, so downloaded whole) lands as the map draws,

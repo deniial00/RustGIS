@@ -2021,8 +2021,10 @@ impl Session {
     /// read in place land later: in the browser, a project, an import): what the file's header
     /// left out (`Raster::lost`: a colour table missing or short, GDAL metadata that doesn't
     /// decode), an overview statistics and tools read, a layer read in place that couldn't be
-    /// read, and why. Once for each layer's pixels or failure, one notice of each kind; the app
-    /// calls it each frame.
+    /// read, and why; and what the header of a cloud-optimised GeoTIFF drawn as a tile layer
+    /// leaves out, once that header lands (each date's file of a dated series as it is shown).
+    /// Once for each layer's pixels, failure or file, one notice of each kind; the app calls it
+    /// each frame.
     pub fn notice_landed_rasters(&mut self) {
         // Streamed vector windows land after project opening too. Check each installed read
         // once, keeping the same counted notice channel as retained resident expressions.
@@ -2056,13 +2058,10 @@ impl Session {
                 }
             }
         }
-        // What a header left out, as adding the layer says it (one notice a kind, with counts).
-        cmd::raster::say_losses(self, lost);
         // A cloud-optimised GeoTIFF drawn as a tile layer (a dated series, a data cube's file,
         // AlphaEarth) whose header wasn't in as it was added (the browser, a project opened):
         // what its header leaves out, as adding it says it, once its header lands. Asking starts
         // the header's read, which drawing the layer needs anyway.
-        let mut tile_lost = Vec::new();
         for m in &mut self.project.maps {
             for t in &mut m.tiles {
                 // By its file: a look changed at the address's end (`#bands=…`) reads no new header.
@@ -2072,12 +2071,11 @@ impl Session {
                 }
                 let Ok(Some(info)) = render::rustgis_tiles::cog::info(&t.url) else { continue };
                 t.headers_said.push(file.to_string());
-                tile_lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| format!("{}: {line}", t.name)));
+                lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (t.name.clone(), line)));
             }
         }
-        for line in tile_lost {
-            self.notify(line, false);
-        }
+        // What a header left out, as adding the layer says it (one notice a kind, with counts).
+        cmd::raster::say_losses(self, lost);
         // The browser uses its own trust; only native clients can fall back.
         #[cfg(not(target_arch = "wasm32"))]
         self.notice_trust();
@@ -2515,13 +2513,16 @@ impl Session {
 
     /// After undo or redo swaps the project: a cloud-optimised GeoTIFF tile layer keeps the files
     /// whose header losses were said (saying them isn't an undo step), found again on the map of its
-    /// name by its name and kind, so a file said since the restored copy was made isn't said again.
+    /// name by its kind and its name or file (a rename undone), so a file said since the restored
+    /// copy was made isn't said again.
     fn keep_headers_said(&mut self, before: &Project) {
+        use render::rustgis_tiles::cog::split;
         for m in &mut self.project.maps {
             let Some(old) = before.maps.iter().find(|o| o.name == m.name) else { continue };
             for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
-                let said: Vec<&String> =
-                    old.tiles.iter().filter(|o| o.kind == t.kind && o.name == t.name).flat_map(|o| &o.headers_said).collect();
+                let same =
+                    |o: &&rustgis_map::tiles::TileLayer| o.kind == t.kind && (o.name == t.name || split(&o.url).0 == split(&t.url).0);
+                let said: Vec<&String> = old.tiles.iter().filter(same).flat_map(|o| &o.headers_said).collect();
                 for file in said {
                     if !t.headers_said.contains(file) {
                         t.headers_said.push(file.clone());
