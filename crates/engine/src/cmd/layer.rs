@@ -4255,18 +4255,19 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
             s.zoom_to(&rustgis_geom::Extent::new(w, so, e, n));
         }
         r["bounds"] = json!(info.bounds);
-        // A tile layer's own name, as added; its header's losses said now, and not again as the
-        // map draws (see `Session::notice_landed_rasters`).
-        let shown = r.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
-        for line in cog_tile_losses(&info) {
-            s.notify(format!("{shown}: {line}"), false);
-        }
+        // A tile layer's own name, as added (and a dated series' file); its header's losses said
+        // now, and not again as the map draws (see `Session::notice_landed_rasters`).
         let index = r.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+        let mut shown = r.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
         if let Some(t) = index.and_then(|i| s.map_mut().tiles.get_mut(i)) {
+            shown = cog_tile_where(t);
             let file = crate::render::rustgis_tiles::cog::split(&t.url).0.to_string();
             if !t.headers_said.contains(&file) {
                 t.headers_said.push(file);
             }
+        }
+        for line in cog_tile_losses(&info) {
+            s.notify(format!("{shown}: {line}"), false);
         }
     } else if probed || why.is_some() || r.get("dated").is_some() {
         // Added, but its (first date's) file couldn't be read: the view stays where it was.
@@ -4277,6 +4278,19 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
     }
     r["inPlace"] = json!(true);
     Ok(r)
+}
+
+/// Where a cloud-optimised GeoTIFF tile layer's header losses are said: its name, and for a dated
+/// series the file of the date shown (the last part of its path, without a query, so a token in
+/// the address stays out of what is said).
+pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer) -> String {
+    if t.time_url.is_none() && t.time_urls.is_empty() {
+        return t.name.clone();
+    }
+    let inner = rustgis_data::login_address::inner(rustgis_data::s3_address::inner(&t.url));
+    let path = inner.split(['?', '#']).next().unwrap_or(inner);
+    let file: String = path.rsplit('/').next().unwrap_or_default().chars().take(80).collect();
+    if file.is_empty() { t.name.clone() } else { format!("{} ({file})", t.name) }
 }
 
 /// What a cloud-optimised GeoTIFF drawn as a tile layer leaves out of its header, a line each:

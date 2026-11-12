@@ -23397,6 +23397,8 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
         };
         s.notice_landed_rasters();
         assert!(cube(&s, mark).is_empty(), "said before its header is in: {:?}", cube(&s, mark));
+        // The map renamed while the header is being read, the rename undone once it has landed.
+        s.run("map.rename", &json!({"name": "Renamed"})).unwrap();
         gate.store(true, Ordering::Relaxed);
         let landed = |s: &Session| s.map().tiles.first().is_some_and(|t| !t.headers_said.is_empty());
         draw_until(&mut s, landed);
@@ -23407,6 +23409,9 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
             }
             assert_eq!(said.len(), expected.len(), "{said:?}");
         };
+        check(cube(&s, mark));
+        assert!(s.undo());
+        s.notice_landed_rasters();
         check(cube(&s, mark));
         // A project opened again says it again, once.
         let text = serde_json::to_string(&s.project).unwrap();
@@ -23433,23 +23438,26 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
         let mark = s.notice_mark();
         let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2001});
         s.run("map.addTiles", &p).unwrap();
-        let said = |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Series: ")).count();
+        // Said with the date's file: the layer's name says which series, the file which date.
+        let said = |s: &Session| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Series (")).count();
+        let said_of =
+            |s: &Session, file: &str| s.notices_since(mark).iter().filter(|n| n.text.starts_with(&format!("Series ({file}): "))).count();
         let files = |n: usize| move |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= n);
         draw_until(&mut s, files(1));
         assert!(files(1)(&s), "the first date's header never landed");
-        assert_eq!(said(&s), per_file, "{:?}", s.notices_since(mark));
-        // An edit made before the next date is shown, then undone: the date said since isn't said again.
+        assert_eq!((said(&s), said_of(&s, "2000.tif")), (per_file, per_file), "{:?}", s.notices_since(mark));
+        // An edit made before the next date is shown, then undone: the date said since isn't said
+        // again.
         s.run("map.setTiles", &json!({"index": 0, "opacity": 0.5})).unwrap();
         s.run("time.goTo", &json!({"date": 2001})).unwrap();
         draw_until(&mut s, files(2));
         assert!(files(2)(&s), "the second date's header never landed");
-        assert_eq!(said(&s), 2 * per_file, "{:?}", s.notices_since(mark));
-        assert!(s.undo());
-        s.notice_landed_rasters();
-        assert_eq!(said(&s), 2 * per_file, "said again after an undo: {:?}", s.notices_since(mark));
-        assert!(s.redo());
-        s.notice_landed_rasters();
-        assert_eq!(said(&s), 2 * per_file, "said again after a redo: {:?}", s.notices_since(mark));
+        assert_eq!((said(&s), said_of(&s, "2001.tif")), (2 * per_file, per_file), "{:?}", s.notices_since(mark));
+        for step in ["undo", "redo"] {
+            assert!(if step.starts_with("undo") { s.undo() } else { s.redo() }, "{step}");
+            s.notice_landed_rasters();
+            assert_eq!(said(&s), 2 * per_file, "said again after {step}: {:?}", s.notices_since(mark));
+        }
         s.run("time.goTo", &json!({"date": 2000})).unwrap();
         s.notice_landed_rasters();
         assert_eq!(s.map().tiles[0].headers_said.len(), 2);

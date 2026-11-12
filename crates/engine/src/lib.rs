@@ -2072,7 +2072,8 @@ impl Session {
                 }
                 let Some(info) = render::rustgis_tiles::cog::info_landed(&t.url) else { continue };
                 t.headers_said.push(file.to_string());
-                lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (t.name.clone(), line)));
+                let shown = cmd::layer::cog_tile_where(t);
+                lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (shown.clone(), line)));
             }
         }
         // What a header left out, as adding the layer says it (one notice a kind, with counts).
@@ -2518,8 +2519,9 @@ impl Session {
     /// copy was made isn't said again.
     fn keep_headers_said(&mut self, before: &Project) {
         use render::rustgis_tiles::cog::split;
-        for m in &mut self.project.maps {
-            let Some(old) = before.maps.iter().find(|o| o.name == m.name) else { continue };
+        for (i, m) in self.project.maps.iter_mut().enumerate() {
+            // By its name, else (a map rename undone) the map in the same place.
+            let Some(old) = before.maps.iter().find(|o| o.name == m.name).or_else(|| before.maps.get(i)) else { continue };
             for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
                 let same =
                     |o: &&rustgis_map::tiles::TileLayer| o.kind == t.kind && (o.name == t.name || split(&o.url).0 == split(&t.url).0);
