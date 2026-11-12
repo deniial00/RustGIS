@@ -23411,6 +23411,7 @@ fn a_cog_tile_layer_added_before_its_header_is_in_says_its_losses_once_it_lands(
         };
         check(cube(&s, mark));
         assert!(s.undo());
+        assert_ne!(s.map().name, "Renamed", "the rename wasn't undone");
         s.notice_landed_rasters();
         check(cube(&s, mark));
         // A project opened again says it again, once.
@@ -23466,6 +23467,7 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
         s.notice_landed_rasters();
         assert_eq!(s.map().tiles[0].headers_said.len(), 2);
         assert_eq!(said(&s), 2 * per_file, "said again for a date shown before: {:?}", s.notices_since(mark));
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("hidden-1331")), "{:?}", s.notices_since(mark));
     }
 }
 

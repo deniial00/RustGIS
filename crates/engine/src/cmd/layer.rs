@@ -4281,8 +4281,8 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
 }
 
 /// Where a cloud-optimised GeoTIFF tile layer's header losses are said: its name, and for a dated
-/// series the file of the date shown (the last part of its path, without the host, a login in it
-/// or a query, so a token in the address stays out of what is said).
+/// series the file of the date shown (the last part of its path: the host, a login wrapper, the
+/// query and the fragment stay out of what is said).
 pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer) -> String {
     if t.time_url.is_none() && t.time_urls.is_empty() {
         return t.name.clone();
