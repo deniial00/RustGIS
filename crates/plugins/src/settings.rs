@@ -222,7 +222,7 @@ mod native {
             // A regular file only: a named pipe would hold the read.
             match std::fs::metadata(&path) {
                 Ok(m) if m.is_file() => {}
-                Ok(_) => return Err(damaged(id)),
+                Ok(_) => return Err(format!("the saved settings of '{id}' aren't a file: remove what is in its place by hand")),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(e) => return Err(format!("couldn't read the settings of '{id}': {e}")),
             }
@@ -291,6 +291,8 @@ mod browser {
     /// Sets where settings are kept. Until it is called there is no place for them, and every
     /// request about them is an error rather than a pretence of keeping them.
     pub fn set_browser_storage(storage: BrowserStorage) {
+        // Only a request borrows the store, and the app sets it before any plugin runs: the
+        // borrow can't fail here.
         STORAGE.with(|s| {
             if let Ok(mut s) = s.try_borrow_mut() {
                 *s = Some(storage);
@@ -545,7 +547,7 @@ mod tests {
         // rather than a silent pass.
         std::fs::remove_file(folder.0.join("p.json")).unwrap();
         std::fs::create_dir(folder.0.join("p.json")).unwrap();
-        assert!(current(&dir, "p").is_err());
+        assert!(current(&dir, "p").unwrap_err().contains("aren't a file"));
         assert!(dir.delete("p").is_err());
         // Erasing a damaged record works.
         std::fs::remove_dir(folder.0.join("p.json")).unwrap();

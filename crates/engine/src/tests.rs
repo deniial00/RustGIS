@@ -11808,7 +11808,7 @@ fn plugin_settings_are_kept_per_plugin_across_sessions_updates_and_toggles() {
     assert_eq!(write(&mut s, "eng-set-a", saved.clone()).unwrap(), saved);
     let kept = json!({"favourites": ["l:123", "l:456"], "nested": {"x": null}, "limit": 5});
     assert_eq!(write(&mut s, "eng-set-a", json!({"unit": null, "limit": 5})).unwrap(), kept);
-    assert!(!s.can_undo(), "no 'edit' permission: no project step, and settings need none");
+    assert!(!s.can_undo() && !s.dirty(), "no 'edit' permission: no project step, and settings need none");
     // A plugin that may edit has its own settings too. Its command is a project step like any,
     // but its settings aren't part of the project: undoing the step leaves them.
     assert_eq!(read(&mut s, "eng-set-b").unwrap(), json!({}));
@@ -13129,10 +13129,10 @@ fn session_plugins_ask_between_commands_and_hear_the_map() {
     settle(&mut s);
     // Settings asked for between commands are kept under its own id, and are no undo step.
     s.run("plugin:eng-sess/k", &json!({"op": "host.setSettings", "params": {"values": {"between": 1}}})).unwrap();
-    let steps = s.undo_depth();
+    let (steps, state) = (s.undo_depth(), s.state());
     settle(&mut s);
     assert_eq!(rustgis_plugins::settings::read("eng-sess").unwrap(), json!({"between": 1}));
-    assert_eq!(s.undo_depth(), steps);
+    assert_eq!((s.undo_depth(), s.state()), (steps, state));
     // Told what changed: the layers (the one it added), the view, the selection.
     s.map_mut().camera.pan_px(40.0, 0.0);
     s.run("select.rows", &json!({"layer": "Cities", "rows": [0]})).unwrap();

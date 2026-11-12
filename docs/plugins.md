@@ -720,14 +720,16 @@ copy of the project, so a tool's output must not depend on what was saved.
   revert a saved setting, and it stays if the command fails later. A command of a plugin with
   `edit` is still one undo step, as ever, whatever it asks for.
 - They survive restarts, a new version of the plugin and turning it off and on. They are erased
-  only when the user uninstalls the plugin: one installed again starts with none. Removing a
-  development folder that shadows an installed copy leaves the copy's settings.
+  only when the user uninstalls the plugin (in the web app, also by **Remove** on one that
+  couldn't be loaded): one installed again starts with none. Removing a development folder that
+  shadows an installed copy leaves the copy's settings.
 - The desktop app, the command line and Python keep them in `settings/<id>.json` in the plugins
   folder (`RUSTGIS_PLUGINS_DIR`, or `plugins` in the data folder; see
   [Installation](installation.md)), so they move with it: a plugins folder that several users
   share shares the settings too, and a read-only one makes `host.setSettings` fail (reading still
-  works). Each change is read, merged and written under one lock. RustGIS processes running at
-  once (the desktop app and the command line) share the files: the last write wins.
+  works). Within one RustGIS process, each change is read, merged and written under one lock.
+  RustGIS processes running at once (the desktop app and the command line) share the files: the
+  last write wins.
 - The web app keeps them in the browser's localStorage (`rustgis.plugin-settings.<id>`); embedded
   in another page, in memory for the visit.
 - Settings that can't be read or saved (a damaged file, a full or blocked browser storage) make
