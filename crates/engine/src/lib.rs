@@ -2061,8 +2061,8 @@ impl Session {
         // A cloud-optimised GeoTIFF drawn as a tile layer (a dated series, a data cube's file,
         // AlphaEarth) whose header wasn't in as it was added (the browser, a project opened):
         // what its header leaves out, as adding it says it, once its header lands. Its header is
-        // asked for by the map drawing it (or by adding it), not here: a layer the map doesn't
-        // draw starts no read.
+        // asked for by the map drawing or exporting it, or by adding it, not here: a layer the map
+        // doesn't draw starts no read.
         for m in &mut self.project.maps {
             for t in &mut m.tiles {
                 // By its file: a look changed at the address's end (`#bands=…`) reads no new header.

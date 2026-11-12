@@ -23326,7 +23326,7 @@ fn draw_until(s: &mut Session, landed: impl Fn(&Session) -> bool) {
         crate::render::rustgis_tiles::cache::wait(Duration::from_millis(50));
         s.read_in_place_again();
         s.map_mut().sync_sources(&view, 1000.0, false);
-        for t in s.map().tiles.iter().filter(|t| t.visible && t.kind == rustgis_map::tiles::TileKind::Cog) {
+        for t in s.map().tiles.iter().filter(|t| t.draws() && t.opacity > 0.0 && t.kind == rustgis_map::tiles::TileKind::Cog) {
             let _ = crate::render::rustgis_tiles::cog::info(&t.url);
         }
         s.notice_landed_rasters();
