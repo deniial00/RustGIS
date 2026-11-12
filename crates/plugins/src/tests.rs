@@ -1884,9 +1884,12 @@ fn process_packages_unpack_safely() {
     assert!(dir.join("data/b.txt").is_file());
     assert!(!plugins.join("unpacked/evil.txt").exists() && !plugins.join("evil.txt").exists());
     assert!(dir.join("data/b.txt").is_file(), "the installed copy stays");
-    // Uninstalling removes the files.
-    crate::store::uninstall("unpacked").unwrap();
-    assert!(!dir.exists());
+    // Uninstalling removes the files, also when its settings can't be erased (they go last).
+    let settings = plugins.join("settings").join("unpacked.json");
+    std::fs::create_dir_all(&settings).unwrap();
+    let e = crate::store::uninstall("unpacked").unwrap_err();
+    assert!(e.contains("couldn't erase the saved settings of 'unpacked'") && e.contains("remove") && e.contains("by hand"), "{e}");
+    assert!(!dir.exists() && crate::get("unpacked").is_none() && !plugins.join("unpacked.rgplugin").exists());
     let _ = std::fs::remove_dir_all(&plugins);
 }
 
@@ -2793,6 +2796,7 @@ fn plugin_settings_are_erased_only_by_uninstalling() {
             assert_eq!(remembered("settings-store").unwrap(), json!({"favourites": ["l:2"]}));
         } else {
             crate::store::install_bytes(&package).unwrap();
+            remember("settings-store", json!({"favourites": ["l:2"]})).unwrap();
         }
     }
 
@@ -2800,10 +2804,7 @@ fn plugin_settings_are_erased_only_by_uninstalling() {
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let e = crate::store::uninstall("settings-store").unwrap_err();
-    assert!(
-        e.contains("settings-store was uninstalled, but couldn't erase the saved settings of 'settings-store'") && e.contains("by hand"),
-        "{e}"
-    );
+    assert!(e.contains("couldn't erase the saved settings of 'settings-store'") && e.contains("the plugin was uninstalled"), "{e}");
     assert!(crate::get("settings-store").is_none() && !plugins.join("settings-store.rgplugin").exists() && file.is_dir());
 
     // A damaged record doesn't: erasing is what clears it.

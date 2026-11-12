@@ -329,20 +329,20 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     if let Some(path) = package.as_ref().filter(|_| is_package) {
         std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    // Its settings go once it can't come back: a step above that fails leaves them with the
-    // plugin. Erasing that fails now can't be tried again by uninstalling, so it says where they
-    // are (a later install of the id would find them).
-    if is_package || package.is_none() {
-        crate::settings::remove(id).map_err(|e| {
-            let file = dir().map(|d| d.join("settings").join(format!("{id}.json")).display().to_string()).unwrap_or_default();
-            format!("{id} was uninstalled, but {e}; remove {file} by hand")
-        })?;
-    }
     if is_package {
         if let Some(unpacked) = unpacked_dir(id).filter(|u| u.is_dir()) {
             std::fs::remove_dir_all(&unpacked).map_err(|e| format!("{}: {e}", unpacked.display()))?;
         }
         crate::pyenv::remove(id)?;
+    }
+    // Its settings go last, once it can't come back and its files are gone: a step above that
+    // fails leaves them with it. Erasing that fails now can't be tried again by uninstalling, so
+    // it says where they are (a later install of the id would find them).
+    if is_package || package.is_none() {
+        crate::settings::remove(id).map_err(|e| {
+            let file = dir().map(|d| d.join("settings").join(format!("{id}.json")).display().to_string()).unwrap_or_default();
+            format!("{e} (the plugin was uninstalled; remove {file} by hand)")
+        })?;
     }
     Ok(())
 }
