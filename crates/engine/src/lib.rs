@@ -2060,8 +2060,9 @@ impl Session {
         }
         // A cloud-optimised GeoTIFF drawn as a tile layer (a dated series, a data cube's file,
         // AlphaEarth) whose header wasn't in as it was added (the browser, a project opened):
-        // what its header leaves out, as adding it says it, once its header lands. Asking starts
-        // the header's read, once for each file, for a hidden layer too, so its losses are said.
+        // what its header leaves out, as adding it says it, once its header lands. Its header is
+        // asked for by the map drawing it (or by adding it), not here: a layer the map doesn't
+        // draw starts no read.
         for m in &mut self.project.maps {
             for t in &mut m.tiles {
                 // By its file: a look changed at the address's end (`#bands=…`) reads no new header.
@@ -2069,7 +2070,7 @@ impl Session {
                 if t.kind != rustgis_map::tiles::TileKind::Cog || t.headers_said.iter().any(|f| f == file) {
                     continue;
                 }
-                let Ok(Some(info)) = render::rustgis_tiles::cog::info(&t.url) else { continue };
+                let Some(info) = render::rustgis_tiles::cog::info_landed(&t.url) else { continue };
                 t.headers_said.push(file.to_string());
                 lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (t.name.clone(), line)));
             }

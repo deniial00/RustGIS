@@ -23318,6 +23318,7 @@ fn a_palette_without_its_table_says_so_when_its_pixels_land() {
 
 /// Draws the map as the app does each frame (the view over the example files), until `landed`
 /// or 20 seconds, then a few frames more: what lands is said on the frame it lands, and never again.
+/// A cloud-optimised GeoTIFF tile layer shown asks for its header, as drawing its tiles does.
 fn draw_until(s: &mut Session, landed: impl Fn(&Session) -> bool) {
     use std::time::Duration;
     let view = rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0);
@@ -23325,6 +23326,9 @@ fn draw_until(s: &mut Session, landed: impl Fn(&Session) -> bool) {
         crate::render::rustgis_tiles::cache::wait(Duration::from_millis(50));
         s.read_in_place_again();
         s.map_mut().sync_sources(&view, 1000.0, false);
+        for t in s.map().tiles.iter().filter(|t| t.visible && t.kind == rustgis_map::tiles::TileKind::Cog) {
+            let _ = crate::render::rustgis_tiles::cog::info(&t.url);
+        }
         s.notice_landed_rasters();
     };
     let start = std::time::Instant::now();
