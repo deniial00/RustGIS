@@ -1111,7 +1111,8 @@ pub struct RustGisApp {
     /// [`readjob`]). Off, as for tests and the examples, they read as the command runs.
     pub reads_off_frame: bool,
     /// Watches linked local files for changes made outside RustGIS and offers Reload Data
-    /// (the desktop app; see [`diskwatch`]). Off for tests and the examples.
+    /// (the desktop app; see [`diskwatch`]). Off for tests, unless one turns it on (as `ui_shot`'s
+    /// `watchFiles` does).
     #[cfg(not(target_arch = "wasm32"))]
     pub watch_files: bool,
     #[cfg(not(target_arch = "wasm32"))]

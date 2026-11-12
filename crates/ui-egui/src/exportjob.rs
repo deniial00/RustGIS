@@ -21,8 +21,7 @@ pub struct ExportJob {
     /// What it wrote (or why it failed), and the watched file it wrote into as looked at on its
     /// thread just before and after.
     slot: crate::Slot<(Result<Wrote, String>, Option<crate::diskwatch::Write>)>,
-    /// The watched file it writes, if any: an export into a watched GeoPackage is RustGIS's own
-    /// write.
+    /// The watched file it writes, if any: what scans see there meanwhile is RustGIS's own write.
     writes: Option<String>,
 }
 

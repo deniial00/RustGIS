@@ -1,6 +1,7 @@
 //! Changed on disk (#1477): the desktop watches the files its layers and local tile archives read,
 //! every few seconds and when the window regains focus, and offers Reload Data for a source that
-//! changed. Only metadata is read (`rustgis_engine::observe`), on a thread of its own; reloading is
+//! changed. Only metadata is read (`rustgis_engine::observe`): scans on a thread of their own, a
+//! reload, save or export's own look on the thread its read or write runs on. Reloading is
 //! always the user's choice and always goes through `ui.reloadData` or `map.reloadTiles`.
 //!
 //! [`Monitor`] is the state machine, driven by observations and nothing else; [`Watch`] finds the
@@ -154,8 +155,9 @@ impl Monitor {
             source.wrote = None;
         }
         for (target, t) in self.targets.iter_mut().filter(|(_, t)| t.key == key) {
-            // A target added since: the first scan is what it was read with.
-            if t.baseline.is_none() {
+            // A target added since: the first readable scan is what it was read with (a look
+            // that couldn't read the metadata says nothing about what the layer holds).
+            if t.baseline.is_none() && !matches!(seen, Seen::Unreadable(_)) {
                 t.baseline = Some(seen.clone());
             }
             if let Some((before, result, stale)) = &acknowledged
@@ -255,13 +257,8 @@ impl Monitor {
 /// lexical step back wouldn't, so two spellings of one file may be watched as two.
 pub(crate) fn key(path: &str) -> String {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.into());
-    let mut out = std::path::PathBuf::new();
-    for part in absolute.components() {
-        if part != std::path::Component::CurDir {
-            out.push(part);
-        }
-    }
-    out.display().to_string()
+    // Rebuilt from its components: a `.` step is dropped.
+    absolute.components().collect::<std::path::PathBuf>().display().to_string()
 }
 
 /// One target as the project has it now.
@@ -619,7 +616,6 @@ pub(crate) fn before_write(app: &RustGisApp, command: &str, params: &Value) -> O
 }
 
 /// A write RustGIS is about to make into a watched file ([`plan_write`]).
-#[derive(Clone)]
 pub(crate) struct Write {
     key: String,
     path: String,
@@ -660,10 +656,8 @@ pub(crate) fn ran(app: &mut RustGisApp, command: &str, params: &Value, answer: &
                 app.diskwatch.monitor.reloaded(&target);
             }
         }
-        // A save that wrote nothing (no edits) isn't a write; an export started on its thread
-        // says so as it lands ([`crate::exportjob::land`]).
+        // A save that wrote nothing (no edits) isn't a write.
         "gpkg.saveEdits" if answer.get("saved").and_then(Value::as_bool) == Some(false) => {}
-        "share.exportLayer" | "share.exportTable" if answer.get("started").is_some() => {}
         "gpkg.saveEdits" | "share.exportLayer" | "share.exportTable" => {
             if let Some(write) = before {
                 wrote(app, write, answer);
@@ -796,7 +790,9 @@ pub(crate) fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                 ui.label(egui::RichText::new(file).strong()).on_hover_text(*path);
                 match status {
                     Status::Changed => {
-                        ui.label(tl!("The file may have changed since it was read. The map shows the data read before."));
+                        ui.label(tl!(
+                            "The file may have changed since it was read. What the map shows may be out of date until you reload."
+                        ));
                     }
                     Status::Missing => {
                         let text = if found.iter().any(|f| f.repairable) {
@@ -1017,6 +1013,14 @@ mod tests {
         m.dismiss(&layer(8));
         m.observed("d", Seen::Missing, 3);
         assert!(!m.notifies(&layer(8)), "no prompt again while it stays missing");
+        // Unreadable at the first look (a passing metadata error at project open): once it reads,
+        // that is what the layer was read with, not a change.
+        let mut m = Monitor::default();
+        m.track([(layer(7), "e".into())]);
+        m.observed("e", Seen::Unreadable("locked".into()), 1);
+        m.observed("e", v0.clone(), 2);
+        m.observed("e", v0.clone(), 3);
+        assert_eq!(m.status(&layer(7)), Status::Unchanged);
     }
 
     #[test]
