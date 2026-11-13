@@ -4260,7 +4260,7 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
         let index = r.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
         let mut shown = r.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
         if let Some(t) = index.and_then(|i| s.map_mut().tiles.get_mut(i)) {
-            shown = cog_tile_where(t);
+            shown = cog_tile_where(t, &t.url);
             let file = crate::render::rustgis_tiles::cog::split(&t.url).0.to_string();
             if !t.headers_said.contains(&file) {
                 t.headers_said.push(file);
@@ -4281,13 +4281,13 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
 }
 
 /// Where a cloud-optimised GeoTIFF tile layer's header losses are said: its name, and for a dated
-/// series the file of the date shown (the last part of its path: the host, a login wrapper, the
-/// query and the fragment stay out of what is said).
-pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer) -> String {
+/// series the file of `address`, one of its dates' (the last part of its path: the host, a login
+/// wrapper, the query and the fragment stay out of what is said).
+pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer, address: &str) -> String {
     if t.time_url.is_none() && t.time_urls.is_empty() {
         return t.name.clone();
     }
-    let inner = rustgis_data::login_address::inner(rustgis_data::s3_address::inner(&t.url));
+    let inner = rustgis_data::login_address::inner(rustgis_data::s3_address::inner(address));
     let address = inner.split(['?', '#']).next().unwrap_or(inner);
     // The path after the host: an address without one names no file.
     let after_host = address.split_once("://").map_or(address, |(_, rest)| rest);

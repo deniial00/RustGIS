@@ -23471,6 +23471,62 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
     }
 }
 
+/// A dated series' date whose header lands after the slider moved on says what it leaves out
+/// then, named by its file, once; the date shown when it lands says its own once too (#1331). A
+/// clean series says nothing.
+#[test]
+fn a_dated_cog_series_says_a_date_whose_header_lands_after_the_slider_moved_on() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
+    let clean = example_with(&Example { size: 64, tile: 16, ..Example::default() });
+    for (file, per_file) in [(lossy, 3), (clean, 0)] {
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let (base, _) = serve_gated(file, true, Some(gate.clone()));
+        let mut s = Session::new(Project::default());
+        let mark = s.notice_mark();
+        let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2001});
+        s.run("map.addTiles", &p).unwrap();
+        // Named by their files, alone or together (dates landing in one frame share a notice).
+        let said_of =
+            |s: &Session, file: &str| s.notices_since(mark).iter().filter(|n| n.text.contains(&format!("Series ({file})"))).count();
+        // 2000 is drawn (its header asked for), and the slider moves on before the header is in.
+        let url = s.map().tiles[0].url.clone();
+        assert!(matches!(crate::render::rustgis_tiles::cog::info(&url), Ok(None)), "2000's header is in already");
+        s.run("time.goTo", &json!({"date": 2001})).unwrap();
+        gate.store(true, Ordering::Relaxed);
+        let files = |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= 2);
+        draw_until(&mut s, files);
+        assert!(files(&s), "a header never landed: {:?}", s.map().tiles[0].headers_said);
+        assert_eq!((said_of(&s, "2000.tif"), said_of(&s, "2001.tif")), (per_file, per_file), "{:?}", s.notices_since(mark));
+    }
+}
+
+/// An export of a dated series' time steps draws each date's file, and says what each one's header
+/// leaves out, naming its file, once (the dates sharing a loss in one notice), though the slider is
+/// back at its first date after it (#1331).
+#[test]
+fn exporting_a_dated_cog_series_says_each_dates_header_losses() {
+    use rustgis_data::raster::cog::{Example, example_with};
+    let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
+    let (base, _) = serve_ranges(lossy);
+    let mut s = Session::new(Project::default());
+    let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2002});
+    s.run("map.addTiles", &p).unwrap();
+    let mark = s.notice_mark();
+    let zip = std::env::temp_dir().join(format!("rustgis-cog-series-{}.zip", std::process::id()));
+    let r = s.run("time.export", &json!({"path": zip.display().to_string(), "width": 64, "height": 48})).unwrap();
+    let _ = std::fs::remove_file(&zip);
+    assert_eq!(r["frames"], 3, "{r}");
+    s.notice_landed_rasters();
+    // Each date's file is named once for each of its losses: its short colour table, its CLASS_
+    // item, its class names not drawn.
+    let named = |s: &Session, file: &str| s.notices_since(mark).iter().filter(|n| n.text.contains(&format!("Series ({file})"))).count();
+    for file in ["2000.tif", "2001.tif", "2002.tif"] {
+        assert_eq!(named(&s, file), 3, "{file}: {:?}", s.notices_since(mark));
+    }
+}
+
 /// A project's raster that isn't read in place (on S3, so downloaded whole) lands as the map draws,
 /// not as the project opens, and says what reading it lost then: once, however often the map draws
 /// after; a clean file says nothing (#1331).

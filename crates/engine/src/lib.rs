@@ -738,6 +738,9 @@ pub struct Session {
     /// Notices given in this session, including ones no longer kept (see [`Session::notices_since`]),
     /// less those a failed command withdrew.
     notices_given: u64,
+    /// The count of cloud-optimised GeoTIFF headers landed when [`Session::notice_landed_rasters`]
+    /// last looked back at the dates a dated series has shown (`cog::landed_count`).
+    cog_headers_seen: u64,
     /// Layer whose attribute table is open.
     pub table_layer: Option<u32>,
     /// The standalone table shown in the attribute table instead of a layer, by its id.
@@ -1159,6 +1162,7 @@ impl Session {
             bundled_roots_said: false,
             diagnostics: rustgis_data::diagnostics::History::default(),
             notices_given: 0,
+            cog_headers_seen: 0,
             table_layer: None,
             table_standalone: None,
             clipboard: None,
@@ -2062,18 +2066,36 @@ impl Session {
         // AlphaEarth) whose header wasn't in as it was added (the browser, a project opened):
         // what its header leaves out, as adding it says it, once its header lands. Its header is
         // asked for by the map drawing or exporting it, or by adding it, not here: a layer the map
-        // doesn't draw starts no read.
+        // doesn't draw starts no read. A dated series' other dates' files it has shown (the slider
+        // moved on before a header landed, an export of the time steps) are looked at again only
+        // when a header has landed since the last look.
+        use render::rustgis_tiles::cog;
+        let landed = cog::landed_count();
+        let look_back = landed != self.cog_headers_seen;
+        self.cog_headers_seen = landed;
         for m in &mut self.project.maps {
-            for t in &mut m.tiles {
-                // By its file: a look changed at the address's end (`#bands=…`) reads no new header.
-                let file = render::rustgis_tiles::cog::split(&t.url).0;
-                if t.kind != rustgis_map::tiles::TileKind::Cog || t.headers_said.iter().any(|f| f == file) {
-                    continue;
+            for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
+                // The address shown now is kept among those shown, whatever showed it (a dated
+                // series added, its project opened), while its header hasn't been said.
+                let dated = t.time_url.is_some() || !t.time_urls.is_empty();
+                if dated && !t.headers_said.iter().any(|f| f == cog::split(&t.url).0) {
+                    t.note_shown();
                 }
-                let Some(info) = render::rustgis_tiles::cog::info_landed(&t.url) else { continue };
-                t.headers_said.push(file.to_string());
-                let shown = cmd::layer::cog_tile_where(t);
-                lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (shown.clone(), line)));
+                let back = t.headers_shown.iter().filter(|u| look_back && **u != t.url);
+                // By its file: a look changed at the address's end (`#bands=…`) reads no new header.
+                let mut hits = Vec::new();
+                for address in std::iter::once(&t.url).chain(back) {
+                    let file = cog::split(address).0;
+                    if t.headers_said.iter().any(|f| f == file) || hits.iter().any(|(f, _, _): &(String, _, _)| f == file) {
+                        continue;
+                    }
+                    let Some(info) = cog::info_landed(address) else { continue };
+                    hits.push((file.to_string(), cmd::layer::cog_tile_where(t, address), info));
+                }
+                for (file, shown, info) in hits {
+                    t.headers_said.push(file);
+                    lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (shown.clone(), line)));
+                }
             }
         }
         // What a header left out, as adding the layer says it (one notice a kind, with counts).
@@ -2514,9 +2536,10 @@ impl Session {
     }
 
     /// After undo or redo swaps the project: a cloud-optimised GeoTIFF tile layer keeps the files
-    /// whose header losses were said (saying them isn't an undo step), found again on the map of its
-    /// name by its kind and its name or file (a rename undone), so a file said since the restored
-    /// copy was made isn't said again.
+    /// whose header losses were said and the dates' addresses it has shown (neither is an undo
+    /// step), found again on the map of its name by its kind and its name or file (a rename
+    /// undone), so a file said since the restored copy was made isn't said again, and one shown
+    /// since is still said once its header lands.
     fn keep_headers_said(&mut self, before: &Project) {
         use render::rustgis_tiles::cog::split;
         let names: Vec<String> = self.project.maps.iter().map(|m| m.name.clone()).collect();
@@ -2528,10 +2551,15 @@ impl Session {
             for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
                 let same =
                     |o: &&rustgis_map::tiles::TileLayer| o.kind == t.kind && (o.name == t.name || split(&o.url).0 == split(&t.url).0);
-                let said: Vec<&String> = old.tiles.iter().filter(same).flat_map(|o| &o.headers_said).collect();
-                for file in said {
+                let old: Vec<&rustgis_map::tiles::TileLayer> = old.tiles.iter().filter(same).collect();
+                for file in old.iter().flat_map(|o| &o.headers_said) {
                     if !t.headers_said.contains(file) {
                         t.headers_said.push(file.clone());
+                    }
+                }
+                for address in old.iter().flat_map(|o| &o.headers_shown) {
+                    if t.headers_shown.len() < rustgis_map::time::MAX_STEPS && !t.headers_shown.contains(address) {
+                        t.headers_shown.push(address.clone());
                     }
                 }
             }

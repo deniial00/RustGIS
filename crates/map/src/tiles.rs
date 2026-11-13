@@ -204,6 +204,12 @@ pub struct TileLayer {
     /// them again.
     #[serde(skip)]
     pub headers_said: Vec<String>,
+    /// The addresses a dated series has shown (each date's file, as the slider moved to it),
+    /// for the session only: a file whose header lands after the slider moved on (or after an
+    /// export of the time steps drew it) is still said, by the engine's
+    /// `Session::notice_landed_rasters`. At most [`MAX_STEPS`](crate::time::MAX_STEPS).
+    #[serde(skip)]
+    pub headers_shown: Vec<String>,
 }
 
 /// The longest legend address kept.
@@ -408,6 +414,7 @@ impl TileLayer {
             selected: false,
             single_image: false,
             headers_said: Vec::new(),
+            headers_shown: Vec::new(),
         }
     }
 
@@ -467,6 +474,7 @@ impl TileLayer {
             if let Some((d, u)) = at.and_then(|i| self.time_urls.get(i)) {
                 self.url.clone_from(u);
                 self.time_at = *d;
+                self.note_shown();
             }
             return;
         }
@@ -474,6 +482,14 @@ impl TileLayer {
         if let Some(template) = self.time_url.as_ref().filter(|u| is_web(u)) {
             self.url = rustgis_data::time::fill_template(template, current.unwrap_or(self.time_at));
             self.time_at = current.unwrap_or(self.time_at);
+            self.note_shown();
+        }
+    }
+
+    /// Keeps the address it now shows among those a dated series has shown ([`TileLayer::headers_shown`]).
+    pub fn note_shown(&mut self) {
+        if self.headers_shown.len() < crate::time::MAX_STEPS && !self.headers_shown.contains(&self.url) {
+            self.headers_shown.push(self.url.clone());
         }
     }
 
@@ -678,6 +694,7 @@ impl TileLayer {
             selected: _,
             single_image: _,
             headers_said: _,
+            headers_shown: _,
         } = self;
         use crate::TileRole as R;
         let mut out = vec![(R::Url, url.as_str(), self.archive_file().is_some())];
