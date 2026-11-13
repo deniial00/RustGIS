@@ -491,9 +491,17 @@ impl TileLayer {
     }
 
     /// Keeps the address it now shows among those a dated series has shown ([`TileLayer::headers_shown`]):
-    /// a cloud-optimised GeoTIFF's only, whose header's losses are said once it lands.
+    /// a cloud-optimised GeoTIFF's only, whose header's losses are said once it lands, and only
+    /// while they haven't been (a date whose file was said, its look at the address's end or
+    /// not, isn't kept again), so the list holds the dates still to say, not every date shown.
     pub fn note_shown(&mut self) {
-        if self.kind == TileKind::Cog && self.headers_shown.len() < crate::time::MAX_STEPS && !self.headers_shown.contains(&self.url) {
+        let file = self.url.rsplit_once('#').map_or(self.url.as_str(), |(file, _)| file);
+        let said = self.headers_said.iter().any(|f| *f == self.url || f == file);
+        if self.kind == TileKind::Cog
+            && !said
+            && self.headers_shown.len() < crate::time::MAX_STEPS
+            && !self.headers_shown.contains(&self.url)
+        {
             self.headers_shown.push(self.url.clone());
         }
     }
@@ -800,6 +808,12 @@ mod tests {
             t.time_url = Some("https://a.example.com/{YYYY}.tif".into());
             t.apply_time(None);
             assert_eq!(t.headers_shown.contains(&t.url), kind == TileKind::Cog, "{kind:?}: {:?}", t.headers_shown);
+            // A date whose file was said isn't kept again, its look at the address's end or not.
+            let mut t = TileLayer::new("Series", kind, format!("{a}#bands=1"));
+            t.headers_said = vec![a.clone()];
+            t.time_urls = vec![(1.0, format!("{a}#bands=1")), (2.0, b.clone())];
+            t.apply_time(None);
+            assert_eq!(t.headers_shown, kept.iter().filter(|u| **u != a).cloned().collect::<Vec<_>>(), "{kind:?}");
         }
     }
 
