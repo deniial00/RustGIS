@@ -1884,8 +1884,27 @@ fn process_packages_unpack_safely() {
     assert!(dir.join("data/b.txt").is_file());
     assert!(!plugins.join("unpacked/evil.txt").exists() && !plugins.join("evil.txt").exists());
     assert!(dir.join("data/b.txt").is_file(), "the installed copy stays");
-    // Uninstalling removes the files, also when its settings can't be erased (they go last).
+    // A step after the package is gone that fails (its unpacked folder can't be removed) says
+    // the plugin's settings were kept, and where, since uninstalling can't be tried again.
     let settings = plugins.join("settings").join("unpacked.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        crate::settings::patch("unpacked", &json!({"values": {"kept": true}})).unwrap();
+        let parent = plugins.join("unpacked");
+        let mode = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = crate::store::uninstall("unpacked");
+        std::fs::set_permissions(&parent, mode).unwrap();
+        // Root removes it anyway: then there is nothing to check here.
+        if let Err(e) = failed {
+            assert!(e.contains("its saved settings were kept") && e.contains(&settings.display().to_string()), "{e}");
+            assert!(settings.is_file() && crate::get("unpacked").is_none());
+        }
+        let _ = std::fs::remove_file(&settings);
+        crate::store::install_bytes(&changed).unwrap();
+    }
+    // Uninstalling removes the files, also when its settings can't be erased (they go last).
     std::fs::create_dir_all(&settings).unwrap();
     let e = crate::store::uninstall("unpacked").unwrap_err();
     assert!(e.contains("couldn't erase the saved settings of 'unpacked'") && e.contains("remove") && e.contains("by hand"), "{e}");

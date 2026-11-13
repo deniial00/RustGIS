@@ -107,10 +107,12 @@ fn compact(value: &impl serde::Serialize) -> Option<String> {
     String::from_utf8(out.0).ok()
 }
 
-/// The plugin's object in what was saved for `id`: a record of this version, within the limit as
-/// written and, its object, as compact JSON (a hand-edited file may spell its numbers longer than
-/// they are saved). A newer version is refused, so it is never written over.
-fn parse(id: &str, text: &str) -> Result<Map<String, Value>, String> {
+/// What was saved for `id`: the plugin's object, and apart from it any other top-level keys of
+/// the record (version 1 writes none, so only by hand), which a change writes back as they were.
+/// It must be a record of this version, within the limit as written and, its object, as compact
+/// JSON (a hand-edited file may spell its numbers longer than they are saved). A newer version is
+/// refused, so it is never written over.
+fn parse(id: &str, text: &str) -> Result<(Map<String, Value>, Map<String, Value>), String> {
     if text.len() > MAX_SAVED {
         return Err(damaged(id));
     }
@@ -122,21 +124,43 @@ fn parse(id: &str, text: &str) -> Result<Map<String, Value>, String> {
     }
     let Some(Value::Object(map)) = saved.remove("values") else { return Err(damaged(id)) };
     compact(&map).ok_or_else(|| damaged(id))?;
-    Ok(map)
+    saved.remove("version");
+    Ok((map, saved))
+}
+
+fn saved(backing: &dyn Backing, id: &str) -> Result<(Map<String, Value>, Map<String, Value>), String> {
+    match backing.load(id)? {
+        Some(text) => parse(id, &text),
+        None => Ok((Map::new(), Map::new())),
+    }
 }
 
 fn current(backing: &dyn Backing, id: &str) -> Result<Map<String, Value>, String> {
-    match backing.load(id)? {
-        Some(text) => parse(id, &text),
-        None => Ok(Map::new()),
+    saved(backing, id).map(|(values, _)| values)
+}
+
+/// The record for `values` (compact JSON) with the other keys a saved record had, within what a
+/// record may take.
+fn record_with(values: &str, rest: &Map<String, Value>) -> Result<String, String> {
+    let mut text = record(values);
+    if rest.is_empty() {
+        return Ok(text);
     }
+    text.pop();
+    for (key, value) in rest {
+        let key = serde_json::to_string(key).map_err(|e| e.to_string())?;
+        let value = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        text.push_str(&format!(",{key}:{value}"));
+    }
+    text.push('}');
+    if text.len() > MAX_SAVED { Err(too_big()) } else { Ok(text) }
 }
 
 /// Merges `params.values` into what is saved for `id` and saves the result, checking the limit
 /// on the merged object before anything is written.
 fn patch_in(backing: &dyn Backing, id: &str, params: &Value) -> Result<Value, String> {
     let updates = params.get("values").and_then(Value::as_object).ok_or("values must be a JSON object")?;
-    let saved = current(backing, id)?;
+    let (saved, rest) = saved(backing, id)?;
     // Borrowed, not cloned: the values asked for may be as large as a request can be.
     let mut merged: BTreeMap<&str, &Value> = BTreeMap::new();
     for (key, value) in &saved {
@@ -150,7 +174,7 @@ fn patch_in(backing: &dyn Backing, id: &str, params: &Value) -> Result<Value, St
         }
     }
     let text = compact(&merged).ok_or_else(too_big)?;
-    backing.save(id, &record(&text))?;
+    backing.save(id, &record_with(&text, &rest)?)?;
     // Within the limit by now: cheap to own.
     Ok(Value::Object(merged.into_iter().map(|(k, v)| (k.to_string(), v.clone())).collect()))
 }
@@ -415,6 +439,11 @@ mod tests {
         assert_eq!(Value::Object(current(&b, "b").unwrap()), json!({}));
         set(&b, "b", json!({"unit": "ft"})).unwrap();
         assert_eq!(current(&b, "a").unwrap().get("unit"), None);
+        // Other keys of a saved record (put there by hand) are written back, not dropped.
+        b.saved.borrow_mut().insert("c".into(), "{\"version\":1,\"note\":\"by hand\",\"values\":{\"a\":1}}".into());
+        assert_eq!(set(&b, "c", json!({"b": 2})).unwrap(), json!({"a": 1, "b": 2}));
+        let saved: Value = serde_json::from_str(&b.saved.borrow()["c"]).unwrap();
+        assert_eq!(saved, json!({"version": 1, "values": {"a": 1, "b": 2}, "note": "by hand"}));
     }
 
     #[test]
