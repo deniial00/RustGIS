@@ -490,9 +490,10 @@ impl TileLayer {
         }
     }
 
-    /// Keeps the address it now shows among those a dated series has shown ([`TileLayer::headers_shown`]).
+    /// Keeps the address it now shows among those a dated series has shown ([`TileLayer::headers_shown`]):
+    /// a cloud-optimised GeoTIFF's only, whose header's losses are said once it lands.
     pub fn note_shown(&mut self) {
-        if self.headers_shown.len() < crate::time::MAX_STEPS && !self.headers_shown.contains(&self.url) {
+        if self.kind == TileKind::Cog && self.headers_shown.len() < crate::time::MAX_STEPS && !self.headers_shown.contains(&self.url) {
             self.headers_shown.push(self.url.clone());
         }
     }
@@ -781,6 +782,19 @@ mod tests {
         assert_eq!(TileKind::guess("https://example.com/tiles/{z}/{x}/{y}.pbf?key=1"), TileKind::Vector);
         assert_eq!(TileKind::guess("https://tiles.openfreemap.org/styles/liberty"), TileKind::Style);
         assert_eq!(TileKind::guess("https://api.maptiler.com/maps/streets/style.json?key=k"), TileKind::Style);
+    }
+
+    /// Only a cloud-optimised GeoTIFF's dates are kept as shown (their headers' losses are said once
+    /// they land, #1331): other dated tile layers keep none, however the slider moves.
+    #[test]
+    fn only_a_cogs_dates_are_kept_as_shown() {
+        let dates = vec![(1.0, "https://a.example.com/2000.tif".to_string()), (2.0, "https://a.example.com/2001.tif".to_string())];
+        for (kind, kept) in [(TileKind::Cog, 2), (TileKind::Raster, 0)] {
+            let mut t = TileLayer::new("Series", kind, "https://a.example.com/2000.tif");
+            t.time_urls = dates.clone();
+            t.apply_time(None);
+            assert_eq!(t.headers_shown.len(), kept, "{kind:?}: {:?}", t.headers_shown);
+        }
     }
 
     #[test]
