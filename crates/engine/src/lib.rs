@@ -2069,8 +2069,9 @@ impl Session {
         // doesn't draw starts no read. A dated series' other dates' files it has shown (the slider
         // moved on before a header landed, an export of the time steps) are looked at again only
         // when a header has landed since the last look; those then neither said nor being read
-        // (never asked for: drawn no more than the slider passing over them) are let go, so the
-        // list holds only reads under way.
+        // (not asked for yet: the slider passed over them, or their tiles still wait their turn)
+        // are let go, so the list holds only reads under way. A date let go draws nothing until it
+        // is shown again, and is said then, as the date shown.
         use render::rustgis_tiles::cog;
         let landed = cog::landed_count();
         let look_back = landed != self.cog_headers_seen;
