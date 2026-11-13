@@ -12258,6 +12258,10 @@ fn plugin_settings_are_kept_per_plugin_across_sessions_updates_and_toggles() {
     plugin("eng-set-b", &["edit"]);
     let read = |s: &mut Session, id: &str| forward(s, id, "host.settings", json!({}));
     let write = |s: &mut Session, id: &str, values: Value| forward(s, id, "host.setSettings", json!({"values": values}));
+    // A run before this one with the same process id may have left them.
+    for id in ["eng-set-a", "eng-set-b", "eng-set-bad"] {
+        let _ = std::fs::remove_file(plugin_settings_dir().join(format!("{id}.json")));
+    }
     assert_eq!(read(&mut s, "eng-set-a").unwrap(), json!({}));
     let saved = json!({"favourites": ["l:123", "l:456"], "unit": "m", "nested": {"x": null}});
     assert_eq!(write(&mut s, "eng-set-a", saved.clone()).unwrap(), saved);
@@ -12300,8 +12304,8 @@ fn plugin_settings_are_kept_per_plugin_across_sessions_updates_and_toggles() {
     assert_eq!(std::fs::read_to_string(&record).unwrap(), "{");
     for id in ["eng-set-a", "eng-set-b", "eng-set-bad"] {
         rustgis_plugins::unload(id);
+        let _ = std::fs::remove_file(plugin_settings_dir().join(format!("{id}.json")));
     }
-    let _ = std::fs::remove_file(&record);
 }
 
 #[test]

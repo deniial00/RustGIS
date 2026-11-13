@@ -731,7 +731,7 @@ copy of the project, so a tool's output must not depend on what was saved.
   RustGIS processes running at once (the desktop app and the command line) share the files: the
   last write wins.
 - The web app keeps them in the browser's localStorage (`rustgis.plugin-settings.<id>`); embedded
-  in another page, in memory for the visit.
+  in another page, in memory for the visit. Tabs of the same site share it: the last write wins.
 - Each is saved as `{"version": 1, "values": {...}}`. A RustGIS refuses settings saved by a newer
   one that it can't read (the request is an error) and never writes over them.
 - Settings that can't be read or saved (a damaged file, a full or blocked browser storage) make
