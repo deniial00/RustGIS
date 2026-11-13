@@ -465,6 +465,10 @@ impl TileLayer {
     pub fn apply_time(&mut self, time: Option<&crate::time::TimeSlider>) {
         let window = time.map(crate::time::TimeSlider::window);
         let current = time.map(|t| t.current);
+        // The date it leaves is kept too: its header's read may have started as it was drawn.
+        if !self.time_urls.is_empty() || self.time_url.is_some() {
+            self.note_shown();
+        }
         if !self.time_urls.is_empty() {
             let at = match window {
                 Some((from, to)) => self.time_urls.iter().rposition(|(d, _)| *d >= from && *d < to),

@@ -2549,9 +2549,11 @@ impl Session {
     /// whose header losses were said and the dates' addresses it has shown (neither is an undo
     /// step), found again on the map of its name by its kind and its name or file (a rename
     /// undone), so a file said since the restored copy was made isn't said again, and one shown
-    /// since is still said once its header lands.
+    /// since is still said once its header lands. The restored addresses are looked at again on
+    /// the next landing check, a header having landed meanwhile or not.
     fn keep_headers_said(&mut self, before: &Project) {
         use render::rustgis_tiles::cog::split;
+        self.cog_headers_seen = u64::MAX;
         let names: Vec<String> = self.project.maps.iter().map(|m| m.name.clone()).collect();
         for (i, m) in self.project.maps.iter_mut().enumerate() {
             // By its name, else (a map rename undone) the map in the same place, when no map of
