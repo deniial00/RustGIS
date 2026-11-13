@@ -23451,8 +23451,8 @@ fn a_dated_cog_series_says_each_dates_header_losses_once() {
         assert!(files(1)(&s), "the first date's header never landed");
         assert_eq!((said(&s), said_of(&s, "2000.tif")), (per_file, per_file), "{:?}", s.notices_since(mark));
         assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("hidden-1331")), "{:?}", s.notices_since(mark));
-        // An edit made before the next date is shown, then undone: the date said since isn't said
-        // again.
+        // An edit made, then the next date shown and said: undoing and redoing the edit (whose
+        // copy of the project predates that date) says nothing again.
         s.run("map.setTiles", &json!({"index": 0, "opacity": 0.5})).unwrap();
         s.run("time.goTo", &json!({"date": 2001})).unwrap();
         draw_until(&mut s, files(2));
@@ -23501,31 +23501,37 @@ fn a_dated_cog_series_says_a_date_whose_header_lands_after_the_slider_moved_on()
         draw_until(&mut s, files);
         assert!(files(&s), "a header never landed: {:?}", s.map().tiles[0].headers_said);
         assert_eq!((said_of(&s, "2000.tif"), said_of(&s, "2001.tif")), (per_file, per_file), "{:?}", s.notices_since(mark));
+        // Both said, nothing is kept waiting for them.
+        assert!(s.map().tiles[0].headers_shown.is_empty(), "{:?}", s.map().tiles[0].headers_shown);
     }
 }
 
 /// An export of a dated series' time steps draws each date's file, and says what each one's header
-/// leaves out, naming its file, once (the dates sharing a loss in one notice), though the slider is
-/// back at its first date after it (#1331).
+/// leaves out, naming its file, once for each loss (#1331); a clean series says nothing.
 #[test]
 fn exporting_a_dated_cog_series_says_each_dates_header_losses() {
     use rustgis_data::raster::cog::{Example, example_with};
     let lossy = example_with(&Example { size: 64, tile: 16, classes: true, lossy: true, ..Example::default() });
-    let (base, _) = serve_ranges(lossy);
-    let mut s = Session::new(Project::default());
-    let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2002});
-    s.run("map.addTiles", &p).unwrap();
-    let mark = s.notice_mark();
-    let zip = std::env::temp_dir().join(format!("rustgis-cog-series-{}.zip", std::process::id()));
-    let r = s.run("time.export", &json!({"path": zip.display().to_string(), "width": 64, "height": 48})).unwrap();
-    let _ = std::fs::remove_file(&zip);
-    assert_eq!(r["frames"], 3, "{r}");
-    s.notice_landed_rasters();
-    // Each date's file is named once for each of its losses: its short colour table, its CLASS_
-    // item, its class names not drawn.
-    let named = |s: &Session, file: &str| s.notices_since(mark).iter().filter(|n| n.text.contains(&format!("Series ({file})"))).count();
-    for file in ["2000.tif", "2001.tif", "2002.tif"] {
-        assert_eq!(named(&s, file), 3, "{file}: {:?}", s.notices_since(mark));
+    let clean = example_with(&Example { size: 64, tile: 16, ..Example::default() });
+    // A lossy file's lines: its short colour table, its CLASS_ item, its class names not drawn.
+    for (n, (file, per_file)) in [(lossy, 3), (clean, 0)].into_iter().enumerate() {
+        let (base, _) = serve_ranges(file);
+        let mut s = Session::new(Project::default());
+        let p = json!({"url": format!("{base}/{{YYYY}}.tif"), "kind": "cog", "name": "Series", "start": 2000, "end": 2002});
+        s.run("map.addTiles", &p).unwrap();
+        let mark = s.notice_mark();
+        let zip = std::env::temp_dir().join(format!("rustgis-cog-series-{}-{n}.zip", std::process::id()));
+        let r = s.run("time.export", &json!({"path": zip.display().to_string(), "width": 64, "height": 48})).unwrap();
+        let _ = std::fs::remove_file(&zip);
+        assert_eq!(r["frames"], 3, "{r}");
+        s.notice_landed_rasters();
+        let named = |s: &Session, file: &str| s.notices_since(mark).iter().filter(|n| n.text.contains(&format!("Series ({file})"))).count();
+        for file in ["2000.tif", "2001.tif", "2002.tif"] {
+            assert_eq!(named(&s, file), per_file, "{file}: {:?}", s.notices_since(mark));
+        }
+        if per_file == 0 {
+            assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("Series")), "{:?}", s.notices_since(mark));
+        }
     }
 }
 

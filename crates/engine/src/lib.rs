@@ -2083,7 +2083,7 @@ impl Session {
                 if dated && cog::info_loading(&t.url) {
                     t.note_shown();
                 }
-                let back = t.headers_shown.iter().filter(|u| look_back && **u != t.url);
+                let back = look_back.then_some(t.headers_shown.iter().filter(|u| **u != t.url)).into_iter().flatten();
                 // By its file: a look changed at the address's end (`#bands=…`) reads no new header.
                 let mut hits = Vec::new();
                 for address in std::iter::once(&t.url).chain(back) {
@@ -2099,10 +2099,12 @@ impl Session {
                     lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (shown.clone(), line)));
                 }
                 if look_back {
-                    // Kept while being read, or landed since this look (said on the next).
-                    let said = &t.headers_said;
-                    t.headers_shown
-                        .retain(|u| !said.iter().any(|f| f == cog::split(u).0) && (cog::info_loading(u) || cog::info_landed(u).is_some()));
+                    // Kept while unsaid and shown now (its read may start as it is drawn), being
+                    // read, or landed since this look (said on the next).
+                    let (said, now) = (&t.headers_said, &t.url);
+                    t.headers_shown.retain(|u| {
+                        !said.iter().any(|f| f == cog::split(u).0) && (u == now || cog::info_loading(u) || cog::info_landed(u).is_some())
+                    });
                 }
             }
         }

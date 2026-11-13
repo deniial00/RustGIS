@@ -4295,7 +4295,7 @@ pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer, address: &str) -
         Some((_, rest)) => rest.split_once('/').map_or("", |(_, path)| path),
         None => address,
     };
-    let file: String = path.rsplit('/').next().unwrap_or_default().chars().take(80).collect();
+    let file: String = path.rsplit(['/', '\\']).next().unwrap_or_default().chars().take(80).collect();
     if file.is_empty() { t.name.clone() } else { format!("{} ({file})", t.name) }
 }
 
