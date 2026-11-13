@@ -785,15 +785,21 @@ mod tests {
     }
 
     /// Only a cloud-optimised GeoTIFF's dates are kept as shown (their headers' losses are said once
-    /// they land, #1331): other dated tile layers keep none, however the slider moves.
+    /// they land, #1331): the date it leaves and the one it goes to, from a list or a template;
+    /// other dated tile layers keep none, however the slider moves.
     #[test]
     fn only_a_cogs_dates_are_kept_as_shown() {
-        let dates = vec![(1.0, "https://a.example.com/2000.tif".to_string()), (2.0, "https://a.example.com/2001.tif".to_string())];
-        for (kind, kept) in [(TileKind::Cog, 2), (TileKind::Raster, 0)] {
-            let mut t = TileLayer::new("Series", kind, "https://a.example.com/2000.tif");
-            t.time_urls = dates.clone();
+        let (a, b) = ("https://a.example.com/2000.tif".to_string(), "https://a.example.com/2001.tif".to_string());
+        for (kind, kept) in [(TileKind::Cog, vec![a.clone(), b.clone()]), (TileKind::Raster, Vec::new())] {
+            let mut t = TileLayer::new("Series", kind, a.clone());
+            t.time_urls = vec![(1.0, a.clone()), (2.0, b.clone())];
             t.apply_time(None);
-            assert_eq!(t.headers_shown.len(), kept, "{kind:?}: {:?}", t.headers_shown);
+            assert_eq!(t.headers_shown, kept, "{kind:?}");
+            // A template: the address it fills in for its date is kept too.
+            let mut t = TileLayer::new("Series", kind, a.clone());
+            t.time_url = Some("https://a.example.com/{YYYY}.tif".into());
+            t.apply_time(None);
+            assert_eq!(t.headers_shown.contains(&t.url), kind == TileKind::Cog, "{kind:?}: {:?}", t.headers_shown);
         }
     }
 
