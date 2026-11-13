@@ -383,6 +383,11 @@ pub fn info_landed(url: &str) -> Option<Arc<Info>> {
     }
 }
 
+/// Whether a file's header is being read now (asked for, not in yet), without asking for it.
+pub fn info_loading(url: &str) -> bool {
+    matches!(infos().lock().unwrap_or_else(|e| e.into_inner()).get(split(url).0), Some(State::Loading(_)))
+}
+
 /// How many headers have landed in this run: what looks for headers landed since it last looked
 /// (the files a dated series showed before the slider moved on) looks again only when it changes.
 static LANDED: AtomicU64 = AtomicU64::new(0);

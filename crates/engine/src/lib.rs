@@ -2068,17 +2068,19 @@ impl Session {
         // asked for by the map drawing or exporting it, or by adding it, not here: a layer the map
         // doesn't draw starts no read. A dated series' other dates' files it has shown (the slider
         // moved on before a header landed, an export of the time steps) are looked at again only
-        // when a header has landed since the last look.
+        // when a header has landed since the last look; those then neither said nor being read
+        // (never asked for: drawn no more than the slider passing over them) are let go, so the
+        // list holds only reads under way.
         use render::rustgis_tiles::cog;
         let landed = cog::landed_count();
         let look_back = landed != self.cog_headers_seen;
         self.cog_headers_seen = landed;
         for m in &mut self.project.maps {
             for t in m.tiles.iter_mut().filter(|t| t.kind == rustgis_map::tiles::TileKind::Cog) {
-                // The address shown now is kept among those shown, whatever showed it (a dated
-                // series added, its project opened), while its header hasn't been said.
+                // The address shown now, while its header is being read, is kept among those shown,
+                // whatever showed it (a dated series added, its project opened).
                 let dated = t.time_url.is_some() || !t.time_urls.is_empty();
-                if dated && !t.headers_said.iter().any(|f| f == cog::split(&t.url).0) {
+                if dated && cog::info_loading(&t.url) {
                     t.note_shown();
                 }
                 let back = t.headers_shown.iter().filter(|u| look_back && **u != t.url);
@@ -2095,6 +2097,12 @@ impl Session {
                 for (file, shown, info) in hits {
                     t.headers_said.push(file);
                     lost.extend(cmd::layer::cog_tile_losses(&info).into_iter().map(|line| (shown.clone(), line)));
+                }
+                if look_back {
+                    // Kept while being read, or landed since this look (said on the next).
+                    let said = &t.headers_said;
+                    t.headers_shown
+                        .retain(|u| !said.iter().any(|f| f == cog::split(u).0) && (cog::info_loading(u) || cog::info_landed(u).is_some()));
                 }
             }
         }

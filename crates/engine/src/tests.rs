@@ -23490,9 +23490,11 @@ fn a_dated_cog_series_says_a_date_whose_header_lands_after_the_slider_moved_on()
         // Named by their files, alone or together (dates landing in one frame share a notice).
         let said_of =
             |s: &Session, file: &str| s.notices_since(mark).iter().filter(|n| n.text.contains(&format!("Series ({file})"))).count();
-        // 2000 is drawn (its header asked for), and the slider moves on before the header is in.
+        // 2000 is drawn for a frame (its header asked for, the frame's landing check run), and the
+        // slider moves on before the header is in.
         let url = s.map().tiles[0].url.clone();
         assert!(matches!(crate::render::rustgis_tiles::cog::info(&url), Ok(None)), "2000's header is in already");
+        s.notice_landed_rasters();
         s.run("time.goTo", &json!({"date": 2001})).unwrap();
         gate.store(true, Ordering::Relaxed);
         let files = |s: &Session| s.map().tiles.first().is_some_and(|t| t.headers_said.len() >= 2);
