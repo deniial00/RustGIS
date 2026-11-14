@@ -75,24 +75,56 @@ pub fn normalized_name(raw: &str) -> Option<String> {
     decoded_name(raw).map(|s| letters(&s))
 }
 
+/// The query parameter names (letters and digits, lower case) saved web-service connections send
+/// their API key in, at most [`MAX_LOGIN_NAMES`]: names only, never a key. A query that carries
+/// one is read as holding a credential, though the name alone doesn't say so (`?layer=…` isn't
+/// one until a login names it). Held for this run; saved connections register theirs when they
+/// are read, added or changed.
+static LOGIN_NAMES: std::sync::RwLock<std::collections::BTreeSet<String>> = std::sync::RwLock::new(std::collections::BTreeSet::new());
+
+/// How many names [`note_login_query_name`] holds.
+pub const MAX_LOGIN_NAMES: usize = 256;
+
+/// Remembers that `name` is where a web-service login sends its key (see [`LOGIN_NAMES`]):
+/// whether it is held. A name without a letter or digit, or a new one once [`MAX_LOGIN_NAMES`]
+/// are held, is not, and the caller refuses the login rather than send a key that addresses
+/// wouldn't be redacted of.
+pub fn note_login_query_name(name: &str) -> bool {
+    let name = letters(name.as_bytes());
+    if name.is_empty() {
+        return false;
+    }
+    let mut names = LOGIN_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    if names.contains(&name) {
+        return true;
+    }
+    names.len() < MAX_LOGIN_NAMES && names.insert(name)
+}
+
 /// Context is collected from decoded query names, including legacy semicolon-separated pairs.
 #[derive(Default)]
 pub struct QueryNames {
     sig: bool,
     sv: bool,
     state: bool,
+    /// Names of this query that a web-service login sends its key in.
+    login: Vec<String>,
 }
 
 impl QueryNames {
     /// Collects context flags without decoding values or retaining query payloads.
     pub fn of(query: &str) -> Self {
         let mut names = Self::default();
+        let login = LOGIN_NAMES.read().unwrap_or_else(|e| e.into_inner());
         for pair in query.split(['&', ';']) {
             if let Some(decoded) = decoded_name(pair_name(pair)) {
                 let k = letters(decoded.split(|b| *b == b'=').next().unwrap_or(&decoded));
                 names.sig |= k == "sig";
                 names.sv |= k == "sv";
                 names.state |= k == "state";
+                if login.contains(&k) && !names.login.contains(&k) {
+                    names.login.push(k);
+                }
             }
         }
         names
@@ -124,6 +156,7 @@ fn credential(k: &str, query: &QueryNames) -> bool {
         .iter()
         .any(|w| k.contains(w))
         || (query.sig && query.sv && SAS_KEYS.contains(&k))
+        || query.login.iter().any(|name| name == k)
         || (k == "code" && query.state)
 }
 
@@ -534,6 +567,25 @@ fn inherit_reviewed(from: &str, to: &str, relation: Relation, skip: &[&str], rev
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Once the run holds as many login parameter names as it can, a new one is refused (so its
+    /// login is), never silently left unredacted; a held one is still accepted.
+    #[test]
+    fn login_query_names_beyond_the_limit_are_refused_not_dropped() {
+        assert!(note_login_query_name("zq_fill_0"));
+        assert!(!note_login_query_name("_-.~"));
+        for i in 0..MAX_LOGIN_NAMES {
+            note_login_query_name(&format!("zqfill{i}"));
+        }
+        assert!(!note_login_query_name("zq-refused-name"));
+        let mut refused = "https://h.invalid/p?zqrefusedname=RGSYNTH_key".to_string();
+        redact_query(&mut refused);
+        assert!(refused.contains("RGSYNTH_key"), "a refused name is not marked: {refused}");
+        assert!(note_login_query_name("ZQFill0"), "a held name is still accepted");
+        let mut held = "https://h.invalid/p?zqfill0=RGSYNTH_key&a=1".to_string();
+        redact_query(&mut held);
+        assert_eq!(held, "https://h.invalid/p?a=1");
+    }
 
     #[test]
     fn canonical_names_remove_encoded_and_unresolved_pairs_without_touching_values() {

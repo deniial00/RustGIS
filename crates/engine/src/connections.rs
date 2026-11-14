@@ -28,8 +28,8 @@ pub const DATABASE_KINDS: &[&str] = &["postgres", "mysql", "sqlserver"];
 /// The web-service kinds, which can log in with a [`SERVICE_AUTH`] method.
 pub const SERVICE_KINDS: &[&str] = &["service", "wms", "wmts", "wfs", "wcs", "ogcapi", "arcgis", "csw", "stac"];
 /// How a web-service connection logs in: not at all, HTTP basic authentication (a user name and a
-/// password), or an API key in a header.
-pub const SERVICE_AUTH: &[&str] = &["none", "basic", "header"];
+/// password), an API key in a header, or an API key in a query parameter.
+pub const SERVICE_AUTH: &[&str] = &["none", "basic", "header", "query"];
 /// The kind of a [`LoginRequest`] for a web service's origin (its `key`).
 pub const WEB: &str = "web";
 pub const S3_CREDENTIALS: &[&str] = &["keys", "profile", "environment", "none"];
@@ -68,7 +68,7 @@ pub struct Connection {
     /// The user name of a basic-authentication login.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
-    /// The header an API key goes in (`auth` header).
+    /// The header (`auth` header) or query parameter (`auth` query) an API key goes in.
     #[serde(default, rename = "keyName", skip_serializing_if = "String::is_empty")]
     pub key_name: String,
 }
@@ -220,8 +220,10 @@ fn name_text(t: &str) -> String {
     t.trim().chars().filter(|c| !c.is_control()).take(MAX_NAME).collect()
 }
 
-/// Checks a connection's login method and the fields it uses.
-fn clean_login(c: &mut Connection) -> Result<(), String> {
+/// Checks a connection's login method ([`SERVICE_AUTH`]) and the fields it uses, leaving out what
+/// the method doesn't use. A query login's parameter is taken out of the address (the key is given
+/// to the login, never kept there): whether it was.
+fn clean_login(c: &mut Connection) -> Result<bool, String> {
     use crate::render::rustgis_tiles::logins;
     let auth = c.auth.trim().to_ascii_lowercase();
     c.auth = if auth == "none" { String::new() } else { auth };
@@ -230,7 +232,7 @@ fn clean_login(c: &mut Connection) -> Result<(), String> {
     if c.auth.is_empty() {
         c.user.clear();
         c.key_name.clear();
-        return Ok(());
+        return Ok(false);
     }
     if !SERVICE_KINDS.contains(&c.kind.as_str()) {
         return Err(format!("auth is for web-service connections ({}), not {}", SERVICE_KINDS.join(", "), c.kind));
@@ -243,7 +245,7 @@ fn clean_login(c: &mut Connection) -> Result<(), String> {
                     "basic authentication needs a user of at most {MAX_NAME} characters, without ':' or control characters"
                 ));
             }
-            Ok(())
+            Ok(false)
         }
         "header" => {
             c.user.clear();
@@ -253,10 +255,50 @@ fn clean_login(c: &mut Connection) -> Result<(), String> {
                     logins::MAX_NAME
                 ));
             }
-            Ok(())
+            Ok(false)
+        }
+        "query" => {
+            c.user.clear();
+            if !logins::valid_query_name(&c.key_name) {
+                return Err(format!(
+                    "keyName must be a query parameter name of at most {} letters, digits or one of -_.~, with a letter or digit",
+                    logins::MAX_NAME
+                ));
+            }
+            // Names only: an address that carries this parameter is a key, whatever it is called.
+            if !rustgis_data::address::note_login_query_name(&c.key_name) {
+                return Err(logins::TOO_MANY_QUERY_NAMES.into());
+            }
+            let kept = logins::without_query_parameter(&c.address, &c.key_name);
+            let stripped = kept != c.address;
+            c.address = kept;
+            Ok(stripped)
         }
         other => Err(format!("unknown auth '{other}' ({})", SERVICE_AUTH.join(", "))),
     }
+}
+
+/// The names (never the values) of the query parameters `given` had that `saved` lacks, which a
+/// query login can carry: the keys an address held and saving left out, to offer as the login's
+/// parameter. At most four, each once.
+pub fn stripped_parameters(given: &str, saved: &str) -> Vec<String> {
+    use crate::render::rustgis_tiles::logins;
+    fn names(address: &str) -> Vec<&str> {
+        let query = address.split('#').next().and_then(|a| a.split_once('?')).map_or("", |(_, query)| query);
+        query.split('&').filter_map(|pair| pair.split('=').next()).filter(|name| !name.is_empty()).collect()
+    }
+    let kept = names(saved);
+    let mut left_out: Vec<String> = Vec::new();
+    for name in names(given) {
+        if left_out.len() < 4
+            && logins::valid_query_name(name)
+            && !kept.contains(&name)
+            && !left_out.iter().any(|known| known.eq_ignore_ascii_case(name))
+        {
+            left_out.push(name.to_string());
+        }
+    }
+    left_out
 }
 
 /// The origin (`scheme://host[:port]`) a web-service connection's login goes to: the only one.
@@ -299,7 +341,7 @@ pub fn clean(mut c: Connection) -> Result<(Connection, bool), String> {
         }
     }
     c.address = stored;
-    clean_login(&mut c)?;
+    let stripped = clean_login(&mut c)? || stripped;
     c.name = name_text(&c.name);
     if c.name.is_empty() {
         c.name = if c.kind == "s3" && c.address.is_empty() { "AWS S3".into() } else { sources::default_name(&c.address) };
@@ -426,7 +468,10 @@ impl Connections {
         s.kept.top = s.kept.without_secrets(o, "");
         let mut ids = BTreeSet::new();
         for row in rows {
-            let read = serde_json::from_value::<Row>(row.clone()).ok().and_then(|r| {
+            // A row past the limit isn't cleaned: it is kept as it was, and its login's parameter name
+            // takes no place among those held for redaction (see `note_login_query_name`).
+            let over_limit = s.connections.len() >= MAX_CONNECTIONS;
+            let read = serde_json::from_value::<Row>(row.clone()).ok().filter(|_| !over_limit).and_then(|r| {
                 let name = r.connection.name.trim().to_string();
                 let group = r.connection.group.trim().to_string();
                 let (c, stripped) = clean(r.connection).ok()?;
@@ -441,8 +486,6 @@ impl Connections {
                     && c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                     && !ids.contains(&c.id)
             });
-            let over_limit = read.is_some() && s.connections.len() >= MAX_CONNECTIONS;
-            let read = read.filter(|_| !over_limit);
             let id = match &read {
                 Some(((c, _), _)) => c.id.clone(),
                 None => row.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -1332,6 +1375,33 @@ mod tests {
         let mut s = Connections::from_json(&twice.to_string());
         s.remove("c1");
         assert!(Connections::from_json(&s.to_json()).connections.is_empty() && !s.to_json().contains("\"c1\""), "{}", s.to_json());
+    }
+
+    /// A saved query login that can't be read (here a parameter name redaction couldn't recognize)
+    /// is kept and said, and rows past the connection limit are not cleaned, so their parameter
+    /// names take no place among those held for redaction.
+    #[test]
+    fn query_login_rows_refused_or_past_the_limit_are_said_and_hold_no_name() {
+        let query = |i: usize, key: &str| json!({"id": format!("c{i}"), "name": format!("Q{i}"), "kind": "wmts", "address": "https://limit757.example/wmts", "auth": "query", "keyName": key});
+        let mut rows = vec![query(1, "_")];
+        rows.extend((2..=MAX_CONNECTIONS + 1).map(|i| query(i, "zqshared757")));
+        rows.push(query(MAX_CONNECTIONS + 2, "zqbeyond757"));
+        let s = Connections::from_json(&json!({ "connections": rows }).to_string());
+        assert_eq!(s.connections.len(), MAX_CONNECTIONS);
+        let said = s.unread();
+        assert!(said.iter().any(|t| t.starts_with("1 saved connection couldn't be read")), "{said:?}");
+        assert!(
+            said.iter().any(|t| t.starts_with(&format!("1 saved connection is past the {MAX_CONNECTIONS}-connection limit"))),
+            "{said:?}"
+        );
+        let text = s.to_json();
+        assert!(text.contains("zqbeyond757") && text.contains("\"c1\""), "kept as they were: {text}");
+        let mut beyond = "https://limit757.example/wmts?zqbeyond757=RGSYNTH_v".to_string();
+        rustgis_data::address::redact_query(&mut beyond);
+        assert!(beyond.contains("RGSYNTH_v"), "a row past the limit registered its name: {beyond}");
+        let mut shared = "https://limit757.example/wmts?zqshared757=RGSYNTH_v&a=1".to_string();
+        rustgis_data::address::redact_query(&mut shared);
+        assert_eq!(shared, "https://limit757.example/wmts?a=1");
     }
 
     /// A preference from a newer RustGIS, or one that can't be read at all, isn't used: it is said,
