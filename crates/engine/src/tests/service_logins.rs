@@ -2086,3 +2086,103 @@ fn query_login_parameters_never_panic() {
         }
     }
 }
+
+#[test]
+fn later_query_add_and_edit_report_existing_saved_secret_removals() {
+    for edit in [false, true] {
+        for lossy in [false, true] {
+            let key = format!("zqsessionrefresh757{}{}", usize::from(edit), usize::from(lossy));
+            let endpoint = if lossy {
+                format!("https://session-refresh757.example/wmts?{key}=RGSYNTH_late_session&layer=a")
+            } else {
+                "https://session-refresh757.example/wmts?layer=a".to_string()
+            };
+            let future = json!({"id":"future","name":"Future","kind":"future","address":endpoint,"choice":17});
+            let safe =
+                json!({"id":"safe","name":"Safe","kind":"future","address":"https://session-refresh757.example/wmts?layer=a","choice":23});
+            let prefs = json!({
+                "futureEndpoint":endpoint,"futureClean":{"folded":["c1"]},
+                "connections":[
+                    {"id":"c1","name":"Earlier plain","kind":"wmts","address":endpoint,"futureEndpoint":endpoint,"futureClean":31},
+                    {"id":"c2","name":"Target","kind":"wmts","address":"https://session-refresh757.example/target"},
+                    future,safe
+                ]
+            });
+            let mut s = session(None);
+            s.load_connections(&prefs.to_string());
+            assert!(s.connections.to_json().contains("futureEndpoint"));
+            if lossy {
+                assert!(s.connections.to_json().contains("RGSYNTH_late_session"), "name is not recognized before acceptance");
+            }
+            let mark = s.notice_mark();
+            let accepted = if edit {
+                s.run("connection.edit", &json!({"id":"c2","auth":"query","keyName":key})).unwrap()
+            } else {
+                s.run(
+                    "connection.new",
+                    &json!({"name":"Query","kind":"wmts","address":"https://session-refresh757.example/target","auth":"query","keyName":key}),
+                )
+                .unwrap()
+            };
+            let notices = s.notices_since(mark);
+            if lossy {
+                assert_eq!(notices.len(), 2, "{notices:?}");
+                assert!(notices.iter().any(|n| n.text.starts_with("1 saved connection address had a password, key or token removed")));
+                assert!(notices.iter().any(|n| n.text.starts_with("3 entries of the saved connections were dropped")));
+            } else {
+                assert!(notices.is_empty(), "{notices:?}");
+            }
+            let saved = s.connections.to_json();
+            let output: Value = serde_json::from_str(&saved).unwrap();
+            assert_eq!(s.connections.find("c1").unwrap().address, "https://session-refresh757.example/wmts?layer=a");
+            assert_eq!(output["futureClean"], prefs["futureClean"]);
+            assert_eq!(output["connections"][0]["futureClean"], 31);
+            assert!(output["connections"].as_array().unwrap().contains(&safe));
+            if lossy {
+                assert!(!format!("{saved}{accepted}{notices:?}").contains("RGSYNTH_late_session"));
+                assert!(output.get("futureEndpoint").is_none());
+                assert!(output["connections"][0].get("futureEndpoint").is_none());
+                assert!(!output["connections"].as_array().unwrap().contains(&future));
+            } else {
+                assert_eq!(output["futureEndpoint"], prefs["futureEndpoint"]);
+                assert_eq!(output["connections"][0]["futureEndpoint"], prefs["connections"][0]["futureEndpoint"]);
+                assert!(output["connections"].as_array().unwrap().contains(&future));
+            }
+            // No repeated loss notice when the same accepted query definition is edited again.
+            let mark = s.notice_mark();
+            s.run("connection.edit", &json!({"id":accepted["id"],"name":"Renamed query"})).unwrap();
+            assert!(s.notices_since(mark).is_empty());
+        }
+    }
+}
+
+#[test]
+fn refused_literal_plus_query_rows_report_drops_without_losing_clean_unknowns() {
+    for lossy in [false, true] {
+        let endpoint = if lossy {
+            "https://plus-session757.example/wmts?zq%2Bcustomsession757=RGSYNTH_refused_session_plus&layer=a"
+        } else {
+            "https://plus-session757.example/wmts?zqcustomsession757=dataset&layer=a"
+        };
+        let row = json!({
+            "id":"plus","name":"Unsupported plus","kind":"wmts","address":endpoint,
+            "auth":"query","keyName":"zq+customsession757","futureClean":{"choice":13}
+        });
+        let mut s = session(None);
+        let mark = s.notice_mark();
+        s.load_connections(&json!({"connections":[row]}).to_string());
+        assert!(s.connections.connections.is_empty());
+        let notices = s.notices_since(mark);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let saved = s.connections.to_json();
+        if lossy {
+            assert!(notices[0].text.starts_with("1 entry of the saved connections was dropped"));
+            assert!(!format!("{saved}{notices:?}").contains("RGSYNTH_refused_session_plus"));
+        } else {
+            assert!(notices[0].text.starts_with("1 saved connection couldn't be read"));
+            assert!(!notices[0].text.contains("dropped"));
+            let output: Value = serde_json::from_str(&saved).unwrap();
+            assert_eq!(output["connections"][0], row);
+        }
+    }
+}

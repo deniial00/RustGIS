@@ -211,7 +211,11 @@ fn new(s: &mut Session, p: &Value) -> CmdResult {
     };
     login_fields(p, &mut c)?;
     let explicit = !c.name.trim().is_empty();
+    let redactions = s.connections.redaction_counts();
     let (c, stripped) = s.connections.add(c, explicit)?;
+    for said in s.connections.redaction_notices_since(redactions) {
+        s.warn(said);
+    }
     resolve_keys(s, &address_keys(&c.address));
     resolve_origins(s, &[&c]);
     Ok(shown_stripped(s, &c, stripped, ps(p, "address").unwrap_or("")))
@@ -268,6 +272,7 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
             && (endpoint_changed(&old, &prepared)
                 || (old.options.get("credentials").is_some_and(|v| v == "keys")
                     && prepared.options.get("credentials").is_none_or(|v| v != "keys"))));
+    let redactions = s.connections.redaction_counts();
     let slot = s.connections.connections.iter_mut().find(|c| c.id == old.id).ok_or("connection no longer exists")?;
     crate::connections::register_query_name(&prepared)?;
     if credentials_changed {
@@ -276,6 +281,12 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
         prepared.remembered = false;
     }
     let c = crate::connections::Connections::commit_update(slot, &mut s.connections.generation, prepared);
+    if c.auth == "query" {
+        s.connections.refresh_redaction();
+    }
+    for said in s.connections.redaction_notices_since(redactions) {
+        s.warn(said);
+    }
     if database_changed {
         clear_identity(s, &old.id);
     }
@@ -309,7 +320,11 @@ fn duplicate(s: &mut Session, p: &Value) -> CmdResult {
         c.name = name.into();
     }
     // A copy has no saved keys: `add` starts it without any.
+    let redactions = s.connections.redaction_counts();
     let (c, _) = s.connections.add(c, explicit)?;
+    for said in s.connections.redaction_notices_since(redactions) {
+        s.warn(said);
+    }
     resolve_keys(s, &address_keys(&c.address));
     resolve_origins(s, &[&c]);
     Ok(shown(s, &c))

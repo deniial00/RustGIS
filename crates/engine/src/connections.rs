@@ -97,9 +97,7 @@ struct Kept {
     /// and why: no connection of it is used, and it is never written over.
     whole: Option<(String, String)>,
     /// Rows that couldn't be read (an unknown kind, a bad id…) or are past [`MAX_CONNECTIONS`].
-    rows: Vec<Value>,
-    /// How many of `rows` are readable but past [`MAX_CONNECTIONS`].
-    over_limit: usize,
+    rows: Vec<KeptRow>,
     /// The ids those rows carry, which a new connection never takes.
     ids: BTreeSet<String>,
     /// Fields of read connections this version doesn't know, by connection id.
@@ -114,6 +112,12 @@ struct Kept {
     /// Readable rows whose name or group was cut (past [`MAX_NAME`] characters, or with control
     /// characters).
     cut: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct KeptRow {
+    value: Value,
+    over_limit: bool,
 }
 
 impl Kept {
@@ -490,10 +494,8 @@ impl Connections {
         let mut pending_rows = Vec::new();
         let mut stripped_flags = Vec::new();
         for row in rows {
-            // A row past the limit isn't cleaned: it is kept as it was, and its login's parameter name
-            // takes no place among those held for redaction (see `note_login_query_name`).
-            let over_limit = s.connections.len() >= MAX_CONNECTIONS;
-            let read = serde_json::from_value::<Row>(row.clone()).ok().filter(|_| !over_limit).and_then(|r| {
+            // Readability is checked even past the limit, without registering the login's name.
+            let read = serde_json::from_value::<Row>(row.clone()).ok().and_then(|r| {
                 let name = r.connection.name.trim().to_string();
                 let group = r.connection.group.trim().to_string();
                 let (c, stripped) = clean(r.connection).ok()?;
@@ -508,7 +510,8 @@ impl Connections {
                     && c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                     && !ids.contains(&c.id)
             });
-            let read = read.filter(|((c, _), _)| register_query_name(c).is_ok());
+            let over_limit = read.is_some() && s.connections.len() >= MAX_CONNECTIONS;
+            let read = read.filter(|_| !over_limit).filter(|((c, _), _)| register_query_name(c).is_ok());
             let id = match &read {
                 Some(((c, _), _)) => c.id.clone(),
                 None => row.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -551,11 +554,11 @@ impl Connections {
             if sources::holds_secret(&row) {
                 s.kept.secrets += 1;
             } else {
-                s.kept.over_limit += usize::from(over_limit);
+                // Keep the readability reason with the row if later redaction removes others.
                 if !id.is_empty() {
                     s.kept.ids.insert(id);
                 }
-                s.kept.rows.push(row);
+                s.kept.rows.push(KeptRow { value: row, over_limit });
             }
         }
         // All IDs must be known before a name is accepted: a later row can reserve it.
@@ -578,16 +581,17 @@ impl Connections {
             return vec![format!("No saved connection is used, and none can be added: {why}. They are kept as they are.")];
         }
         let mut said = Vec::new();
-        if k.rows.len() > k.over_limit {
-            let n = k.rows.len() - k.over_limit;
+        let over_limit = k.rows.iter().filter(|row| row.over_limit).count();
+        if k.rows.len() > over_limit {
+            let n = k.rows.len() - over_limit;
             said.push(format!(
                 "{n} saved connection{} couldn't be read (from a newer RustGIS, or damaged): not listed, and kept as {} when connections are saved",
                 if n == 1 { "" } else { "s" },
                 if n == 1 { "it was" } else { "they were" }
             ));
         }
-        if k.over_limit > 0 {
-            let n = k.over_limit;
+        if over_limit > 0 {
+            let n = over_limit;
             said.push(format!(
                 "{n} saved connection{} past the {MAX_CONNECTIONS}-connection limit: not listed, and kept as {} when connections are saved",
                 if n == 1 { " is" } else { "s are" },
@@ -601,14 +605,6 @@ impl Connections {
                 if n == 1 { " has" } else { "s have" }
             ));
         }
-        if k.stripped > 0 {
-            let n = k.stripped;
-            said.push(format!(
-                "{n} saved connection address{} had a password, key or token removed: saved without {}",
-                if n == 1 { "" } else { "es" },
-                if n == 1 { "it" } else { "them" }
-            ));
-        }
         if k.cut > 0 {
             let n = k.cut;
             said.push(format!(
@@ -617,16 +613,74 @@ impl Connections {
                 if n == 1 { " was" } else { "s were" }
             ));
         }
-        if k.secrets > 0 {
-            let n = k.secrets;
+        said.extend(self.redaction_notices_since((0, 0)));
+        said
+    }
+
+    /// Counts already reported on load, so a command reports only its newly removed secrets.
+    pub(crate) fn redaction_counts(&self) -> (usize, usize) {
+        (self.kept.stripped, self.kept.secrets)
+    }
+
+    pub(crate) fn redaction_notices_since(&self, before: (usize, usize)) -> Vec<String> {
+        let mut said = Vec::new();
+        let (addresses, entries) = self.redaction_counts();
+        let addresses = addresses.saturating_sub(before.0);
+        let entries = entries.saturating_sub(before.1);
+        if addresses > 0 {
             said.push(format!(
-                "{n} entr{} of the saved connections {} dropped because {} held a password, key or token",
-                if n == 1 { "y" } else { "ies" },
-                if n == 1 { "was" } else { "were" },
-                if n == 1 { "it" } else { "they" }
+                "{addresses} saved connection address{} had a password, key or token removed: saved without {}",
+                if addresses == 1 { "" } else { "es" },
+                if addresses == 1 { "it" } else { "them" }
+            ));
+        }
+        if entries > 0 {
+            said.push(format!(
+                "{entries} entr{} of the saved connections {} dropped because {} held a password, key or token",
+                if entries == 1 { "y" } else { "ies" },
+                if entries == 1 { "was" } else { "were" },
+                if entries == 1 { "it" } else { "they" }
             ));
         }
         said
+    }
+
+    /// A newly accepted query name can identify secrets in earlier addresses and opaque settings.
+    /// Refresh those owners before saving; previews and rejected definitions never reach here.
+    pub(crate) fn refresh_redaction(&mut self) {
+        if self.kept.whole.is_some() {
+            return;
+        }
+        for c in &mut self.connections {
+            let address = sources::redact(&c.address);
+            self.kept.stripped += usize::from(address != c.address);
+            c.address = address;
+        }
+        let top = std::mem::take(&mut self.kept.top);
+        self.kept.top = self.kept.without_secrets(top, "");
+        let fields = std::mem::take(&mut self.kept.fields);
+        for (id, other) in fields {
+            let address = self.connections.iter().find(|c| c.id == id).map_or("", |c| c.address.as_str());
+            let other = self.kept.without_secrets(other, address);
+            if !other.is_empty() {
+                self.kept.fields.insert(id, other);
+            }
+        }
+        let mut dropped = 0;
+        self.kept.rows.retain(|row| {
+            let secret = sources::holds_secret(&row.value);
+            dropped += usize::from(secret);
+            !secret
+        });
+        self.kept.secrets += dropped;
+        if dropped > 0 {
+            self.kept.ids = self
+                .kept
+                .rows
+                .iter()
+                .filter_map(|row| row.value.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned))
+                .collect();
+        }
     }
 
     pub fn import(saved: &Sources, s3_saved: &str) -> Self {
@@ -695,7 +749,7 @@ impl Connections {
             }
             rows.push(row);
         }
-        rows.extend(self.kept.rows.iter().cloned());
+        rows.extend(self.kept.rows.iter().map(|row| row.value.clone()));
         let mut o = self.kept.top.clone();
         o.insert("version".into(), json!(VERSION));
         o.insert("next".into(), json!(self.next));
@@ -762,6 +816,9 @@ impl Connections {
         // A new connection, a copy or an import has no saved password: it is saved by a login.
         c.remembered = false;
         self.connections.push(c.clone());
+        if c.auth == "query" {
+            self.refresh_redaction();
+        }
         self.version = 1;
         self.generation = self.generation.wrapping_add(1);
         Ok((c, stripped))
@@ -794,6 +851,7 @@ impl Connections {
     }
 
     /// Commits to a target located before credential deletion. No lookup or validation remains.
+    /// The caller refreshes retained redaction after committing a query login.
     pub(crate) fn commit_update(slot: &mut Connection, generation: &mut u64, c: Connection) -> Connection {
         *slot = c.clone();
         *generation = generation.wrapping_add(1);
@@ -804,7 +862,11 @@ impl Connections {
         let (c, stripped) = self.prepare_update(id, c)?;
         register_query_name(&c)?;
         let slot = self.connections.iter_mut().find(|slot| slot.id == id).ok_or_else(|| format!("no connection '{id}'"))?;
-        Ok((Self::commit_update(slot, &mut self.generation, c), stripped))
+        let c = Self::commit_update(slot, &mut self.generation, c);
+        if c.auth == "query" {
+            self.refresh_redaction();
+        }
+        Ok((c, stripped))
     }
 
     /// Records whether connection `id` has saved keys (the marker): after a store call said so.
@@ -823,7 +885,7 @@ impl Connections {
         let index = self.connections.iter().position(|c| c.id == id)?;
         let c = self.connections.remove(index);
         self.kept.fields.remove(id);
-        self.kept.rows.retain(|row| row.get("id").and_then(Value::as_str) != Some(id));
+        self.kept.rows.retain(|row| row.value.get("id").and_then(Value::as_str) != Some(id));
         self.kept.ids.remove(id);
         self.generation = self.generation.wrapping_add(1);
         Some(c)
@@ -1443,6 +1505,7 @@ mod tests {
         let mut preview = accepted.clone();
         preview.key_name = "zqpreview757".into();
         s.prepare_update(&accepted.id, preview).unwrap();
+        clean(make("Clean preview", "zqcleanpreview757")).unwrap();
         let rows = json!({"connections":[
             {"id":"same","name":"Accepted row","kind":"wmts","address":"https://rejected757.example/wmts","auth":"query","keyName":"zqrowaccepted757"},
             {"id":"same","name":"Duplicate row","kind":"wmts","address":"https://rejected757.example/wmts","auth":"query","keyName":"zqduplicaterow757"},
@@ -1451,7 +1514,15 @@ mod tests {
         let loaded = Connections::from_json(&rows.to_string());
         assert_eq!(loaded.connections.len(), 1);
         assert!(loaded.unread().iter().any(|t| t.starts_with("2 saved connections couldn't be read")));
-        for key in ["zqduplicateadd757", "zqmissingedit757", "zqduplicateedit757", "zqpreview757", "zqduplicaterow757", "zqinvalidrow757"] {
+        for key in [
+            "zqduplicateadd757",
+            "zqmissingedit757",
+            "zqduplicateedit757",
+            "zqpreview757",
+            "zqcleanpreview757",
+            "zqduplicaterow757",
+            "zqinvalidrow757",
+        ] {
             let original = format!("https://rejected757.example/wmts?{key}=RGSYNTH_rejected");
             let mut address = original.clone();
             rustgis_data::address::redact_query(&mut address);
@@ -1554,9 +1625,8 @@ mod tests {
         assert!(clean.to_json().contains("futureClean"));
     }
 
-    /// A saved query login that can't be read (here a parameter name redaction couldn't recognize)
-    /// is kept and said, and rows past the connection limit are not cleaned, so their parameter
-    /// names take no place among those held for redaction.
+    /// A saved query login that can't be read is kept and said. Readability is checked past
+    /// the limit too, without registering those rows' query names.
     #[test]
     fn query_login_rows_refused_or_past_the_limit_are_said_and_hold_no_name() {
         let query = |i: usize, key: &str| json!({"id": format!("c{i}"), "name": format!("Q{i}"), "kind": "wmts", "address": "https://limit757.example/wmts", "auth": "query", "keyName": key});
@@ -1579,6 +1649,127 @@ mod tests {
         let mut shared = "https://limit757.example/wmts?zqshared757=RGSYNTH_v&a=1".to_string();
         rustgis_data::address::redact_query(&mut shared);
         assert_eq!(shared, "https://limit757.example/wmts?a=1");
+    }
+
+    #[test]
+    fn malformed_rows_past_the_limit_keep_their_readability_reason() {
+        let full: Vec<Value> = (1..=MAX_CONNECTIONS)
+            .map(|i| json!({"id":format!("c{i}"),"name":format!("N{i}"),"kind":"wmts","address":"https://tail757.example/wmts"}))
+            .collect();
+        let clean = Connections::from_json(&json!({"connections":full}).to_string());
+        assert!(clean.unread().is_empty());
+        let mut rows = full.clone();
+        let tail = vec![
+            Value::Null,
+            json!({"id":"future","name":"Future","kind":"future","address":"https://tail757.example/wmts","auth":"query","keyName":"zqtailkind757"}),
+            json!({"id":"bad!","name":"Bad id","kind":"wmts","address":"https://tail757.example/wmts","auth":"query","keyName":"zqtailid757"}),
+            json!({"id":"malformed","name":7,"kind":"wmts","address":"https://tail757.example/wmts","auth":"query","keyName":"zqtailmalformed757"}),
+            json!({"id":"c1","name":"Duplicate","kind":"wmts","address":"https://tail757.example/wmts","auth":"query","keyName":"zqtailduplicate757"}),
+            json!({"id":"readable","name":"Readable","kind":"wmts","address":"https://tail757.example/wmts","auth":"query","keyName":"zqtailreadable757"}),
+        ];
+        rows.extend(tail.clone());
+        let s = Connections::from_json(&json!({"connections":rows}).to_string());
+        assert_eq!(s.connections.len(), MAX_CONNECTIONS);
+        let said = s.unread();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("5 saved connections couldn't be read"), "{said:?}");
+        assert!(said[1].starts_with("1 saved connection is past the 200-connection limit"), "{said:?}");
+        let saved: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(&saved["connections"].as_array().unwrap()[MAX_CONNECTIONS..], tail);
+        for key in ["zqtailkind757", "zqtailid757", "zqtailmalformed757", "zqtailduplicate757", "zqtailreadable757"] {
+            let original = format!("https://tail757.example/wmts?{key}=RGSYNTH_tail");
+            assert_eq!(sources::redact(&original), original, "unaccepted tail registered {key}");
+        }
+        let mut readable = full;
+        readable.push(tail.last().unwrap().clone());
+        let s = Connections::from_json(&json!({"connections":readable}).to_string());
+        assert_eq!(s.unread().len(), 1);
+        assert!(s.unread()[0].starts_with("1 saved connection is past the 200-connection limit"));
+    }
+
+    #[test]
+    fn public_query_mutations_refresh_previously_retained_secrets() {
+        for edit in [false, true] {
+            for lossy in [false, true] {
+                // Each case has its own name: the process-wide registry must not pre-clean it.
+                let key = format!("zqpublicrefresh757{}{}", usize::from(edit), usize::from(lossy));
+                let endpoint = if lossy {
+                    format!("https://refresh757.example/wmts?{key}=RGSYNTH_late_public&layer=a")
+                } else {
+                    "https://refresh757.example/wmts?layer=a".to_string()
+                };
+                let unread = json!({"id":"future","kind":"future","address":endpoint,"futureSetting":17});
+                let safe_unread =
+                    json!({"id":"safe","kind":"future","address":"https://refresh757.example/wmts?layer=a","futureSetting":23});
+                let saved = json!({
+                    "futureEndpoint":endpoint,"futureClean":{"folded":["c1"]},
+                    "connections":[
+                        {"id":"c1","name":"Earlier","kind":"wmts","address":endpoint,"futureEndpoint":endpoint,"futureClean":31},
+                        {"id":"c2","name":"Target","kind":"wmts","address":"https://refresh757.example/target"},
+                        unread,safe_unread
+                    ]
+                });
+                let mut s = Connections::from_json(&saved.to_string());
+                assert_eq!(s.redaction_counts(), (0, 0));
+                let before = s.redaction_counts();
+                let query = Connection {
+                    name: "Query".into(),
+                    kind: "wmts".into(),
+                    address: "https://refresh757.example/target".into(),
+                    auth: "query".into(),
+                    key_name: key,
+                    ..Connection::default()
+                };
+                if edit {
+                    s.update("c2", query).unwrap();
+                } else {
+                    s.add(query, true).unwrap();
+                }
+                let text = s.to_json();
+                let output: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(output["futureClean"], saved["futureClean"]);
+                assert_eq!(output["connections"][0]["futureClean"], 31);
+                assert_eq!(s.find("c1").unwrap().address, "https://refresh757.example/wmts?layer=a");
+                assert!(output["connections"].as_array().unwrap().contains(&safe_unread));
+                if lossy {
+                    assert!(!text.contains("RGSYNTH_late_public"), "{text}");
+                    assert!(output.get("futureEndpoint").is_none());
+                    assert!(output["connections"][0].get("futureEndpoint").is_none());
+                    assert!(!output["connections"].as_array().unwrap().contains(&unread));
+                    assert_eq!(s.redaction_counts(), (1, 3));
+                    assert_eq!(s.redaction_notices_since(before).len(), 2);
+                } else {
+                    assert_eq!(output["futureEndpoint"], saved["futureEndpoint"]);
+                    assert_eq!(output["connections"][0]["futureEndpoint"], saved["connections"][0]["futureEndpoint"]);
+                    assert!(output["connections"].as_array().unwrap().contains(&unread));
+                    assert_eq!(s.redaction_counts(), (0, 0));
+                    assert!(s.redaction_notices_since(before).is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_literal_plus_query_rows_withhold_only_the_secret_case() {
+        let row = |address: &str| {
+            json!({
+                "id":"plus","name":"Unsupported plus","kind":"wmts","auth":"query","keyName":"zq+custom757",
+                "address":address,"futureClean":{"choice":13}
+            })
+        };
+        let lossy = Connections::from_json(
+            &json!({"connections":[row("https://plus757.example/wmts?zq%2Bcustom757=RGSYNTH_refused_plus&layer=a")]}).to_string(),
+        );
+        assert!(lossy.connections.is_empty());
+        assert!(!lossy.to_json().contains("RGSYNTH_refused_plus"));
+        assert_eq!(lossy.redaction_counts(), (0, 1));
+        assert!(lossy.unread().iter().any(|said| said.starts_with("1 entry of the saved connections was dropped")));
+        let clean_row = row("https://plus757.example/wmts?zqcustom757=dataset&layer=a");
+        let clean = Connections::from_json(&json!({"connections":[clean_row]}).to_string());
+        let saved: Value = serde_json::from_str(&clean.to_json()).unwrap();
+        assert_eq!(saved["connections"][0], clean_row);
+        assert_eq!(clean.redaction_counts(), (0, 0));
+        assert!(!clean.unread().iter().any(|said| said.contains("dropped")));
     }
 
     /// A preference from a newer RustGIS, or one that can't be read at all, isn't used: it is said,

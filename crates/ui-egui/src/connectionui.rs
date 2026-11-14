@@ -5,7 +5,7 @@ use egui::vec2;
 use rustgis_engine::connections::{
     Connection, DATABASE_KINDS, LoginReason, LoginRequest, SERVICE_KINDS as WEB_KINDS, WEB, database_key, database_label, login_origin,
 };
-use rustgis_engine::render::rustgis_tiles::{cache, s3};
+use rustgis_engine::render::rustgis_tiles::{cache, logins, s3};
 use rustgis_engine::s3_connections::STALE;
 use rustgis_engine::s3_keys as keys;
 use rustgis_engine::service_logins as web;
@@ -390,10 +390,22 @@ pub fn start_test(app: &mut RustGisApp) {
         p["id"] = json!(id);
     }
     let temporary = service && app.ui.connection.id.is_none() && !matches!(app.ui.connection.auth.as_str(), "" | "none");
+    if temporary && app.ui.connection.auth == "query" && !logins::valid_query_name(app.ui.connection.key_name.trim()) {
+        clear_secrets(&mut app.ui.connection);
+        app.dialogs.error = Some(tl!("Enter a valid query parameter name before testing this connection.").into());
+        return;
+    }
+    // The anonymous command must not record a pasted query key before the temporary login
+    // exists. Keep its cleaned definition for the response command and temporary probe too.
+    let query_address = (temporary && app.ui.connection.auth == "query")
+        .then(|| logins::without_query_parameter(&app.ui.connection.address, app.ui.connection.key_name.trim()));
     if temporary {
         // Public commands remain anonymous. The typed secret is passed directly to the helper,
         // never through command parameters, command history or a saved connection.
         p["auth"] = json!("none");
+        if let Some(address) = &query_address {
+            p["address"] = json!(address);
+        }
     } else {
         secrets(&app.ui.connection, &mut p);
     }
@@ -429,11 +441,14 @@ pub fn start_test(app: &mut RustGisApp) {
     let mut q = definition(&app.ui.connection);
     let (url, login) = if temporary {
         q["auth"] = json!("none");
+        if let Some(address) = &query_address {
+            q["address"] = json!(address);
+        }
         let st = &app.ui.connection;
         let secret = if st.auth == "basic" { &st.password } else { &st.api_key };
         let connection = Connection {
             kind: st.kind.clone(),
-            address: st.address.clone(),
+            address: query_address.as_ref().unwrap_or(&st.address).clone(),
             auth: st.auth.clone(),
             user: st.user.clone(),
             key_name: st.key_name.clone(),
@@ -1025,7 +1040,15 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                         .labelled_by(input_label.id)
                         .changed();
                     ui.end_row();
-                    if query {
+                }
+                if !st.auth.is_empty() {
+                    let basic = st.auth == "basic";
+                    let input_label = ui.label(if basic { tl!("Password") } else { tl!("Key") });
+                    let field = if basic { &mut st.password } else { &mut st.api_key };
+                    changed |=
+                        ui.add(egui::TextEdit::singleline(field).password(true).desired_width(360.0)).labelled_by(input_label.id).changed();
+                    ui.end_row();
+                    if st.auth == "query" {
                         ui.label("");
                         ui.label(
                             egui::RichText::new(tl!(
@@ -1036,14 +1059,6 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
                         );
                         ui.end_row();
                     }
-                }
-                if !st.auth.is_empty() {
-                    let basic = st.auth == "basic";
-                    let input_label = ui.label(if basic { tl!("Password") } else { tl!("Key") });
-                    let field = if basic { &mut st.password } else { &mut st.api_key };
-                    changed |=
-                        ui.add(egui::TextEdit::singleline(field).password(true).desired_width(360.0)).labelled_by(input_label.id).changed();
-                    ui.end_row();
                     if insecure(st) {
                         ui.label("");
                         changed |= ui.checkbox(&mut st.allow_insecure, tl!("Send the login over unencrypted http://")).changed();
@@ -1408,6 +1423,59 @@ mod tests {
             assert!(app.ui.connection.password.is_empty());
             assert!(app.ui.connection.api_key.is_empty());
             assert!(!app.ui.connection.allow_insecure);
+        }
+    }
+
+    #[test]
+    fn unsaved_query_probe_never_records_a_pasted_custom_key() {
+        let _turn = crate::fetching::turn();
+        struct Fetcher;
+        impl Drop for Fetcher {
+            fn drop(&mut self) {
+                cache::clear_fetcher();
+            }
+        }
+        cache::set_fetcher(|_, done| done(Ok(b"{}".to_vec())));
+        let _fetcher = Fetcher;
+        let mut app = RustGisApp::with_sample();
+        open_new(&mut app, "wmts").unwrap();
+        let clean = "https://probe-log757.invalid/wmts?layer=a";
+        let pasted = "RGSYNTH_unsaved_pasted_query";
+        let st = &mut app.ui.connection;
+        st.address = format!("{clean}&zq_probe_custom757={pasted}");
+        st.auth = "query".into();
+        st.key_name = "zq_probe_custom757".into();
+        st.api_key = "RGSYNTH_unsaved_typed_query".into();
+        start_test(&mut app);
+        assert!(app.ui.connection.test.is_some(), "{:?}", app.dialogs.error);
+        let initial = app.session.log.entries().find(|e| e.command == "connection.test").unwrap();
+        assert_eq!(initial.params["address"], clean);
+        assert!(!serde_json::to_string(initial).unwrap().contains(pasted));
+        poll(&mut app, &egui::Context::default());
+        assert!(app.ui.connection.test.is_none());
+        let probes: Vec<_> = app.session.log.entries().filter(|e| e.command == "connection.test").collect();
+        assert_eq!(probes.len(), 2, "both request and response paths were logged");
+        assert!(probes.iter().all(|e| e.params["address"] == clean));
+        let mut exported = Vec::new();
+        app.session.log.write(&mut exported, false).unwrap();
+        assert!(!String::from_utf8(exported).unwrap().contains(pasted));
+        assert!(app.session.connections.connections.is_empty(), "the probe saved no definition");
+    }
+
+    #[test]
+    fn invalid_query_probe_names_never_log_an_address() {
+        for name in ["", "bad name", "zq+custom757", "_"] {
+            let mut app = RustGisApp::with_sample();
+            open_new(&mut app, "wmts").unwrap();
+            let st = &mut app.ui.connection;
+            st.address = "https://probe-invalid757.invalid/wmts?zq_unknown757=RGSYNTH_invalid_probe".into();
+            st.auth = "query".into();
+            st.key_name = name.into();
+            st.api_key = "RGSYNTH_invalid_typed_probe".into();
+            start_test(&mut app);
+            assert!(app.dialogs.error.is_some(), "{name:?}");
+            assert!(app.ui.connection.api_key.is_empty());
+            assert!(app.session.log.entries().all(|e| e.command != "connection.test"), "{name:?}");
         }
     }
 
