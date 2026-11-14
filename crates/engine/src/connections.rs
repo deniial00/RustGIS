@@ -470,8 +470,9 @@ impl Connections {
         s.next = o.get("next").and_then(Value::as_u64).unwrap_or(1).max(1);
         o.remove("version");
         o.remove("next");
-        s.kept.top = s.kept.without_secrets(o, "");
         let mut ids = BTreeSet::new();
+        let mut pending_rows = Vec::new();
+        let mut stripped_flags = Vec::new();
         for row in rows {
             // Even an unread or over-limit row can name its own secret parameter. Do not rely
             // on registering that name: rejected rows must not consume registry slots.
@@ -483,7 +484,7 @@ impl Connections {
                 (Some(auth), Some(name), Some(address)) if auth.trim().eq_ignore_ascii_case("query") => {
                     let name = name.trim();
                     use crate::render::rustgis_tiles::logins;
-                    logins::valid_query_name(name) && logins::without_query_parameter(address, name) != address
+                    !name.is_empty() && logins::without_query_parameter(address, name) != address
                 }
                 _ => false,
             };
@@ -513,25 +514,46 @@ impl Connections {
             match read {
                 Some(((c, (stripped, cut)), other)) => {
                     s.kept.stripped += usize::from(stripped);
+                    stripped_flags.push(stripped);
                     s.kept.cut += usize::from(cut);
                     if let Some(n) = id.strip_prefix('c').and_then(|n| n.parse::<u64>().ok()) {
                         s.next = s.next.max(n.saturating_add(1));
                     }
                     ids.insert(c.id.clone());
-                    let other = s.kept.without_secrets(other, &c.address);
                     if !other.is_empty() {
                         s.kept.fields.insert(c.id.clone(), other);
                     }
                     s.connections.push(c);
                 }
-                None if query_secret || sources::holds_secret(&row) => s.kept.secrets += 1,
-                None => {
-                    s.kept.over_limit += usize::from(over_limit);
-                    if !id.is_empty() {
-                        s.kept.ids.insert(id);
-                    }
-                    s.kept.rows.push(row);
+                None if query_secret => s.kept.secrets += 1,
+                None => pending_rows.push((row, over_limit, id)),
+            }
+        }
+        // All accepted names are now known. Earlier addresses and opaque settings must be
+        // classified using the same names as later rows, independent of file order.
+        s.kept.top = s.kept.without_secrets(o, "");
+        for (c, stripped) in s.connections.iter_mut().zip(stripped_flags) {
+            let address = sources::redact(&c.address);
+            s.kept.stripped += usize::from(!stripped && address != c.address);
+            c.address = address;
+        }
+        let fields = std::mem::take(&mut s.kept.fields);
+        for (id, other) in fields {
+            let address = s.connections.iter().find(|c| c.id == id).map_or("", |c| c.address.as_str());
+            let other = s.kept.without_secrets(other, address);
+            if !other.is_empty() {
+                s.kept.fields.insert(id, other);
+            }
+        }
+        for (row, over_limit, id) in pending_rows {
+            if sources::holds_secret(&row) {
+                s.kept.secrets += 1;
+            } else {
+                s.kept.over_limit += usize::from(over_limit);
+                if !id.is_empty() {
+                    s.kept.ids.insert(id);
                 }
+                s.kept.rows.push(row);
             }
         }
         // All IDs must be known before a name is accepted: a later row can reserve it.
@@ -1469,6 +1491,47 @@ mod tests {
         assert!(clean.connections.is_empty());
         assert!(clean.to_json().contains("custom_unregistered757"), "a clean unread row is preserved");
         assert!(!clean.unread().iter().any(|t| t.contains("dropped")));
+    }
+
+    #[test]
+    fn unsupported_query_names_do_not_preserve_explicit_secrets() {
+        let row = |address: &str| json!({"id":"c1","name":"Unsupported","kind":"wmts","auth":"query","keyName":"_","address":address});
+        let secret = "RGSYNTH_unsupported_query";
+        let lossy = Connections::from_json(&json!({"connections":[row(&format!("https://h/p?%255f={secret}"))]}).to_string());
+        assert!(!lossy.to_json().contains(secret));
+        assert_eq!(lossy.kept.secrets, 1);
+        assert!(lossy.unread().iter().any(|t| t.contains("dropped")));
+        let clean = Connections::from_json(&json!({"connections":[row("https://h/p?layer=a")]}).to_string());
+        assert!(clean.to_json().contains("Unsupported"));
+        assert_eq!(clean.kept.secrets, 0);
+        assert!(!clean.unread().iter().any(|t| t.contains("dropped")));
+    }
+
+    #[test]
+    fn query_names_clean_encoded_addresses_and_earlier_preserved_settings() {
+        let secret = "RGSYNTH_ordered_query";
+        let query = json!({"id":"c2","name":"Query","kind":"wmts","auth":"query","keyName":"zqordering757","address":format!("https://h/p?zq%256frdering757={secret}&layer=a")});
+        let saved = json!({
+            "futureEndpoint": format!("https://h/p?zqordering757={secret}"),
+            "futureClean": "https://h/p?layer=a",
+            "connections": [
+                {"id":"c1","name":"Earlier","kind":"wms","address":format!("https://h/p?zqordering757={secret}"),"futureEndpoint":format!("https://h/p?zqordering757={secret}"),"futureClean":"https://h/p?layer=a"},
+                {"id":"bad!","name":"Unread","kind":"future","address":format!("https://h/p?zqordering757={secret}")},
+                query
+            ]
+        });
+        let s = Connections::from_json(&saved.to_string());
+        assert_eq!(s.connections.len(), 2);
+        assert_eq!(s.connections[0].address, "https://h/p");
+        assert_eq!(s.connections[1].address, "https://h/p?layer=a");
+        assert!(!s.to_json().contains(secret));
+        assert!(s.to_json().contains("futureClean"));
+        assert_eq!(s.kept.stripped, 2);
+        assert_eq!(s.kept.secrets, 3, "top field, earlier row's field, and unread row");
+        assert!(s.unread().iter().any(|t| t.contains("dropped")));
+        let clean = Connections::from_json(&json!({"futureClean":"https://h/p?layer=a","connections":[{"id":"c1","name":"Clean","kind":"wmts","auth":"query","keyName":"zqordering757","address":"https://h/p?layer=a"}]}).to_string());
+        assert!(clean.unread().is_empty());
+        assert!(clean.to_json().contains("futureClean"));
     }
 
     /// A saved query login that can't be read (here a parameter name redaction couldn't recognize)
