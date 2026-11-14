@@ -9,6 +9,7 @@ use std::{
 };
 
 use base64::Engine;
+use rustgis_data::address::query_name_matches;
 use rustgis_data::secrets::Secret;
 
 /// Maximum header or query parameter name length, in bytes.
@@ -359,23 +360,6 @@ fn set_query_parameter(url: &str, name: &str, value: Option<&str>) -> String {
         result.push_str(fragment);
     }
     result
-}
-
-/// Whether a raw query name is `name` once its `%XX` escapes are read, its case aside.
-fn query_name_matches(encoded: &str, name: &str) -> bool {
-    let mut bytes = encoded.bytes();
-    for expected in name.bytes() {
-        let Some(mut actual) = bytes.next() else { return false };
-        if actual == b'%' {
-            let digit = |b: Option<u8>| b.and_then(|b| char::from(b).to_digit(16));
-            let (Some(high), Some(low)) = (digit(bytes.next()), digit(bytes.next())) else { return false };
-            actual = u8::try_from(high * 16 + low).unwrap_or(0);
-        }
-        if !actual.eq_ignore_ascii_case(&expected) {
-            return false;
-        }
-    }
-    bytes.next().is_none()
 }
 
 fn unreserved(b: u8) -> bool {
@@ -767,6 +751,7 @@ mod tests {
             ("tiles?x=1&", "tiles?x=1&API_Key=VALUE"),
             ("tiles?api_KEY=old", "tiles?API_Key=VALUE"),
             ("tiles?x=1&%61PI%5fKey=old&y=2&API_Key", "tiles?x=1&y=2&API_Key=VALUE"),
+            ("tiles?%2561PI_key=old", "tiles?API_Key=VALUE"),
             ("tiles?api_key=a&api_key=b", "tiles?API_Key=VALUE"),
             ("tiles?a=1;api_key=old;b=2&c=3", "tiles?a=1;b=2&c=3&API_Key=VALUE"),
             ("tiles?api_key_other=1&x_API_Key=2", "tiles?api_key_other=1&x_API_Key=2&API_Key=VALUE"),
@@ -813,6 +798,7 @@ mod tests {
             ("https://h/p?api_key=1", "https://h/p"),
             ("https://h/p?a=1&API_KEY=1&b=2#f", "https://h/p?a=1&b=2#f"),
             ("https://h/p?%41pi_key=1&a=1", "https://h/p?a=1"),
+            ("https://h/p?%252541pi_key=1&a=1", "https://h/p?a=1"),
             ("https://h/p?a=1;Api_Key=1&b=2", "https://h/p?a=1&b=2"),
             ("https://h/p?api_key_2=1&x_api_key", "https://h/p?api_key_2=1&x_api_key"),
             // Nothing to take out: the text is returned as it was, empty pairs and all.

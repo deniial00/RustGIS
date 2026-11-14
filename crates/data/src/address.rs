@@ -75,6 +75,18 @@ pub fn normalized_name(raw: &str) -> Option<String> {
     decoded_name(raw).map(|s| letters(&s))
 }
 
+/// Whether a raw parameter name matches `name`, case-insensitively after bounded decoding.
+/// An unresolved name is withheld rather than risk keeping a hidden credential.
+pub fn query_name_matches(raw: &str, name: &str) -> bool {
+    if raw.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    if !raw.bytes().any(|b| b == b'%' || b == b'\\' || b == b'+') && raw.len() <= MAX_NAME_BYTES {
+        return false;
+    }
+    decoded_name(raw).is_none_or(|decoded| decoded.eq_ignore_ascii_case(name.as_bytes()))
+}
+
 /// The query parameter names (letters and digits, lower case) saved web-service connections send
 /// their API key in, at most [`MAX_LOGIN_NAMES`]: names only, never a key. A query that carries
 /// one is read as holding a credential, though the name alone doesn't say so (`?layer=…` isn't
