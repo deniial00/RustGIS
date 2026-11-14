@@ -269,6 +269,7 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
                 || (old.options.get("credentials").is_some_and(|v| v == "keys")
                     && prepared.options.get("credentials").is_none_or(|v| v != "keys"))));
     let slot = s.connections.connections.iter_mut().find(|c| c.id == old.id).ok_or("connection no longer exists")?;
+    crate::connections::register_query_name(&prepared)?;
     if credentials_changed {
         delete_account(&mut s.database_logins, &old)?;
         prepared.saved_keys = false;

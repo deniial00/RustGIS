@@ -265,10 +265,6 @@ fn clean_login(c: &mut Connection) -> Result<bool, String> {
                     logins::MAX_NAME
                 ));
             }
-            // Names only: an address that carries this parameter is a key, whatever it is called.
-            if !rustgis_data::address::note_login_query_name(&c.key_name) {
-                return Err(logins::TOO_MANY_QUERY_NAMES.into());
-            }
             let kept = logins::without_query_parameter(&c.address, &c.key_name);
             let stripped = kept != c.address;
             c.address = kept;
@@ -276,6 +272,15 @@ fn clean_login(c: &mut Connection) -> Result<bool, String> {
         }
         other => Err(format!("unknown auth '{other}' ({})", SERVICE_AUTH.join(", "))),
     }
+}
+
+/// Registers a query login only after its definition has been accepted, before storing it.
+/// Validation and previews must not reserve names in the bounded, process-wide registry.
+pub(crate) fn register_query_name(c: &Connection) -> Result<(), String> {
+    if c.auth == "query" && !rustgis_data::address::note_login_query_name(&c.key_name) {
+        return Err(crate::render::rustgis_tiles::logins::TOO_MANY_QUERY_NAMES.into());
+    }
+    Ok(())
 }
 
 /// The names (never the values) of the query parameters `given` had that `saved` lacks, which a
@@ -468,6 +473,20 @@ impl Connections {
         s.kept.top = s.kept.without_secrets(o, "");
         let mut ids = BTreeSet::new();
         for row in rows {
+            // Even an unread or over-limit row can name its own secret parameter. Do not rely
+            // on registering that name: rejected rows must not consume registry slots.
+            let query_secret = match (
+                row.get("auth").and_then(Value::as_str),
+                row.get("keyName").and_then(Value::as_str),
+                row.get("address").and_then(Value::as_str),
+            ) {
+                (Some(auth), Some(name), Some(address)) if auth.trim().eq_ignore_ascii_case("query") => {
+                    let name = name.trim();
+                    use crate::render::rustgis_tiles::logins;
+                    logins::valid_query_name(name) && logins::without_query_parameter(address, name) != address
+                }
+                _ => false,
+            };
             // A row past the limit isn't cleaned: it is kept as it was, and its login's parameter name
             // takes no place among those held for redaction (see `note_login_query_name`).
             let over_limit = s.connections.len() >= MAX_CONNECTIONS;
@@ -486,6 +505,7 @@ impl Connections {
                     && c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                     && !ids.contains(&c.id)
             });
+            let read = read.filter(|((c, _), _)| register_query_name(c).is_ok());
             let id = match &read {
                 Some(((c, _), _)) => c.id.clone(),
                 None => row.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -504,7 +524,7 @@ impl Connections {
                     }
                     s.connections.push(c);
                 }
-                None if sources::holds_secret(&row) => s.kept.secrets += 1,
+                None if query_secret || sources::holds_secret(&row) => s.kept.secrets += 1,
                 None => {
                     s.kept.over_limit += usize::from(over_limit);
                     if !id.is_empty() {
@@ -711,7 +731,9 @@ impl Connections {
         while self.connections.iter().any(|c| c.id == format!("c{next}")) || self.kept.ids.contains(&format!("c{next}")) {
             next = next.checked_add(1).ok_or("connection ids exhausted")?;
         }
-        self.next = next.checked_add(1).ok_or("connection ids exhausted")?;
+        let following = next.checked_add(1).ok_or("connection ids exhausted")?;
+        register_query_name(&c)?;
+        self.next = following;
         c.id = format!("c{next}");
         // A new connection, a copy or an import has no saved password: it is saved by a login.
         c.remembered = false;
@@ -756,6 +778,7 @@ impl Connections {
 
     pub fn update(&mut self, id: &str, c: Connection) -> Result<(Connection, bool), String> {
         let (c, stripped) = self.prepare_update(id, c)?;
+        register_query_name(&c)?;
         let slot = self.connections.iter_mut().find(|slot| slot.id == id).ok_or_else(|| format!("no connection '{id}'"))?;
         Ok((Self::commit_update(slot, &mut self.generation, c), stripped))
     }
@@ -1375,6 +1398,77 @@ mod tests {
         let mut s = Connections::from_json(&twice.to_string());
         s.remove("c1");
         assert!(Connections::from_json(&s.to_json()).connections.is_empty() && !s.to_json().contains("\"c1\""), "{}", s.to_json());
+    }
+
+    #[test]
+    fn rejected_query_definitions_do_not_register_names() {
+        let mut s = Connections::default();
+        let make = |name: &str, key: &str| Connection {
+            kind: "wmts".into(),
+            name: name.into(),
+            address: "https://rejected757.example/wmts".into(),
+            auth: "query".into(),
+            key_name: key.into(),
+            ..Connection::default()
+        };
+        let (accepted, _) = s.add(make("Accepted", "zqacceptreject757"), true).unwrap();
+        assert!(s.add(make("Accepted", "zqduplicateadd757"), true).is_err());
+        assert!(s.update("missing", make("Missing", "zqmissingedit757")).is_err());
+        let (other, _) = s.add(make("Other", "zqotherreject757"), true).unwrap();
+        assert!(s.update(&other.id, make("Accepted", "zqduplicateedit757")).is_err());
+        let mut preview = accepted.clone();
+        preview.key_name = "zqpreview757".into();
+        s.prepare_update(&accepted.id, preview).unwrap();
+        let rows = json!({"connections":[
+            {"id":"same","name":"Accepted row","kind":"wmts","address":"https://rejected757.example/wmts","auth":"query","keyName":"zqrowaccepted757"},
+            {"id":"same","name":"Duplicate row","kind":"wmts","address":"https://rejected757.example/wmts","auth":"query","keyName":"zqduplicaterow757"},
+            {"id":"bad!","name":"Invalid row","kind":"wmts","address":"https://rejected757.example/wmts","auth":"query","keyName":"zqinvalidrow757"}
+        ]});
+        let loaded = Connections::from_json(&rows.to_string());
+        assert_eq!(loaded.connections.len(), 1);
+        assert!(loaded.unread().iter().any(|t| t.starts_with("2 saved connections couldn't be read")));
+        for key in ["zqduplicateadd757", "zqmissingedit757", "zqduplicateedit757", "zqpreview757", "zqduplicaterow757", "zqinvalidrow757"] {
+            let original = format!("https://rejected757.example/wmts?{key}=RGSYNTH_rejected");
+            let mut address = original.clone();
+            rustgis_data::address::redact_query(&mut address);
+            assert_eq!(address, original, "rejected definition registered {key}");
+        }
+        for key in ["zqacceptreject757", "zqrowaccepted757"] {
+            let mut address = format!("https://rejected757.example/wmts?{key}=RGSYNTH_accepted");
+            rustgis_data::address::redact_query(&mut address);
+            assert_eq!(address, "https://rejected757.example/wmts");
+        }
+    }
+
+    #[test]
+    fn refused_query_rows_never_preserve_their_keys() {
+        // Fill the process-wide registry in an isolated subprocess, not the full suite's process.
+        const CHILD: &str = "RUSTGIS_QUERY_REGISTRY_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "connections::tests::refused_query_rows_never_preserve_their_keys", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        for i in 0..rustgis_data::address::MAX_LOGIN_NAMES {
+            assert!(rustgis_data::address::note_login_query_name(&format!("zqfull{i}")));
+        }
+        let row = |address: &str| json!({"id":"c1","name":"Refused","kind":"wmts","auth":"query","keyName":"custom_unregistered757","address":address});
+        let key = "RGSYNTH_refused_query_secret";
+        let lossy = Connections::from_json(
+            &json!({"connections":[row(&format!("https://refused757.example/wmts?custom_unregistered757={key}"))]}).to_string(),
+        );
+        assert!(lossy.connections.is_empty());
+        assert!(!lossy.to_json().contains(key));
+        assert_eq!(lossy.kept.secrets, 1);
+        assert!(lossy.unread().iter().any(|t| t.contains("dropped")));
+        let clean = Connections::from_json(&json!({"connections":[row("https://refused757.example/wmts?layer=a")]}).to_string());
+        assert!(clean.connections.is_empty());
+        assert!(clean.to_json().contains("custom_unregistered757"), "a clean unread row is preserved");
+        assert!(!clean.unread().iter().any(|t| t.contains("dropped")));
     }
 
     /// A saved query login that can't be read (here a parameter name redaction couldn't recognize)

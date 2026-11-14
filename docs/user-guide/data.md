@@ -1036,9 +1036,10 @@ then log in with the key. The parameter, percent-encoded, is added to each reque
 connection's origin (capabilities, tiles, feature pages and refreshes), replacing a parameter of
 the same name (whatever its case or escaping) that an address already holds, so it is sent once.
 The key is in no address that is saved, shown or recorded: a key typed into the address is left
-out of the saved connection (the notice names its parameter, which the form offers as the login's
-parameter name), and the result of `connection.new` and `connection.edit` lists those parameter
-names as `strippedParameters`, never their values. A parameter that a query login names is also
+out of the saved connection. When the connection does not already use a query login, the result
+of `connection.new` or `connection.edit` offers up to four plain parameter names as
+`strippedParameters`, never their values; the notice explains how to use them for a query login.
+A parameter that a query login names is also
 left out of any other address that carries it, saved or recorded, for as long as RustGIS runs.
 A run holds up to 256 different parameter names; a connection or login with yet another one is
 refused (restart RustGIS, or reuse a name) rather than sent without that protection.
