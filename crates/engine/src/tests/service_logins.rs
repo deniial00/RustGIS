@@ -2088,6 +2088,38 @@ fn query_login_parameters_never_panic() {
 }
 
 #[test]
+fn rejected_query_commands_never_log_their_pasted_custom_key() {
+    let mut s = session(None);
+    let address = |name: &str, value: &str| format!("https://rejected-log757.example/wmts?layer=a&{name}={value}");
+    s.run("connection.new", &json!({"name":"Taken","kind":"wmts","address":"https://rejected-log757.example/taken"})).unwrap();
+    let target =
+        s.run("connection.new", &json!({"name":"Target","kind":"wmts","address":"https://rejected-log757.example/target"})).unwrap();
+    let rejected_new = json!({"name":"Taken","kind":"wmts","address":address("zq_rejected_new757","RGSYNTH_rejected_new"),"auth":"query","keyName":"zq_rejected_new757"});
+    let rejected_edit = json!({"id":target["id"],"name":"Taken","address":address("zq_rejected_edit757","RGSYNTH_rejected_edit"),"auth":"query","keyName":"zq_rejected_edit757"});
+    assert!(s.run("connection.new", &rejected_new).is_err());
+    assert!(s.run("connection.edit", &rejected_edit).is_err());
+    s.run(
+        "connection.new",
+        &json!({"name":"Clean control","kind":"wmts","address":address("layer2","clean"),"auth":"query","keyName":"zq_clean_control757"}),
+    )
+    .unwrap();
+    let entries: Vec<_> = s.log.entries().filter(|e| e.command.starts_with("connection.")).collect();
+    let raw = serde_json::to_string(&entries).unwrap();
+    assert!(!raw.contains("RGSYNTH_rejected_new") && !raw.contains("RGSYNTH_rejected_edit"), "{raw}");
+    assert!(raw.contains("layer=a") && raw.contains("layer2=clean"), "ordinary parameters stay in replayable log text: {raw}");
+    for csv in [false, true] {
+        let mut exported = Vec::new();
+        s.log.write(&mut exported, csv).unwrap();
+        let text = String::from_utf8(exported).unwrap();
+        assert!(!text.contains("RGSYNTH_rejected_new") && !text.contains("RGSYNTH_rejected_edit"), "csv={csv}: {text}");
+    }
+    for key in ["zq_rejected_new757", "zq_rejected_edit757"] {
+        let original = address(key, "RGSYNTH_unregistered");
+        assert_eq!(crate::sources::redact(&original), original, "rejected command registered {key}");
+    }
+}
+
+#[test]
 fn later_query_add_and_edit_report_existing_saved_secret_removals() {
     for edit in [false, true] {
         for lossy in [false, true] {
