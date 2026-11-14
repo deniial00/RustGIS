@@ -2088,6 +2088,23 @@ fn query_login_parameters_never_panic() {
 }
 
 #[test]
+fn saved_typed_task_steps_remove_a_pasted_custom_query_key() {
+    let mut s = session(None);
+    let key = "RGSYNTH_typed_task_query";
+    let step = |address: &str| json!({"title":"Connection","command":"connection.new","params":{"kind":"wmts","name":"Typed","address":address,"auth":"query","keyName":"zqx_replay757"}});
+    s.run("task.new", &json!({"name":"Lossy","steps":[step(&format!("https://typed-task757.example/wmts?layer=a&zqx_replay757={key}"))]}))
+        .unwrap();
+    s.run("task.new", &json!({"name":"Clean","steps":[step("https://typed-task757.example/wmts?layer=a")]})).unwrap();
+    let (project, _) = s.project.saved_text(None).unwrap();
+    assert!(!project.contains(key), "{project}");
+    assert!(project.contains("layer=a"), "ordinary request parameters remain: {project}");
+    assert!(
+        crate::sources::redact(&format!("https://typed-task757.example/wmts?zqx_replay757={key}")).contains(key),
+        "the replay step did not register its name"
+    );
+}
+
+#[test]
 fn rejected_query_commands_never_log_their_pasted_custom_key() {
     let mut s = session(None);
     let address = |name: &str, value: &str| format!("https://rejected-log757.example/wmts?layer=a&{name}={value}");
