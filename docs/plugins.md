@@ -749,6 +749,9 @@ copy of the project, so a tool's output must not depend on what was saved.
   in another page, in memory for the visit. Tabs of the same site share it: the last write wins.
 - Each is saved as `{"version": 1, "values": {...}}`. A RustGIS refuses settings saved by a newer
   one that it can't read (the request is an error) and never writes over them.
+- Settings are stored unencrypted, readable by anyone who can open the plugins folder or the
+  browser profile: keep choices in them, never passwords or tokens. Secrets belong in the
+  system's keychain.
 - Settings that can't be read or saved (a damaged file, a full or blocked browser storage) make
   the request an error that names the plugin, never an empty answer, and a failed change leaves
   what was saved as it was.
