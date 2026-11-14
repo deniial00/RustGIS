@@ -87,8 +87,8 @@ pub fn query_name_matches(raw: &str, name: &str) -> bool {
     decoded_name(raw).is_none_or(|decoded| decoded.eq_ignore_ascii_case(name.as_bytes()))
 }
 
-/// The query parameter names (letters and digits, lower case) saved web-service connections send
-/// their API key in, at most [`MAX_LOGIN_NAMES`]: names only, never a key. A query that carries
+/// The query parameter names (ASCII, case-insensitive, punctuation preserved) saved web-service
+/// connections send their API key in, at most [`MAX_LOGIN_NAMES`]: names only, never a key. A query that carries
 /// one is read as holding a credential, though the name alone doesn't say so (`?layer=…` isn't
 /// one until a login names it). Held for this run; saved connections register theirs when they
 /// are read, added or changed.
@@ -102,8 +102,8 @@ pub const MAX_LOGIN_NAMES: usize = 256;
 /// are held, is not, and the caller refuses the login rather than send a key that addresses
 /// wouldn't be redacted of.
 pub fn note_login_query_name(name: &str) -> bool {
-    let name = letters(name.as_bytes());
-    if name.is_empty() {
+    let name = name.to_ascii_lowercase();
+    if !name.bytes().any(|b| b.is_ascii_alphanumeric()) {
         return false;
     }
     let mut names = LOGIN_NAMES.write().unwrap_or_else(|e| e.into_inner());
@@ -130,12 +130,14 @@ impl QueryNames {
         let login = LOGIN_NAMES.read().unwrap_or_else(|e| e.into_inner());
         for pair in query.split(['&', ';']) {
             if let Some(decoded) = decoded_name(pair_name(pair)) {
-                let k = letters(decoded.split(|b| *b == b'=').next().unwrap_or(&decoded));
+                let before = decoded.split(|b| *b == b'=').next().unwrap_or(&decoded);
+                let k = letters(before);
                 names.sig |= k == "sig";
                 names.sv |= k == "sv";
                 names.state |= k == "state";
-                if login.contains(&k) && !names.login.contains(&k) {
-                    names.login.push(k);
+                let exact = String::from_utf8_lossy(before).to_ascii_lowercase();
+                if login.contains(&exact) && !names.login.contains(&exact) {
+                    names.login.push(exact);
                 }
             }
         }
@@ -168,7 +170,6 @@ fn credential(k: &str, query: &QueryNames) -> bool {
         .iter()
         .any(|w| k.contains(w))
         || (query.sig && query.sv && SAS_KEYS.contains(&k))
-        || query.login.iter().any(|name| name == k)
         || (k == "code" && query.state)
 }
 
@@ -177,7 +178,13 @@ fn credential(k: &str, query: &QueryNames) -> bool {
 pub fn name_class(raw: &str, query: &QueryNames) -> NameClass {
     let Some(decoded) = decoded_name(raw) else { return NameClass::Unresolved };
     let before = decoded.split(|b| *b == b'=').next().unwrap_or(&decoded);
-    if credential(&letters(&decoded), query) || credential(&letters(before), query) { NameClass::Credential } else { NameClass::Plain }
+    let custom =
+        query.login.iter().any(|name| name.as_bytes().eq_ignore_ascii_case(&decoded) || name.as_bytes().eq_ignore_ascii_case(before));
+    if custom || credential(&letters(&decoded), query) || credential(&letters(before), query) {
+        NameClass::Credential
+    } else {
+        NameClass::Plain
+    }
 }
 
 /// True for recognized credentials and unresolved names; no query context is assumed.

@@ -156,6 +156,22 @@ fn web_address(v: &Value, depth: usize) -> bool {
     }
 }
 
+/// A refused row may still name a credential in opaque metadata. Inspect it using that name
+/// without adding the rejected definition to the process-wide registry.
+fn holds_query_secret(row: &Value) -> bool {
+    fn walk(value: &Value, name: &str, depth: usize) -> bool {
+        match value {
+            Value::String(address) => crate::render::rustgis_tiles::logins::without_query_parameter(address, name) != *address,
+            Value::Object(o) if depth < 16 => o.values().any(|v| walk(v, name, depth + 1)),
+            Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, name, depth + 1)),
+            Value::Object(_) | Value::Array(_) => true,
+            _ => false,
+        }
+    }
+    row.get("auth").and_then(Value::as_str).is_some_and(|auth| auth.trim().eq_ignore_ascii_case("query"))
+        && row.get("keyName").and_then(Value::as_str).is_some_and(|name| !name.trim().is_empty() && walk(row, name.trim(), 0))
+}
+
 /// A saved row: the connection, and the fields this version doesn't know.
 #[derive(Deserialize)]
 struct Row {
@@ -474,20 +490,6 @@ impl Connections {
         let mut pending_rows = Vec::new();
         let mut stripped_flags = Vec::new();
         for row in rows {
-            // Even an unread or over-limit row can name its own secret parameter. Do not rely
-            // on registering that name: rejected rows must not consume registry slots.
-            let query_secret = match (
-                row.get("auth").and_then(Value::as_str),
-                row.get("keyName").and_then(Value::as_str),
-                row.get("address").and_then(Value::as_str),
-            ) {
-                (Some(auth), Some(name), Some(address)) if auth.trim().eq_ignore_ascii_case("query") => {
-                    let name = name.trim();
-                    use crate::render::rustgis_tiles::logins;
-                    !name.is_empty() && logins::without_query_parameter(address, name) != address
-                }
-                _ => false,
-            };
             // A row past the limit isn't cleaned: it is kept as it was, and its login's parameter name
             // takes no place among those held for redaction (see `note_login_query_name`).
             let over_limit = s.connections.len() >= MAX_CONNECTIONS;
@@ -525,7 +527,7 @@ impl Connections {
                     }
                     s.connections.push(c);
                 }
-                None if query_secret => s.kept.secrets += 1,
+                None if holds_query_secret(&row) => s.kept.secrets += 1,
                 None => pending_rows.push((row, over_limit, id)),
             }
         }
@@ -1495,16 +1497,34 @@ mod tests {
 
     #[test]
     fn unsupported_query_names_do_not_preserve_explicit_secrets() {
-        let row = |address: &str| json!({"id":"c1","name":"Unsupported","kind":"wmts","auth":"query","keyName":"_","address":address});
+        let row = |address: &str| json!({"id":"c1","name":"Unsupported","kind":"wmts","auth":"query","keyName":"_","address":address,"future":{"nested":[{"url":"https://h/p?layer=a"}]}});
         let secret = "RGSYNTH_unsupported_query";
         let lossy = Connections::from_json(&json!({"connections":[row(&format!("https://h/p?%255f={secret}"))]}).to_string());
         assert!(!lossy.to_json().contains(secret));
         assert_eq!(lossy.kept.secrets, 1);
         assert!(lossy.unread().iter().any(|t| t.contains("dropped")));
+        let mut metadata = row("https://h/p?layer=a");
+        metadata["future"] = json!({"nested":[{"url":format!("https://h/p?%255f={secret}")}]});
+        let lossy_metadata = Connections::from_json(&json!({"connections":[metadata]}).to_string());
+        assert!(!lossy_metadata.to_json().contains(secret));
+        assert_eq!(lossy_metadata.kept.secrets, 1);
+        assert!(lossy_metadata.unread().iter().any(|t| t.contains("dropped")));
         let clean = Connections::from_json(&json!({"connections":[row("https://h/p?layer=a")]}).to_string());
         assert!(clean.to_json().contains("Unsupported"));
+        assert!(clean.to_json().contains("future"));
         assert_eq!(clean.kept.secrets, 0);
         assert!(!clean.unread().iter().any(|t| t.contains("dropped")));
+    }
+
+    #[test]
+    fn query_login_names_preserve_distinct_punctuation() {
+        let saved = json!({"connections":[
+            {"id":"c1","name":"Query","kind":"wmts","address":"https://h/p?zqpunct757=dataset","auth":"query","keyName":"zq_punct757"}
+        ]});
+        let s = Connections::from_json(&saved.to_string());
+        assert_eq!(s.connections[0].address, "https://h/p?zqpunct757=dataset");
+        assert!(s.unread().is_empty());
+        assert!(s.to_json().contains("zqpunct757=dataset"));
     }
 
     #[test]

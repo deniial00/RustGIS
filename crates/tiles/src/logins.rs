@@ -172,12 +172,6 @@ fn activate_with_random(
     if !valid_value(value) {
         return Err("The login credential must be nonempty, within the size limit, and contain no controls.");
     }
-    // The parameter's name marks any address that carries it as holding a key (names only).
-    if let Method::Query(name) = &method
-        && !rustgis_data::address::note_login_query_name(name)
-    {
-        return Err(TOO_MANY_QUERY_NAMES);
-    }
     let mut redactions = Vec::with_capacity(4);
     add_redactions(&mut redactions, value);
     if let Some(payload) = value.get(..6).filter(|s| s.eq_ignore_ascii_case("Basic ")).and_then(|_| value.get(6..))
@@ -200,6 +194,12 @@ fn activate_with_random(
     for _ in 0..4 {
         let binding = random_token(&mut random)?;
         if !entries.contains_key(&binding) {
+            // Only a successful activation reserves a query name for address redaction.
+            if let Method::Query(name) = &method
+                && !rustgis_data::address::note_login_query_name(name)
+            {
+                return Err(TOO_MANY_QUERY_NAMES);
+            }
             entries.insert(
                 binding.clone(),
                 Entry { owner: owner.to_string(), origin: origin.to_string(), method, value: Secret::new(value), redactions },
@@ -620,6 +620,35 @@ mod tests {
     }
 
     #[test]
+    fn failed_query_activation_does_not_reserve_its_parameter_name() {
+        let _turn = crate::cache::turn();
+        let origin = "https://failed-query-activation.example";
+        let live = activate_with_random(origin, "live-query-test", Method::Header("X-Key".into()), "live-key", false, |bytes| {
+            bytes.fill(0x51);
+            Ok(())
+        })
+        .unwrap();
+        for (name, fail_entropy) in [("zq_failed_entropy757", true), ("zq_failed_collision757", false)] {
+            let result = activate_with_random(origin, name, Method::Query(name.into()), "failed-query-key", false, |bytes| {
+                bytes.fill(0x51);
+                if fail_entropy { Err("entropy unavailable") } else { Ok(()) }
+            });
+            assert!(result.is_err());
+            let original = format!("{origin}/tiles?{name}=public");
+            let mut address = original.clone();
+            rustgis_data::address::redact_query(&mut address);
+            assert_eq!(address, original, "failed activation registered {name}");
+        }
+        assert!(deactivate(&live));
+        let name = "zq_successful_activation757";
+        let live = activate(origin, "successful-query-test", Method::Query(name.into()), "successful-query-key", false).unwrap();
+        let mut address = format!("{origin}/tiles?{name}=private");
+        rustgis_data::address::redact_query(&mut address);
+        assert_eq!(address, format!("{origin}/tiles"));
+        assert!(deactivate(&live));
+    }
+
+    #[test]
     fn collisions_retry_without_overwriting_and_exhaust_after_four_attempts() {
         let _turn = crate::cache::turn();
         let target = "https://collision-login.example";
@@ -827,9 +856,9 @@ mod tests {
         rustgis_data::address::redact_query(&mut plain);
         assert_eq!(plain, "https://marker.example/wmts?zqmarkerlogin9=hidden&layer=a");
         let binding = activate("https://marker.example", "marker", Method::Query("ZQ_Marker-Login9".into()), "marker-key", false).unwrap();
-        let mut marked = "https://marker.example/wmts?zqmarkerlogin9=hidden&layer=a".to_string();
+        let mut marked = "https://marker.example/wmts?zq_%254darker-login9=hidden&zqmarkerlogin9=dataset&layer=a".to_string();
         rustgis_data::address::redact_query(&mut marked);
-        assert_eq!(marked, "https://marker.example/wmts?layer=a");
+        assert_eq!(marked, "https://marker.example/wmts?zqmarkerlogin9=dataset&layer=a");
         assert!(deactivate(&binding));
     }
 }
