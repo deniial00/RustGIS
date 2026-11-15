@@ -1456,8 +1456,10 @@ fill value. `scale_factor` and `add_offset` are applied. The coordinates must be
 longitude/latitude grids of 0–360° are turned to -180–180°, and projected ones take their
 coordinate system from the variable's grid mapping (`crs_wkt`, `spatial_ref`, an EPSG code) or
 `"crs"`. Blosclz-compressed and transposed chunks and shards inside shards aren't read yet, and
-say so. A store by web address must allow the browser to fetch it (CORS) for the web app;
-Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
+say so. A blosc or LZ4 chunk whose header claims more bytes than its data can make, or whose blocks
+lie outside it, is refused, naming the array. A store by web address must allow the browser to
+fetch it (CORS) for the web app; Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop
+reads both).
 
 ```sh
 rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2","variable":"2m_temperature","index":{"time":539100}}'
