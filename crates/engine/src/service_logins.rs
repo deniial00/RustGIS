@@ -172,6 +172,13 @@ pub fn save(store: Store<'_>, c: &Connection, secret: &str) -> bool {
     }
     let Some(origin) = login_origin(c) else { return false };
     let Ok(value) = encode(c, &origin, secret) else { return false };
+    // A keychain account can belong to another definition or a newer writer. An explicit
+    // replacement secret does not authorize discarding an envelope this version cannot read.
+    match store.load(&account(&c.id)) {
+        Ok(Some(previous)) if decode(&previous, c, &origin).is_err() => return false,
+        Err(_) => return false,
+        _ => {}
+    }
     store.save(&account(&c.id), &value).is_ok()
 }
 
@@ -597,11 +604,10 @@ pub fn request(s: &mut Session, connection: Option<&str>, url: &str) -> Result<S
 pub fn open_connection(s: &mut Session, c: &Connection) -> Result<(), String> {
     let answers = answers(s, c);
     request(s, Some(&c.id), &c.address)?;
-    if answers {
+    if answers && let Some(origin) = login_origin(c) {
+        reselect(s, c, &origin);
         adopt(s, c);
-        if let Some(origin) = login_origin(c) {
-            resolve(s, Some(&BTreeSet::from([origin])));
-        }
+        resolve(s, Some(&BTreeSet::from([origin])));
     }
     Ok(())
 }

@@ -1065,6 +1065,86 @@ fn stale_unremembered_sessions_clean_other_sessions_credentials_or_warn_without_
 }
 
 #[test]
+fn unmarked_cleanup_preserves_colliding_accounts_with_another_identity() {
+    for remove in [false, true] {
+        for (auth, user, key_name, changed) in [
+            ("header", "", "X-Key", json!({"address":"https://other-account.example/wms"})),
+            ("header", "", "X-Key", json!({"keyName":"X-Other"})),
+            ("header", "", "X-Key", json!({"auth":"query","keyName":"api_key"})),
+            ("basic", "reader", "", json!({"user":"another-reader"})),
+        ] {
+            let store = Arc::new(CountingStore::default());
+            let mut a = session(Some(store.clone()));
+            let definition = json!({
+                "kind":"wms","address":"https://saved-account.example/wms","auth":auth,"user":user,"keyName":key_name
+            });
+            let id = new(&mut a, definition.clone());
+            let mut login = json!({"id":id,"remember":true});
+            login[if auth == "basic" { "password" } else { "apiKey" }] = json!("collision-secret");
+            a.run("connection.login", &login).unwrap();
+            let account = format!("connection/{id}");
+            let saved = store.inner.load(&account).unwrap();
+            let mut other = definition;
+            for (key, value) in changed.as_object().unwrap() {
+                other[key] = value.clone();
+            }
+            let mut b = session(Some(store.clone()));
+            assert_eq!(new(&mut b, other), id);
+            let mark = b.notice_mark();
+            let command = if remove { "connection.remove" } else { "connection.edit" };
+            let params = if remove { json!({"id":id}) } else { json!({"id":id,"address":"https://edited-account.example/wms"}) };
+            b.run(command, &params).unwrap();
+            assert_eq!(store.inner.load(&account).unwrap(), saved);
+            assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+            assert!(b.notices_since(mark).is_empty(), "{auth}, {changed}, remove={remove}: {:?}", b.notices_since(mark));
+            let mut recovered = session(Some(store));
+            recovered.load_connections(&a.connections.to_json());
+            let request = bound(&mut recovered, &id, "https://saved-account.example/wms");
+            let expected = if auth == "basic" {
+                ("Authorization".into(), logins::basic(user, "collision-secret"))
+            } else {
+                (key_name.into(), "collision-secret".into())
+            };
+            assert_eq!(header(&request), Some(expected));
+        }
+    }
+}
+
+#[test]
+fn remembering_preserves_unrecognized_envelopes_and_keeps_the_new_session_login() {
+    for change in [json!({"version":2}), json!({"extra":"future-data"}), json!({"version":0})] {
+        let store = Arc::new(CountingStore::default());
+        let mut s = session(Some(store.clone()));
+        let id = new(
+            &mut s,
+            json!({
+                "kind":"wms","address":"https://future-envelope.example/wms","auth":"header","keyName":"X-Key"
+            }),
+        );
+        s.run("connection.login", &json!({"id":id,"apiKey":"previous-secret","remember":true})).unwrap();
+        let account = format!("connection/{id}");
+        let mut previous: Value = serde_json::from_str(store.inner.load(&account).unwrap().unwrap().expose()).unwrap();
+        for (field, value) in change.as_object().unwrap() {
+            previous[field] = value.clone();
+        }
+        let bytes = Secret::new(previous.to_string());
+        store.inner.save(&account, &bytes).unwrap();
+        let result = s.run("connection.login", &json!({"id":id,"apiKey":"replacement-secret","remember":true})).unwrap();
+        assert_eq!(result["warning"], web::NOT_REMEMBERED);
+        assert_eq!(store.inner.load(&account).unwrap(), Some(bytes.clone()));
+        assert_eq!(header(&bound(&mut s, &id, "https://future-envelope.example/wms")).unwrap().1, "replacement-secret");
+        let mut unmarked = session(Some(store.clone()));
+        unmarked.load_connections(&s.connections.to_json());
+        unmarked.connections.set_remembered(&id, false);
+        unmarked.run("connection.remove", &json!({"id":id})).unwrap();
+        assert_eq!(store.inner.load(&account).unwrap(), Some(bytes));
+        let mut later = session(Some(store));
+        later.load_connections(&s.connections.to_json());
+        assert_eq!(web::request(&mut later, Some(&id), "https://future-envelope.example/wms").unwrap_err(), web::SAVED_UNUSABLE);
+    }
+}
+
+#[test]
 fn simultaneous_sessions_and_connections_never_share_or_replace_logins() {
     let origin = "https://sessions757.example.org";
     let definition = json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"});

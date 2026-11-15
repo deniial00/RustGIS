@@ -1174,7 +1174,6 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
 pub fn open_connection(app: &mut RustGisApp, c: &Connection) -> Result<(), String> {
     if web::is_service(c)
         && !c.auth.is_empty()
-        && !web::logged_in(&app.session, c)
         && let Err(e) = web::open_connection(&mut app.session, c)
     {
         password_prompt(app, &c.id, password_request(app, &c.id), Some(e));
@@ -1655,6 +1654,45 @@ mod tests {
         assert!(web::logged_in(&app.session, &c));
         assert_eq!(app.session.map().tiles[0].connection, c.id);
         assert!(!app.session.database_logins.requests(app.session.opened).any(|r| r.kind == WEB && r.key == origin));
+    }
+
+    #[test]
+    fn opening_an_active_connection_resolves_a_choice_after_the_selected_peer_logs_out() {
+        let mut app = RustGisApp::with_sample();
+        let origin = "https://active-choice.example";
+        let mut ids = Vec::new();
+        for name in ["A", "B"] {
+            let made = app
+                .run(
+                    "connection.new",
+                    json!({
+                        "kind":"wms", "name":name, "address":format!("{origin}/wms"),
+                        "auth":"header", "keyName":"X-Key"
+                    }),
+                )
+                .unwrap();
+            let id = made["id"].as_str().unwrap().to_string();
+            app.run("connection.login", json!({"id":id,"apiKey":format!("secret-{name}")})).unwrap();
+            ids.push(id);
+        }
+        app.run("connection.logout", json!({"id":ids[1]})).unwrap();
+        let a = app.session.connections.find(&ids[0]).unwrap().clone();
+        assert!(web::logged_in(&app.session, &a));
+        assert_eq!(app.session.database_logins.selection(WEB, origin), None);
+        let mut project = rustgis_engine::Project::default();
+        project.map_mut().tiles.push(rustgis_engine::map::TileLayer::new(
+            "Unassigned",
+            rustgis_engine::map::TileKind::Raster,
+            format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png"),
+        ));
+        app.run("project.openText", json!({"text":serde_json::to_string(&project).unwrap()})).unwrap();
+        assert!(app.session.database_logins.requests(app.session.opened).any(|r| r.kind == WEB && r.reason == LoginReason::Choose));
+        open_connection(&mut app, &a).unwrap();
+        assert_eq!(app.session.database_logins.selection(WEB, origin), Some(a.id.as_str()));
+        assert!(!app.session.database_logins.requests(app.session.opened).any(|r| r.kind == WEB && r.key == origin));
+        assert_eq!(app.session.map().tiles[0].connection, a.id);
+        let applied = rustgis_engine::render::rustgis_tiles::logins::apply(&app.session.map().tiles[0].url).unwrap().unwrap();
+        assert_eq!(applied.header.unwrap().1, "secret-A");
     }
 
     #[test]

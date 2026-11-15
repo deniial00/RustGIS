@@ -432,7 +432,14 @@ fn delete_account(logins: &mut crate::connections::DatabaseLogins, c: &Connectio
 /// a store is available, but a refusal must not prevent a session-only edit or removal.
 fn delete_changed_account(logins: &mut crate::connections::DatabaseLogins, c: &Connection) -> Result<Option<&'static str>, String> {
     if web::is_service(c) && !c.remembered {
-        return Ok(if logins.has_store() && logins.delete(&c.id).is_err() {
+        let cleanup_failed = logins.has_store()
+            && match web::load(logins.secret_store(), c) {
+                // The id alone is not ownership: another session can reuse the same counter.
+                web::Loading::Found(_) => logins.delete(&c.id).is_err(),
+                web::Loading::Unavailable => true,
+                web::Loading::Missing | web::Loading::Unusable => false,
+            };
+        return Ok(if cleanup_failed {
             Some("The connection was changed, but a saved login may remain on this computer because the credential store refused cleanup.")
         } else {
             None
