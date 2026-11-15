@@ -1,8 +1,11 @@
 //! Service logins belong to a session/connection, never an origin-global request context.
 use super::*;
 use crate::{render::rustgis_tiles::logins, service_logins as web};
-use rustgis_data::secrets::{MemorySecrets, SecretError, SecretStore};
-use std::sync::Arc;
+use rustgis_data::secrets::{MemorySecrets, Secret, SecretError, SecretStore};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 fn session(store: Option<Arc<dyn SecretStore>>) -> Session {
     let mut s = Session::new(Project::default());
@@ -93,7 +96,8 @@ fn temporary_probes_never_replace_saved_logins_or_connection_selections() {
     assert_eq!(s.connections, definitions);
     assert_eq!(s.database_logins.selection(crate::connections::WEB, origin), Some(id.as_str()));
     assert_eq!(requests(&mut s), pending);
-    assert_eq!(web::known_secret(&s, &s.connections.connections[0]).unwrap().expose(), "saved-temporary-757");
+    let connection = s.connections.connections[0].clone();
+    assert_eq!(web::known_secret(&mut s, &connection).unwrap().expose(), "saved-temporary-757");
     assert_eq!(bound(&mut s, &id, &url), saved);
 }
 
@@ -535,7 +539,7 @@ fn web_login_goes_only_to_its_connections_origin() {
     let previous = tile.url.clone();
     s.run("connection.logout", &json!({"id":id})).unwrap();
     assert!(logins::apply(&previous).is_err());
-    assert_eq!(web::request(&mut s, Some(&id), "https://scope757.example.org/wms").unwrap_err(), web::REQUIRED);
+    assert_eq!(web::request(&mut s, Some(&id), "https://scope757.example.org/wms").unwrap_err(), web::LOGGED_OUT);
 }
 
 #[test]
@@ -596,32 +600,377 @@ fn plain_http_confirmation_applies_only_to_this_sessions_login_identity() {
 
 #[test]
 fn service_login_edit_and_remove_do_not_depend_on_a_credential_store() {
-    let store = Arc::new(MemorySecrets::failing(SecretError::Denied));
+    for store in [
+        None,
+        Some(Arc::new(MemorySecrets::failing(SecretError::Denied)) as Arc<dyn SecretStore>),
+        Some(Arc::new(MemorySecrets::failing(SecretError::Unavailable("synthetic refusal".into()))) as Arc<dyn SecretStore>),
+    ] {
+        let mut s = session(store);
+        let id = new(&mut s, json!({"kind":"ogcapi","address":"https://memory757.example.org/ogc","auth":"header","keyName":"X-Key"}));
+        let result = s.run("connection.login", &json!({"id":id,"apiKey":"memory-sentinel-757","remember":true})).unwrap();
+        assert_eq!(result["warning"], web::NOT_REMEMBERED);
+        assert!(s.database_logins.has_session_password(&id));
+        assert!(!s.connections.find(&id).unwrap().remembered);
+        let address = bound(&mut s, &id, "https://memory757.example.org/features");
+        assert_eq!(header(&address).unwrap().1, "memory-sentinel-757");
+        let duplicate = s.run("connection.duplicate", &json!({"id":id,"name":"Another account"})).unwrap();
+        assert_eq!(duplicate["loggedIn"], false);
+        assert_eq!(s.run("connection.test", &json!({"id":duplicate["id"],"probe":true})).unwrap_err(), web::REQUIRED);
+        s.run("connection.edit", &json!({"id":id,"name":"Renamed","address":"https://memory757.example.org/v2"})).unwrap();
+        assert_eq!(header(&address).unwrap().1, "memory-sentinel-757");
+        s.run("connection.edit", &json!({"id":id,"address":"https://changed-memory757.example.org/ogc"})).unwrap();
+        assert!(logins::apply(&address).is_err());
+        s.run("connection.login", &json!({"id":id,"apiKey":"replacement-memory-757"})).unwrap();
+        let replacement = bound(&mut s, &id, "https://changed-memory757.example.org/features");
+        s.run("connection.remove", &json!({"id":id})).unwrap();
+        assert!(logins::apply(&replacement).is_err());
+    }
+}
+
+/// Count store access without consulting a real credential store.
+#[derive(Default)]
+struct CountingStore {
+    inner: MemorySecrets,
+    reads: AtomicUsize,
+    saves: AtomicUsize,
+    deletes: AtomicUsize,
+    refuse_save: AtomicBool,
+    refuse_delete: AtomicBool,
+}
+
+impl SecretStore for CountingStore {
+    fn load(&self, account: &str) -> Result<Option<Secret>, SecretError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.load(account)
+    }
+
+    fn save(&self, account: &str, value: &Secret) -> Result<(), SecretError> {
+        self.saves.fetch_add(1, Ordering::SeqCst);
+        if self.refuse_save.load(Ordering::SeqCst) {
+            return Err(SecretError::Denied);
+        }
+        self.inner.save(account, value)
+    }
+
+    fn delete(&self, account: &str) -> Result<(), SecretError> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        if self.refuse_delete.load(Ordering::SeqCst) {
+            return Err(SecretError::Denied);
+        }
+        self.inner.delete(account)
+    }
+}
+
+#[test]
+fn remembered_query_logins_recover_projects_through_the_opt_in_preferences_path() {
+    use rustgis_data::diagnostics::{Filter, History};
+    let origin = "https://remember-query1979.example.org";
+    let key = "remember-query/1979 é";
+    let encoded = "remember-query%2F1979%20%C3%A9";
+    let store = Arc::new(CountingStore::default());
     let mut s = session(Some(store.clone()));
-    let id = new(&mut s, json!({"kind":"ogcapi","address":"https://memory757.example.org/ogc","auth":"header","keyName":"X-Key"}));
-    assert_eq!(s.run("connection.login", &json!({"id":id,"apiKey":"memory-sentinel-757","remember":true})).unwrap_err(), web::SESSION_ONLY);
-    assert!(!s.database_logins.has_session_password(&id));
-    s.run("connection.login", &json!({"id":id,"apiKey":"memory-sentinel-757"})).unwrap();
-    let address = bound(&mut s, &id, "https://memory757.example.org/features");
-    assert_eq!(header(&address).unwrap().1, "memory-sentinel-757");
-    let duplicate = s.run("connection.duplicate", &json!({"id":id,"name":"Another account"})).unwrap();
-    assert_eq!(duplicate["loggedIn"], false);
-    assert_eq!(s.run("connection.test", &json!({"id":duplicate["id"],"probe":true})).unwrap_err(), web::REQUIRED);
-    s.run("connection.edit", &json!({"id":id,"name":"Renamed","address":"https://memory757.example.org/v2"})).unwrap();
-    assert_eq!(header(&address).unwrap().1, "memory-sentinel-757");
-    // A stale remembered marker cannot opt a service into credential-store access.
-    let mut prefs: Value = serde_json::from_str(&s.connections.to_json()).unwrap();
-    prefs["connections"][0]["remembered"] = json!(true);
-    let mut later = session(Some(store));
-    later.connections = crate::connections::Connections::from_json(&prefs.to_string());
+    let id = new(&mut s, json!({"kind":"wmts","address":format!("{origin}/wmts"),"auth":"query","keyName":"api_key"}));
+    let account = format!("connection/{id}");
+    let history = History::default();
+    let _scope = history.enter();
+    s.run("connection.login", &json!({"id":id,"apiKey":key})).unwrap();
+    assert_eq!(store.saves.load(Ordering::SeqCst), 0, "remember is off by default");
+    assert_eq!(store.inner.load(&account).unwrap(), None);
+    s.run("connection.login", &json!({"id":id,"apiKey":key,"remember":true})).unwrap();
+    assert!(s.connections.find(&id).unwrap().remembered);
+    let stored = store.inner.load(&account).unwrap().unwrap();
+    let envelope: Value = serde_json::from_str(stored.expose()).unwrap();
+    assert_eq!(envelope, json!({"origin":origin,"auth":"query","user":"","keyName":"api_key","secret":key}));
+    let duplicate = s.run("connection.duplicate", &json!({"id":id,"name":"Unremembered copy"})).unwrap();
+    assert_eq!(duplicate["remembered"], false);
+    assert_eq!(store.inner.load(&format!("connection/{}", duplicate["id"].as_str().unwrap())).unwrap(), None);
+    s.run("project.openText", &json!({"text":project(origin,&id)})).unwrap();
+    assert_eq!(requests(&mut s), json!([]));
+    let previous = s.map().tiles[0].url.clone();
+    assert!(logins::apply(&previous).unwrap().unwrap().url.ends_with(&format!("?api_key={encoded}")));
+    let prefs = s.connections.to_json();
+    let (saved_project, _) = s.project.saved_text(None).unwrap();
+    let mut recording = Vec::new();
+    s.log.write(&mut recording, false).unwrap();
+    let visible = format!(
+        "{prefs}\n{saved_project}\n{}\n{:?}\n{}\n{:?}",
+        String::from_utf8(recording).unwrap(),
+        history.records(),
+        history.report(Filter::All),
+        s.notices
+    );
+    for private in [key, encoded, "remember-query/1979", "rustgis-login"] {
+        assert!(!visible.contains(private), "{private} reached saved text, recording or History: {visible}");
+    }
+    drop(s);
+    assert!(logins::apply(&previous).is_err());
+    // CLI and Python use this same explicit opt-in path. Without it the marker is not authority.
+    let mut no_store = session(None);
+    no_store.load_connections(&prefs);
+    assert_eq!(web::request(&mut no_store, Some(&id), &format!("{origin}/wmts")).unwrap_err(), web::UNAVAILABLE);
+    let saved = serde_json::Map::from_iter([(crate::connections::PREF.to_string(), Value::String(prefs))]);
+    let mut later = session(None);
+    crate::prefs::use_saved_secrets(&mut later, &saved, store.clone());
+    let reads = store.reads.load(Ordering::SeqCst);
+    later.run("project.openText", &json!({"text":saved_project})).unwrap();
+    assert_eq!(store.reads.load(Ordering::SeqCst), reads + 1);
+    assert_eq!(requests(&mut later), json!([]));
+    let recovered = later.map().tiles[0].url.clone();
+    let applied = logins::apply(&recovered).unwrap().unwrap();
+    assert_eq!(applied.url, format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png?api_key={encoded}"));
+    assert!(applied.header.is_none());
+    for foreign in [
+        "https://elsewhere1979.example.org/wmts",
+        "https://remember-query1979.example.org:8443/wmts",
+        "http://remember-query1979.example.org/wmts",
+    ] {
+        assert!(logins::apply(&bound(&mut later, &id, foreign)).unwrap().is_none());
+    }
+    later.run("connection.forgetLogin", &json!({"id":id})).unwrap();
+    assert_eq!(store.inner.load(&account).unwrap(), None);
     assert!(!later.connections.find(&id).unwrap().remembered);
+    assert!(later.database_logins.has_session_password(&id));
+    assert_eq!(bound(&mut later, &id, &format!("{origin}/tiles/{{z}}/{{x}}/{{y}}.png")), recovered);
+    assert_eq!(logins::apply(&recovered).unwrap().unwrap().url, applied.url);
+    let mut forgotten = session(Some(store));
+    forgotten.load_connections(&later.connections.to_json());
+    assert_eq!(web::request(&mut forgotten, Some(&id), &format!("{origin}/wmts")).unwrap_err(), web::REQUIRED);
+}
+
+#[test]
+fn remembered_http_consent_stays_bound_to_the_exact_origin() {
+    let store = Arc::new(MemorySecrets::new());
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wfs","address":"http://remember-http1979.example.org/wfs","auth":"basic","user":"ana"}));
+    let account = format!("connection/{id}");
+    assert_eq!(s.run("connection.login", &json!({"id":id,"password":"remember-http-1979","remember":true})).unwrap_err(), web::INSECURE);
+    assert!(!s.database_logins.has_session_password(&id));
+    assert_eq!(store.load(&account).unwrap(), None);
+    s.run("connection.login", &json!({"id":id,"password":"remember-http-1979","remember":true,"allowInsecure":true})).unwrap();
+    let mut later = session(Some(store.clone()));
+    later.load_connections(&s.connections.to_json());
+    let url = bound(&mut later, &id, "http://remember-http1979.example.org/features");
+    assert_eq!(header(&url).unwrap().1, logins::basic("ana", "remember-http-1979"));
+    assert!(header(&bound(&mut later, &id, "https://remember-http1979.example.org/features")).is_none());
+    later.run("connection.edit", &json!({"id":id,"address":"http://remember-http1979.example.org:8080/wfs"})).unwrap();
+    assert!(logins::apply(&url).is_err());
+    assert_eq!(store.load(&account).unwrap(), None);
     assert_eq!(later.run("connection.login", &json!({"id":id})).unwrap_err(), web::REQUIRED);
-    s.run("connection.edit", &json!({"id":id,"address":"https://changed-memory757.example.org/ogc"})).unwrap();
-    assert!(logins::apply(&address).is_err());
-    s.run("connection.login", &json!({"id":id,"apiKey":"fake004"})).unwrap();
-    let replacement = bound(&mut s, &id, "https://changed-memory757.example.org/features");
+    assert_eq!(later.run("connection.login", &json!({"id":id,"password":"remember-http-1979"})).unwrap_err(), web::INSECURE);
+}
+
+#[test]
+fn remembered_logins_reject_every_changed_identity_including_query_header_method_swaps() {
+    for (auth, changed) in [
+        ("query", json!({"auth":"header"})),
+        ("header", json!({"auth":"query"})),
+        ("query", json!({"keyName":"other_key"})),
+        ("header", json!({"keyName":"X-Other-Key"})),
+        ("basic", json!({"user":"other-user"})),
+        ("query", json!({"address":"https://moved-remember1979.example.org/wms"})),
+        ("query", json!({"address":"https://identity-remember1979.example.org:8443/wms"})),
+        ("query", json!({"address":"http://identity-remember1979.example.org/wms"})),
+    ] {
+        let store = Arc::new(CountingStore::default());
+        let mut s = session(Some(store.clone()));
+        let id = new(
+            &mut s,
+            json!({"kind":"wms","address":"https://identity-remember1979.example.org/wms","auth":auth,"user":"ana","keyName":"X-Key"}),
+        );
+        let credential = if auth == "basic" { "password" } else { "apiKey" };
+        s.run("connection.login", &json!({"id":id,credential:"identity-remember-1979","remember":true})).unwrap();
+        let mut prefs: Value = serde_json::from_str(&s.connections.to_json()).unwrap();
+        for (name, value) in changed.as_object().unwrap() {
+            prefs["connections"][0][name] = value.clone();
+        }
+        let mut later = session(Some(store.clone()));
+        later.load_connections(&prefs.to_string());
+        let c = later.connections.find(&id).unwrap().clone();
+        let reads = store.reads.load(Ordering::SeqCst);
+        assert_eq!(web::request(&mut later, Some(&id), &c.address).unwrap_err(), web::SAVED_UNUSABLE, "{auth}: {changed}");
+        assert_eq!(store.reads.load(Ordering::SeqCst), reads + 1);
+        assert!(!later.database_logins.has_session_password(&id));
+        assert!(!web::logged_in(&later, &c));
+        assert!(header(&c.address).is_none());
+        assert_eq!(web::known_secret(&mut later, &c).unwrap_err(), web::SAVED_UNUSABLE);
+        assert_eq!(store.reads.load(Ordering::SeqCst), reads + 1);
+    }
+}
+
+#[test]
+fn failed_saved_login_reads_are_cached_until_explicit_login() {
+    for failure in [None, Some(SecretError::Denied), Some(SecretError::Unavailable("store-error-must-not-escape-1979".into()))] {
+        let inner = failure.clone().map_or_else(MemorySecrets::new, MemorySecrets::failing);
+        let store = Arc::new(CountingStore { inner, ..CountingStore::default() });
+        let origin = "https://retry-remember1979.example.org";
+        let mut s = session(Some(store.clone()));
+        let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+        let mut prefs: Value = serde_json::from_str(&s.connections.to_json()).unwrap();
+        prefs["connections"][0]["remembered"] = json!(true);
+        let expected = if failure.is_some() {
+            web::UNAVAILABLE
+        } else {
+            store.inner.save(&format!("connection/{id}"), &Secret::new("damaged-envelope-1979")).unwrap();
+            web::SAVED_UNUSABLE
+        };
+        s.load_connections(&prefs.to_string());
+        let mark = s.notice_mark();
+        s.run("project.openText", &json!({"text":project(origin,&id)})).unwrap();
+        assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(s.notices_since(mark).iter().filter(|n| n.text.contains(expected)).count(), 1);
+        let notices = s.notices.len();
+        let c = s.connections.find(&id).unwrap().clone();
+        for _ in 0..3 {
+            web::resolve(&mut s, None);
+            assert_eq!(requests(&mut s)[0]["reason"], "password");
+            assert_eq!(web::request(&mut s, Some(&id), &format!("{origin}/wms")).unwrap_err(), expected);
+            assert_eq!(web::known_secret(&mut s, &c).unwrap_err(), expected);
+        }
+        assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(s.notices.len(), notices);
+        assert!(!format!("{:?}", s.notices).contains("store-error-must-not-escape-1979"));
+        assert_eq!(s.run("connection.login", &json!({"id":id})).unwrap_err(), expected);
+        assert_eq!(store.reads.load(Ordering::SeqCst), 2, "explicit login retries once");
+        s.run("connection.login", &json!({"id":id,"apiKey":"replacement-retry-1979"})).unwrap();
+        assert_eq!(header(&bound(&mut s, &id, &format!("{origin}/wms"))).unwrap().1, "replacement-retry-1979");
+        assert_eq!(store.reads.load(Ordering::SeqCst), 2, "a typed login never needs the failing store");
+    }
+}
+
+#[test]
+fn a_missing_saved_login_clears_its_marker_and_logout_never_automatically_reloads() {
+    let store = Arc::new(CountingStore::default());
+    let origin = "https://sticky-remember1979.example.org";
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"sticky-remember-1979","remember":true})).unwrap();
+    let prefs = s.connections.to_json();
+    let mut later = session(Some(store.clone()));
+    later.load_connections(&prefs);
+    later.run("project.openText", &json!({"text":project(origin,&id)})).unwrap();
+    let previous = later.map().tiles[0].url.clone();
+    assert_eq!(header(&previous).unwrap().1, "sticky-remember-1979");
+    later.run("connection.logout", &json!({"id":id})).unwrap();
+    assert!(logins::apply(&previous).is_err());
+    assert!(!later.database_logins.has_session_password(&id));
+    assert!(later.connections.find(&id).unwrap().remembered);
+    assert!(store.inner.load(&format!("connection/{id}")).unwrap().is_some());
+    let reads = store.reads.load(Ordering::SeqCst);
+    for _ in 0..3 {
+        web::resolve(&mut later, None);
+        assert_eq!(requests(&mut later)[0]["reason"], "password");
+        assert_eq!(web::request(&mut later, Some(&id), &format!("{origin}/wms")).unwrap_err(), web::LOGGED_OUT);
+        assert!(later.run("connection.browse", &json!({"id":id,"probe":true})).is_err());
+        assert!(later.run("connection.test", &json!({"id":id,"probe":true})).is_err());
+    }
+    assert_eq!(store.reads.load(Ordering::SeqCst), reads);
+    later.run("connection.login", &json!({"id":id})).unwrap();
+    assert_eq!(store.reads.load(Ordering::SeqCst), reads + 1);
+    assert_eq!(header(&later.map().tiles[0].url).unwrap().1, "sticky-remember-1979");
+    store.inner.delete(&format!("connection/{id}")).unwrap();
+    let mut missing = session(Some(store.clone()));
+    missing.load_connections(&prefs);
+    assert_eq!(missing.run("connection.login", &json!({"id":id})).unwrap_err(), web::NONE_SAVED);
+    assert!(!missing.connections.find(&id).unwrap().remembered);
+    let reads = store.reads.load(Ordering::SeqCst);
+    web::resolve(&mut missing, None);
+    assert_eq!(store.reads.load(Ordering::SeqCst), reads);
+}
+
+#[test]
+fn saved_login_deletion_failures_leave_definition_generation_binding_and_session_unchanged() {
+    let store = Arc::new(CountingStore::default());
+    let mut s = session(Some(store.clone()));
+    let id = new(
+        &mut s,
+        json!({"kind":"wms","address":"https://atomic-remember1979.example.org/wms","auth":"header","keyName":"X-Key","user":"ana"}),
+    );
+    s.run("connection.login", &json!({"id":id,"apiKey":"atomic-remember-1979","remember":true})).unwrap();
+    let account = format!("connection/{id}");
+    let saved = store.inner.load(&account).unwrap();
+    let previous = bound(&mut s, &id, "https://atomic-remember1979.example.org/tiles");
+    let deletes = store.deletes.load(Ordering::SeqCst);
+    s.run("connection.edit", &json!({"id":id,"name":"Renamed","address":"https://ATOMIC-REMEMBER1979.example.org:443/v2"})).unwrap();
+    assert_eq!(store.deletes.load(Ordering::SeqCst), deletes);
+    assert_eq!(header(&previous).unwrap().1, "atomic-remember-1979");
+    let definition = s.connections.find(&id).unwrap().clone();
+    let generation = s.connections.generation;
+    store.refuse_delete.store(true, Ordering::SeqCst);
+    for (command, params) in [
+        ("connection.edit", json!({"id":id,"address":"https://moved-atomic1979.example.org/wms"})),
+        ("connection.edit", json!({"id":id,"auth":"query"})),
+        ("connection.edit", json!({"id":id,"keyName":"X-Other"})),
+        ("connection.forgetLogin", json!({"id":id})),
+        ("connection.remove", json!({"id":id})),
+    ] {
+        assert_eq!(s.run(command, &params).unwrap_err(), web::NOT_FORGOTTEN);
+        assert_eq!(s.connections.find(&id).unwrap(), &definition);
+        assert_eq!(s.connections.generation, generation);
+        assert!(s.database_logins.has_session_password(&id));
+        assert_eq!(store.inner.load(&account).unwrap(), saved);
+        assert_eq!(header(&previous).unwrap().1, "atomic-remember-1979");
+    }
+    store.refuse_delete.store(false, Ordering::SeqCst);
     s.run("connection.remove", &json!({"id":id})).unwrap();
-    assert!(logins::apply(&replacement).is_err());
+    assert!(s.connections.find(&id).is_none());
+    assert_eq!(store.inner.load(&account).unwrap(), None);
+    assert!(logins::apply(&previous).is_err());
+}
+
+/// An identity edit refused because this run's query-name registry is full never deletes the
+/// saved login first: the edit changes nothing, and the remembered login still loads.
+#[test]
+fn a_full_query_name_registry_refuses_an_identity_edit_before_deleting_the_saved_login() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if super::isolate_process_test(
+        "tests::service_logins::a_full_query_name_registry_refuses_an_identity_edit_before_deleting_the_saved_login",
+    ) {
+        return;
+    }
+    let store = Arc::new(CountingStore::default());
+    let mut s = session(Some(store.clone()));
+    let origin = "https://full-registry1979.example.org";
+    let id = new(&mut s, json!({"kind":"wmts","address":format!("{origin}/wmts"),"auth":"query","keyName":"api_key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"full-registry-1979","remember":true})).unwrap();
+    let account = format!("connection/{id}");
+    let saved = store.inner.load(&account).unwrap();
+    let definition = s.connections.find(&id).unwrap().clone();
+    let generation = s.connections.generation;
+    let deletes = store.deletes.load(Ordering::SeqCst);
+    let mut filler = 0;
+    while rustgis_data::address::note_login_query_name(&format!("zqfullregistry{filler}")) {
+        filler += 1;
+    }
+    let e = s.run("connection.edit", &json!({"id":id,"keyName":"another_unheld_key"})).unwrap_err();
+    assert_eq!(e, crate::render::rustgis_tiles::logins::TOO_MANY_QUERY_NAMES);
+    assert_eq!(store.deletes.load(Ordering::SeqCst), deletes, "the saved login wasn't touched");
+    assert_eq!(store.inner.load(&account).unwrap(), saved);
+    assert_eq!(s.connections.find(&id).unwrap(), &definition);
+    assert_eq!(s.connections.generation, generation);
+    let mut later = session(Some(store));
+    later.load_connections(&s.connections.to_json());
+    let applied = logins::apply(&bound(&mut later, &id, &format!("{origin}/wmts"))).unwrap().unwrap();
+    assert!(applied.url.ends_with("api_key=full-registry-1979"), "{}", applied.url);
+}
+
+#[test]
+fn failed_replacement_remember_keeps_the_old_saved_login_and_the_new_session_login() {
+    let store = Arc::new(CountingStore::default());
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wms","address":"https://replace-remember1979.example.org/wms","auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"saved-replace-1979","remember":true})).unwrap();
+    let old = bound(&mut s, &id, "https://replace-remember1979.example.org/wms");
+    let saved = store.inner.load(&format!("connection/{id}")).unwrap();
+    store.refuse_save.store(true, Ordering::SeqCst);
+    let result = s.run("connection.login", &json!({"id":id,"apiKey":"session-replace-1979","remember":true})).unwrap();
+    assert_eq!(result["warning"], web::NOT_REMEMBERED);
+    assert!(s.connections.find(&id).unwrap().remembered);
+    assert!(logins::apply(&old).is_err());
+    assert_eq!(header(&bound(&mut s, &id, "https://replace-remember1979.example.org/wms")).unwrap().1, "session-replace-1979");
+    assert_eq!(store.inner.load(&format!("connection/{id}")).unwrap(), saved);
+    let mut later = session(Some(store));
+    later.load_connections(&s.connections.to_json());
+    assert_eq!(header(&bound(&mut later, &id, "https://replace-remember1979.example.org/wms")).unwrap().1, "saved-replace-1979");
 }
 
 #[test]
@@ -760,9 +1109,16 @@ fn junk_login_parameters_never_panic() {
         json!({"id":id,"apiKey":"\u{7f}","allowInsecure":true}),
         json!({"id":[id],"connection":{"id":id}}),
     ];
-    for cmd in
-        ["connection.new", "connection.edit", "connection.login", "connection.logout", "connection.test", "map.addTiles", "service.add"]
-    {
+    for cmd in [
+        "connection.new",
+        "connection.edit",
+        "connection.login",
+        "connection.logout",
+        "connection.forgetLogin",
+        "connection.test",
+        "map.addTiles",
+        "service.add",
+    ] {
         for p in &junk {
             let _ = s.run(cmd, p);
         }
@@ -800,7 +1156,7 @@ fn a_group_child_read_in_place_is_counted_once_and_refresh_respects_logout() {
     );
     assert!(header(&s.map().service_groups[0].url).is_some());
     s.run("connection.logout", &json!({"id":id})).unwrap();
-    assert_eq!(s.run("service.refresh", &json!({"group":5,"text":"not a document"})).unwrap_err(), web::REQUIRED);
+    assert_eq!(s.run("service.refresh", &json!({"group":5,"text":"not a document"})).unwrap_err(), web::LOGGED_OUT);
     assert_eq!(s.run("connection.list", &Value::Null).unwrap()["connections"][0]["loggedIn"], false);
 }
 
@@ -2270,5 +2626,60 @@ fn refused_literal_plus_query_rows_report_drops_without_losing_clean_unknowns() 
             let output: Value = serde_json::from_str(&saved).unwrap();
             assert_eq!(output["connections"][0], row);
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_remembered_query_login_reconnects_on_the_wire_without_leaking_into_history_or_recording() {
+    use rustgis_data::diagnostics::{Filter, History};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let server = LoginFile::new(Vec::new());
+    let store = Arc::new(MemorySecrets::new());
+    let url = format!("{}/mosaics/wmts?SERVICE=WMTS", server.base);
+    let history = History::default();
+    let _scope = history.enter();
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wmts","address":url,"auth":"query","keyName":"api_key"}));
+    // This key deliberately differs from the fixture's accepted one: History retains network
+    // failures, not successful requests. The refusal must still have received the saved key.
+    s.run("connection.login", &json!({"id":id,"apiKey":"remembered-refused-query-1979","remember":true,"allowInsecure":true})).unwrap();
+    s.run("project.openText", &json!({"text":project(&server.base,&id)})).unwrap();
+    let (saved_project, _) = s.project.saved_text(None).unwrap();
+    let prefs = serde_json::Map::from_iter([(crate::connections::PREF.to_string(), Value::String(s.connections.to_json()))]);
+    drop(s);
+    let mut later = session(None);
+    crate::prefs::use_saved_secrets(&mut later, &prefs, store);
+    later.run("project.openText", &json!({"text":saved_project})).unwrap();
+    assert_eq!(requests(&mut later), json!([]));
+    let address = bound(&mut later, &id, &url);
+    let applied = logins::apply(&address).unwrap().unwrap();
+    assert_eq!(applied.url, format!("{url}&api_key=remembered-refused-query-1979"));
+    assert!(applied.header.is_none());
+    let (tx, rx) = channel();
+    crate::render::rustgis_tiles::cache::head(&address, Box::new(move |result| tx.send(result).unwrap()));
+    assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap().is_err());
+    let network_requests = server.requests.lock().unwrap().clone();
+    assert!(
+        network_requests
+            .iter()
+            .any(|r| r.starts_with("HEAD /mosaics/wmts?SERVICE=WMTS&api_key=remembered-refused-query-1979 HTTP/1.1\r\n")),
+        "{network_requests:?}"
+    );
+    let records = history.records();
+    assert!(records.iter().any(|r| r.network.as_ref().is_some_and(|n| n.method == "HEAD" && n.status == Some(401))), "{records:?}");
+    let mut recording = Vec::new();
+    later.log.write(&mut recording, false).unwrap();
+    let (project, _) = later.project.saved_text(None).unwrap();
+    let public = format!(
+        "{records:?}\n{}\n{}\n{}\n{project}\n{:?}",
+        history.report(Filter::All),
+        String::from_utf8(recording).unwrap(),
+        later.connections.to_json(),
+        later.notices
+    );
+    for private in ["remembered-refused-query-1979", "rustgis-login"] {
+        assert!(!public.contains(private), "{private} reached History, recording or saved text: {public}");
     }
 }

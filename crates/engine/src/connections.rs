@@ -56,9 +56,9 @@ pub struct Connection {
     /// still has them. Commands never take it from a caller.
     #[serde(default, rename = "savedKeys", skip_serializing_if = "is_false")]
     pub saved_keys: bool,
-    /// A database connection's password was saved in the system's secret store (never the
-    /// password itself, which is `DatabaseLogins`' to read). Set only by a login that asked to
-    /// remember it, and cleared when the saved password is forgotten or no longer fits.
+    /// A database password or web-service login was saved in the system's secret store (never
+    /// the secret itself). Set only by a login that asked to remember it, and cleared when the
+    /// saved credential is forgotten or no longer fits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remembered: bool,
     /// How a web-service connection logs in ([`SERVICE_AUTH`]; empty: it doesn't). The method
@@ -313,6 +313,14 @@ pub(crate) fn register_query_name(c: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether [`register_query_name`] would accept `c` now, reserving nothing.
+pub(crate) fn query_name_available(c: &Connection) -> Result<(), String> {
+    if c.auth == "query" && !rustgis_data::address::can_note_login_query_name(&c.key_name) {
+        return Err(crate::render::rustgis_tiles::logins::TOO_MANY_QUERY_NAMES.into());
+    }
+    Ok(())
+}
+
 /// The names (never the values) of the query parameters `given` had that `saved` lacks, which a
 /// query login can carry: the keys an address held and saving left out, to offer as the login's
 /// parameter. At most four, each once. Only `name=value` pairs count: a bare segment can't be a
@@ -343,7 +351,7 @@ pub fn login_origin(c: &Connection) -> Option<String> {
 }
 
 /// Whether two definitions retain the same login identity: a database password uses the same
-/// database address; a session web login uses the same origin, method, user and key name.
+/// database address; a web login uses the same origin, method, user and key name.
 pub fn same_login(a: &Connection, b: &Connection) -> bool {
     a.kind == b.kind
         && if DATABASE_KINDS.contains(&a.kind.as_str()) {
@@ -390,8 +398,8 @@ pub fn clean(mut c: Connection) -> Result<(Connection, bool), String> {
     if c.kind != "s3" {
         c.saved_keys = false;
     }
-    // Only a database connection has a password to remember.
-    c.remembered &= DATABASE_KINDS.contains(&c.kind.as_str());
+    // Only a database connection has a password to remember, and a web service its login.
+    c.remembered &= DATABASE_KINDS.contains(&c.kind.as_str()) || !c.auth.is_empty();
     if c.kind != "s3" && !c.options.is_empty() {
         return Err(format!("{} connections take no options", c.kind));
     }
@@ -849,7 +857,7 @@ impl Connections {
         register_query_name(&c)?;
         self.next = following;
         c.id = format!("c{next}");
-        // A new connection, a copy or an import has no saved password: it is saved by a login.
+        // A new connection, a copy or an import has no saved login: it is saved by a login.
         c.remembered = false;
         self.connections.push(c.clone());
         if c.auth == "query" {
@@ -881,8 +889,9 @@ impl Connections {
         let slot = self.connections.iter().find(|c| c.id == id).ok_or_else(|| format!("no connection '{id}'"))?;
         c.id = id.into();
         c.saved_keys = slot.saved_keys && c.kind == "s3";
-        // Password identity includes the cleaned database kind, server and user.
-        c.remembered = slot.remembered && slot.kind == c.kind && slot.address == c.address;
+        // Password identity includes the cleaned database kind, server and user; a web login's,
+        // its origin, method, user and key name.
+        c.remembered = slot.remembered && same_login(slot, &c);
         Ok((c, stripped))
     }
 
@@ -927,9 +936,10 @@ impl Connections {
         Some(c)
     }
 
-    /// Says whether a database connection's password is saved; whether that changed the row.
+    /// Says whether a database password or web-service login is saved; whether that changed the row.
     pub fn set_remembered(&mut self, id: &str, on: bool) -> bool {
-        let Some(c) = self.connections.iter_mut().find(|c| c.id == id && DATABASE_KINDS.contains(&c.kind.as_str())) else {
+        let Some(c) = self.connections.iter_mut().find(|c| c.id == id && (DATABASE_KINDS.contains(&c.kind.as_str()) || !c.auth.is_empty()))
+        else {
             return false;
         };
         if c.remembered == on {

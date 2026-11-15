@@ -29209,6 +29209,7 @@ fn connections_commands() {
         "connection.remove",
         "connection.login",
         "connection.forgetPassword",
+        "connection.forgetLogin",
         "connection.test",
         "connection.browse",
     ] {

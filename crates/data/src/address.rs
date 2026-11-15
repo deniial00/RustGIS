@@ -136,6 +136,17 @@ pub fn note_login_query_name(name: &str) -> bool {
     names.len() < MAX_LOGIN_NAMES && names.insert(name)
 }
 
+/// Whether [`note_login_query_name`] would hold `name` now, without reserving it: lets a caller
+/// refuse before an irreversible step and still reserve the name last.
+pub fn can_note_login_query_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if !name.bytes().any(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let names = LOGIN_NAMES.read().unwrap_or_else(|e| e.into_inner());
+    names.contains(&name) || names.len() < MAX_LOGIN_NAMES
+}
+
 /// Context is collected from decoded query names, including legacy semicolon-separated pairs.
 #[derive(Default)]
 pub struct QueryNames {
