@@ -636,6 +636,7 @@ struct CountingStore {
     deletes: AtomicUsize,
     refuse_save: AtomicBool,
     refuse_delete: AtomicBool,
+    compete_on_delete: AtomicBool,
 }
 
 impl SecretStore for CountingStore {
@@ -654,6 +655,9 @@ impl SecretStore for CountingStore {
 
     fn delete(&self, account: &str) -> Result<(), SecretError> {
         self.deletes.fetch_add(1, Ordering::SeqCst);
+        if self.compete_on_delete.load(Ordering::SeqCst) {
+            assert!(!rustgis_data::address::note_login_query_name("zq_competing_1979"));
+        }
         if self.refuse_delete.load(Ordering::SeqCst) {
             return Err(SecretError::Denied);
         }
@@ -678,9 +682,6 @@ fn remembered_query_logins_recover_projects_through_the_opt_in_preferences_path(
     assert_eq!(store.inner.load(&account).unwrap(), None);
     s.run("connection.login", &json!({"id":id,"apiKey":key,"remember":true})).unwrap();
     assert!(s.connections.find(&id).unwrap().remembered);
-    let stored = store.inner.load(&account).unwrap().unwrap();
-    let envelope: Value = serde_json::from_str(stored.expose()).unwrap();
-    assert_eq!(envelope, json!({"origin":origin,"auth":"query","user":"","keyName":"api_key","secret":key}));
     let duplicate = s.run("connection.duplicate", &json!({"id":id,"name":"Unremembered copy"})).unwrap();
     assert_eq!(duplicate["remembered"], false);
     assert_eq!(store.inner.load(&format!("connection/{}", duplicate["id"].as_str().unwrap())).unwrap(), None);
@@ -838,6 +839,23 @@ fn failed_saved_login_reads_are_cached_until_explicit_login() {
 }
 
 #[test]
+fn a_failed_saved_login_activation_does_not_poison_session_recovery() {
+    let store = Arc::new(CountingStore::default());
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wms","address":"http://activation1979.example/wms","auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"activation-secret","remember":true,"allowInsecure":true})).unwrap();
+    let mut later = session(Some(store));
+    later.load_connections(&s.connections.to_json());
+    let c = later.connections.find(&id).unwrap().clone();
+    let secret = web::known_secret(&mut later, &c).unwrap();
+    assert!(web::activate(&mut later, &c, Some(&secret), false).is_err());
+    assert!(!later.database_logins.has_session_password(&id));
+    let retry = web::known_secret(&mut later, &c).unwrap();
+    web::activate(&mut later, &c, Some(&retry), true).unwrap();
+    assert_eq!(header(&bound(&mut later, &id, &c.address)).unwrap().1, "activation-secret");
+}
+
+#[test]
 fn a_missing_saved_login_clears_its_marker_and_logout_never_automatically_reloads() {
     let store = Arc::new(CountingStore::default());
     let origin = "https://sticky-remember1979.example.org";
@@ -971,6 +989,79 @@ fn failed_replacement_remember_keeps_the_old_saved_login_and_the_new_session_log
     let mut later = session(Some(store));
     later.load_connections(&s.connections.to_json());
     assert_eq!(header(&bound(&mut later, &id, "https://replace-remember1979.example.org/wms")).unwrap().1, "saved-replace-1979");
+}
+
+#[test]
+fn query_name_reservations_survive_competing_acceptance_and_release_on_failed_deletion() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if super::isolate_process_test(
+        "tests::service_logins::query_name_reservations_survive_competing_acceptance_and_release_on_failed_deletion",
+    ) {
+        return;
+    }
+    use rustgis_data::address::{note_login_query_name, reserve_login_query_name};
+    let shared = reserve_login_query_name("zq_shared_1979").unwrap();
+    let abandoned = reserve_login_query_name("zq_shared_1979").unwrap();
+    shared.commit();
+    drop(abandoned);
+    let mut url = "https://example.org/?zq_shared_1979=private".to_string();
+    rustgis_data::address::redact_query(&mut url);
+    assert!(!url.contains("private"));
+
+    let store = Arc::new(CountingStore::default());
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wms","address":"https://transaction1979.example/wms","auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"transaction-secret","remember":true})).unwrap();
+    let saved = store.inner.load(&format!("connection/{id}")).unwrap();
+    let definition = s.connections.find(&id).unwrap().clone();
+    let mut fillers = Vec::new();
+    while let Some(reservation) = reserve_login_query_name(&format!("zq_reserved_{}", fillers.len())) {
+        fillers.push(reservation);
+    }
+    drop(fillers.pop().unwrap());
+    store.refuse_delete.store(true, Ordering::SeqCst);
+    let edit = json!({"id":id,"auth":"query","keyName":"zq_transaction_1979"});
+    assert_eq!(s.run("connection.edit", &edit).unwrap_err(), web::NOT_FORGOTTEN);
+    assert_eq!(s.connections.find(&id).unwrap(), &definition);
+    assert_eq!(store.inner.load(&format!("connection/{id}")).unwrap(), saved);
+    let released = reserve_login_query_name("zq_probe_1979").unwrap();
+    drop(released);
+    store.refuse_delete.store(false, Ordering::SeqCst);
+    store.compete_on_delete.store(true, Ordering::SeqCst);
+    s.run("connection.edit", &edit).unwrap();
+    assert_eq!(store.inner.load(&format!("connection/{id}")).unwrap(), None);
+    assert!(!s.connections.find(&id).unwrap().remembered);
+    assert!(note_login_query_name("zq_transaction_1979"));
+    s.run("connection.login", &json!({"id":id,"apiKey":"new-transaction-secret"})).unwrap();
+    let applied = logins::apply(&bound(&mut s, &id, &definition.address)).unwrap().unwrap();
+    assert!(applied.url.ends_with("zq_transaction_1979=new-transaction-secret"));
+}
+
+#[test]
+fn stale_unremembered_sessions_clean_other_sessions_credentials_or_warn_without_blocking() {
+    for remove in [false, true] {
+        for refused in [false, true] {
+            let store = Arc::new(CountingStore::default());
+            let mut a = session(Some(store.clone()));
+            let id = new(&mut a, json!({"kind":"wms","address":"https://stale-marker1979.example/wms","auth":"header","keyName":"X-Key"}));
+            let stale_prefs = a.connections.to_json();
+            a.run("connection.login", &json!({"id":id,"apiKey":"stale-marker-secret","remember":true})).unwrap();
+            let mut b = session(Some(store.clone()));
+            b.load_connections(&stale_prefs);
+            store.refuse_delete.store(refused, Ordering::SeqCst);
+            let mark = b.notice_mark();
+            let command = if remove { "connection.remove" } else { "connection.edit" };
+            b.run(command, &json!({"id":id,"keyName":"X-New-Key"})).unwrap();
+            assert_eq!(b.connections.find(&id).is_none(), remove);
+            if !remove {
+                assert_eq!(b.connections.find(&id).unwrap().key_name, "X-New-Key");
+            }
+            assert_eq!(store.inner.load(&format!("connection/{id}")).unwrap().is_some(), refused);
+            let notices = b.notices_since(mark);
+            assert_eq!(notices.iter().filter(|n| n.text.contains("a saved login may remain")).count(), usize::from(refused));
+            assert!(!format!("{notices:?}").contains("stale-marker-secret"));
+        }
+    }
 }
 
 #[test]

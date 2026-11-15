@@ -395,11 +395,7 @@ fn connection_header(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, c: &Connecti
                 match app.run("connection.logout", json!({"id": c.id})) {
                     Ok(_) => {
                         crate::connectiontree::refresh(app, Some(&c.id));
-                        app.session.notify(
-                            tl!("Logged out. The login saved on this computer is unchanged. Log in explicitly to use it again.")
-                                .to_string(),
-                            false,
-                        );
+                        app.session.notify(tl!("Logged out. Log in explicitly to use this connection again.").to_string(), false);
                     }
                     Err(e) => app.session.notify(crate::connectionui::translated(&e), true),
                 }

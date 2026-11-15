@@ -93,7 +93,7 @@ pub(crate) fn translated(e: &str) -> String {
         web::UNAVAILABLE => tl!("The saved login is unavailable. Enter it for this session."),
         web::NOT_REMEMBERED => tl!("The login is available for this session but was not remembered on this computer."),
         web::NOT_FORGOTTEN => tl!("The saved login could not be forgotten. The connection was not changed."),
-        web::LOGGED_OUT => tl!("This connection is logged out. Log in explicitly to use its saved login."),
+        web::LOGGED_OUT => tl!("This connection is logged out. Log in explicitly to use it again."),
         web::INSECURE => tl!("This connection uses unencrypted http://. Tick the confirmation before sending its password or key."),
         web::BAD_SECRET => tl!("The password or key must fit a 4096-byte HTTP header, without control characters."),
         web::HEADER_ASCII => tl!("An API key sent in a header must use plain ASCII characters."),
@@ -1118,10 +1118,7 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     }
     if logout && let Some(id) = app.ui.connection.id.clone() {
         match app.run("connection.logout", json!({"id":id})) {
-            Ok(_) => {
-                app.dialogs.info =
-                    Some(tl!("Logged out. The login saved on this computer is unchanged. Log in explicitly to use it again.").into())
-            }
+            Ok(_) => app.dialogs.info = Some(tl!("Logged out. Log in explicitly to use this connection again.").into()),
             Err(e) => app.dialogs.error = Some(translated(&e)),
         }
     }
@@ -1175,16 +1172,13 @@ pub fn dialog(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
 }
 
 pub fn open_connection(app: &mut RustGisApp, c: &Connection) -> Result<(), String> {
-    if web::is_service(c) && !c.auth.is_empty() && !web::logged_in(&app.session, c) {
-        let login = if web::logged_out(&app.session, c) {
-            Err(web::LOGGED_OUT.to_string())
-        } else {
-            app.run("connection.login", json!({"id":c.id})).map(|_| ())
-        };
-        if let Err(e) = login {
-            password_prompt(app, &c.id, password_request(app, &c.id), Some(e));
-            return Ok(());
-        }
+    if web::is_service(c)
+        && !c.auth.is_empty()
+        && !web::logged_in(&app.session, c)
+        && let Err(e) = web::open_connection(&mut app.session, c)
+    {
+        password_prompt(app, &c.id, password_request(app, &c.id), Some(e));
+        return Ok(());
     }
     let (kind, extra) = match c.kind.as_str() {
         "postgres" | "mysql" | "sqlserver" => {

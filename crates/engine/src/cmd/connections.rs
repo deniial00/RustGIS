@@ -283,20 +283,20 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
                     && prepared.options.get("credentials").is_none_or(|v| v != "keys"))));
     let redactions = s.connections.redaction_counts();
     let slot = s.connections.connections.iter_mut().find(|c| c.id == old.id).ok_or("connection no longer exists")?;
-    // Refuse a full name registry before deleting a saved login; the name is still reserved last.
-    // A preflight, not a reservation: another session in this process could take the last free
-    // name between this check and the reservation below.
-    crate::connections::query_name_available(&prepared)?;
+    let reservation = crate::connections::reserve_query_name(&prepared)?;
+    let mut cleanup_warning = None;
     if credentials_changed {
-        if !web::is_service(&old) || old.remembered {
-            delete_account(&mut s.database_logins, &old)?;
-        }
+        cleanup_warning = delete_changed_account(&mut s.database_logins, &old)?;
         prepared.saved_keys = false;
         prepared.remembered = false;
     }
-    // Last before the commit: a failed step above must not reserve the name.
-    crate::connections::register_query_name(&prepared)?;
+    if let Some(reservation) = reservation {
+        reservation.commit();
+    }
     let c = crate::connections::Connections::commit_update(slot, &mut s.connections.generation, prepared);
+    if let Some(warning) = cleanup_warning {
+        s.warn(warning);
+    }
     if c.auth == "query" {
         s.connections.refresh_redaction();
     }
@@ -348,9 +348,11 @@ fn duplicate(s: &mut Session, p: &Value) -> CmdResult {
 
 fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let c = found(s, p)?.clone();
-    if DATABASE_KINDS.contains(&c.kind.as_str()) || c.kind == "s3" || c.remembered {
-        delete_account(&mut s.database_logins, &c)?;
-    }
+    let cleanup_warning = if DATABASE_KINDS.contains(&c.kind.as_str()) || c.kind == "s3" || web::is_service(&c) {
+        delete_changed_account(&mut s.database_logins, &c)?
+    } else {
+        None
+    };
     if web::is_service(&c) {
         web::forget(s, &c);
     }
@@ -358,6 +360,9 @@ fn remove(s: &mut Session, p: &Value) -> CmdResult {
         clear_identity(s, &c.id);
     }
     s.connections.remove(&c.id);
+    if let Some(warning) = cleanup_warning {
+        s.warn(warning);
+    }
     // The removed definition named one database: only its layers can change. The requests naming
     // it went with `clear_identity`.
     resolve_keys(s, &address_keys(&c.address));
@@ -421,6 +426,20 @@ fn delete_account(logins: &mut crate::connections::DatabaseLogins, c: &Connectio
     } else {
         Ok(())
     }
+}
+
+/// Unmarked web connections may have been remembered by another session. Attempt cleanup when
+/// a store is available, but a refusal must not prevent a session-only edit or removal.
+fn delete_changed_account(logins: &mut crate::connections::DatabaseLogins, c: &Connection) -> Result<Option<&'static str>, String> {
+    if web::is_service(c) && !c.remembered {
+        return Ok(if logins.has_store() && logins.delete(&c.id).is_err() {
+            Some("The connection was changed, but a saved login may remain on this computer because the credential store refused cleanup.")
+        } else {
+            None
+        });
+    }
+    delete_account(logins, c)?;
+    Ok(None)
 }
 
 fn clear_identity(s: &mut Session, id: &str) {
@@ -957,7 +976,6 @@ fn service_login(s: &mut Session, c: &Connection, p: &Value, remember: bool) -> 
     }
     let secret = rustgis_data::secrets::Secret::new(typed);
     web::activate(s, c, Some(&secret), insecure)?;
-    s.database_logins.set_session_password(&c.id, typed);
     let mut done = Reopened::default();
     if remember {
         if web::save(s.database_logins.secret_store(), c, typed) {

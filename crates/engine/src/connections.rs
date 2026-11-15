@@ -313,12 +313,14 @@ pub(crate) fn register_query_name(c: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether [`register_query_name`] would accept `c` now, reserving nothing.
-pub(crate) fn query_name_available(c: &Connection) -> Result<(), String> {
-    if c.auth == "query" && !rustgis_data::address::can_note_login_query_name(&c.key_name) {
-        return Err(crate::render::rustgis_tiles::logins::TOO_MANY_QUERY_NAMES.into());
+/// Holds query-name capacity across a fallible saved-credential deletion without holding a lock.
+pub(crate) fn reserve_query_name(c: &Connection) -> Result<Option<rustgis_data::address::LoginQueryNameReservation>, String> {
+    if c.auth != "query" {
+        return Ok(None);
     }
-    Ok(())
+    rustgis_data::address::reserve_login_query_name(&c.key_name)
+        .map(Some)
+        .ok_or_else(|| crate::render::rustgis_tiles::logins::TOO_MANY_QUERY_NAMES.into())
 }
 
 /// The names (never the values) of the query parameters `given` had that `saved` lacks, which a

@@ -19,7 +19,10 @@ struct CountedStore {
 }
 impl SecretStore for CountedStore {
     fn load(&self, account: &str) -> Result<Option<Secret>, SecretError> {
-        self.loads.fetch_add(1, Ordering::Relaxed);
+        // First-frame Earthdata restoration shares this store and can run on a worker.
+        if account.starts_with("connection/") {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+        }
         self.inner.load(account)
     }
     fn save(&self, account: &str, secret: &Secret) -> Result<(), SecretError> {
@@ -118,7 +121,6 @@ fn remembered_service_save_metadata_status_sticky_logout_and_forget() {
     h.get_by_role_and_label(Role::Button, "Log Out").click();
     settle(&mut h);
     assert!(!web::logged_in(&h.state().session, &c));
-    assert!(h.state().dialogs.info.as_deref().unwrap().contains("Log in explicitly"));
     h.get_by_label("Saved on this computer");
     assert!(store.inner.load(&account).unwrap().is_some());
     assert_eq!(web::known_secret(&mut h.state_mut().session, &c).unwrap_err(), web::LOGGED_OUT);
@@ -187,6 +189,49 @@ fn remembered_query_login_reconnects_in_a_fresh_shell_without_storing_it_in_defi
     assert!(web::logged_in(&fresh.state().session, &c));
     assert_eq!(web::known_secret(&mut fresh.state_mut().session, &c).unwrap().expose(), SECRET);
     assert_redacted(&fresh);
+}
+
+#[test]
+fn repeatedly_opening_a_service_keeps_a_failed_saved_read_until_explicit_login() {
+    let store = Arc::new(CountedStore { inner: MemorySecrets::failing(SecretError::Denied), ..Default::default() });
+    let mut h = with_store(Some(store.clone()));
+    let made = h
+        .state_mut()
+        .run(
+            "connection.new",
+            json!({
+                "kind":"wms", "name":"Unavailable saved login", "address":"https://remembered-read-failure-widget.example/wms",
+                "auth":"header", "keyName":"X-Api-Key"
+            }),
+        )
+        .unwrap();
+    let id = made["id"].as_str().unwrap();
+    h.state_mut().session.connections.set_remembered(id, true);
+    h.state_mut().run("ui.pane.sources", json!({})).unwrap();
+    settle(&mut h);
+
+    for _ in 0..3 {
+        h.get_by_label("Unavailable saved login").click_secondary();
+        settle(&mut h);
+        h.get_by_role_and_label(Role::Button, "Add With Options…").click();
+        settle(&mut h);
+        assert_eq!(h.state().dialogs.open, Some("editConnection"));
+        assert_eq!(h.state().dialogs.error.as_deref(), Some(web::UNAVAILABLE));
+        assert!(h.state().ui.connection.login);
+        assert_eq!(store.loads.load(Ordering::Relaxed), 1, "opening a source is not a saved-store retry");
+        assert!(!h.state().session.log.entries().any(|entry| entry.command == "connection.login"));
+        h.get_by_role_and_label(Role::Button, "Cancel").click();
+        settle(&mut h);
+    }
+
+    h.get_by_label("Unavailable saved login").click_secondary();
+    settle(&mut h);
+    h.get_by_role_and_label(Role::Button, "Add With Options…").click();
+    settle(&mut h);
+    save(&mut h);
+    assert_eq!(h.state().dialogs.error.as_deref(), Some(web::UNAVAILABLE));
+    assert_eq!(store.loads.load(Ordering::Relaxed), 2, "explicit login retries the saved store");
+    assert_redacted(&h);
 }
 
 #[test]

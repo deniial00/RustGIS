@@ -5,7 +5,7 @@
 //! or key. A secret given to `connection.login` lasts for this session, held by connection id in
 //! [`crate::connections::DatabaseLogins`], or on this computer too when the user asks to remember
 //! it: one opaque secret at the account `connection/<id>`, the JSON
-//! `{"origin", "auth", "user", "keyName", "secret"}`. The origin, method, user and header or
+//! `{"version": 1, "origin", "auth", "user", "keyName", "secret"}`. The origin, method, user and header or
 //! parameter name travel with the secret, so a connection whose definition changed outside the
 //! app can never send it elsewhere or another way. Its runtime identity binds a session secret
 //! the same way.
@@ -42,7 +42,7 @@ pub const NOT_REMEMBERED: &str = "The login is available for this session but wa
 /// A saved login couldn't be deleted, so what needed it gone didn't happen.
 pub const NOT_FORGOTTEN: &str = "The saved login could not be forgotten. The connection was not changed.";
 /// Automatic reads respect a deliberate logout until an explicit login.
-pub const LOGGED_OUT: &str = "This connection is logged out. Log in explicitly to use its saved login.";
+pub const LOGGED_OUT: &str = "This connection is logged out. Log in explicitly to use it again.";
 /// A login typed for a plain http:// address without the confirmation.
 pub const INSECURE: &str = "This connection's address uses plain http://, so its login would be sent unencrypted. Confirm with allowInsecure: true to send it anyway.";
 /// A password or key that can't be sent.
@@ -84,6 +84,7 @@ const MAX_STORED: usize = 8192;
 
 #[derive(Serialize)]
 struct Stored<'a> {
+    version: u32,
     origin: &'a str,
     auth: &'a str,
     user: &'a str,
@@ -95,6 +96,7 @@ struct Stored<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Loaded {
+    version: u32,
     origin: String,
     auth: String,
     user: String,
@@ -104,7 +106,7 @@ struct Loaded {
 }
 
 fn encode(c: &Connection, origin: &str, secret: &str) -> Result<Secret, &'static str> {
-    let stored = Stored { origin, auth: &c.auth, user: &c.user, key_name: &c.key_name, secret };
+    let stored = Stored { version: 1, origin, auth: &c.auth, user: &c.user, key_name: &c.key_name, secret };
     let text = serde_json::to_string(&stored).map_err(|_| SAVED_UNUSABLE)?;
     if text.len() > MAX_STORED {
         return Err(SAVED_UNUSABLE);
@@ -121,7 +123,8 @@ fn decode(value: &Secret, c: &Connection, origin: &str) -> Result<Secret, &'stat
     }
     // A decoding error would quote the text: its details are dropped.
     let l: Loaded = serde_json::from_str(text).map_err(|_| SAVED_UNUSABLE)?;
-    if c.auth.is_empty()
+    if l.version != 1
+        || c.auth.is_empty()
         || l.origin != origin
         || l.auth != c.auth
         || l.user != c.user
@@ -393,6 +396,9 @@ pub(crate) fn activate(s: &mut Session, c: &Connection, secret: Option<&Secret>,
     let replaced = s.web_logins.active.remove(&c.id).map(|old| logins::deactivate(&old.binding)).is_some();
     if let Some(next) = next {
         s.web_logins.active.insert(c.id.clone(), next);
+        if let Some(secret) = secret {
+            s.database_logins.set_session_password(&c.id, secret.expose());
+        }
     }
     retry(s, &c.id);
     let failed = reselect(s, c, &origin);
@@ -508,10 +514,7 @@ pub fn known_secret(s: &mut Session, c: &Connection) -> Result<Secret, String> {
         return Err(REQUIRED.into());
     }
     let error = match load(s.database_logins.secret_store(), c) {
-        Loading::Found(secret) => {
-            s.database_logins.set_session_password(&c.id, secret.expose());
-            return Ok(secret);
-        }
+        Loading::Found(secret) => return Ok(secret),
         Loading::Missing => {
             s.connections.set_remembered(&c.id, false);
             NONE_SAVED
@@ -587,6 +590,20 @@ pub fn request(s: &mut Session, connection: Option<&str>, url: &str) -> Result<S
     }
     let active = s.web_logins.active.get(&c.id).ok_or(REQUIRED)?;
     logins::bind(&active.binding, plain).map_err(str::to_string)
+}
+
+/// Opens a service using its existing or remembered login without retrying a failed store read
+/// or undoing logout. A pending project connection choice is adopted only after success.
+pub fn open_connection(s: &mut Session, c: &Connection) -> Result<(), String> {
+    let answers = answers(s, c);
+    request(s, Some(&c.id), &c.address)?;
+    if answers {
+        adopt(s, c);
+        if let Some(origin) = login_origin(c) {
+            resolve(s, Some(&BTreeSet::from([origin])));
+        }
+    }
+    Ok(())
 }
 
 pub fn request_params<'a>(s: &mut Session, p: &'a Value) -> Result<std::borrow::Cow<'a, Value>, String> {
@@ -1213,10 +1230,15 @@ mod stored_tests {
             assert_eq!(decode(&value, &edited, &origin), Err(SAVED_UNUSABLE));
         }
         let mut raw: Value = serde_json::from_str(value.expose()).unwrap();
-        for field in ["origin", "auth", "user", "keyName", "secret"] {
+        for field in ["version", "origin", "auth", "user", "keyName", "secret"] {
             let mut missing = raw.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert_eq!(decode(&Secret::new(missing.to_string()), &c, &origin), Err(SAVED_UNUSABLE));
+        }
+        for version in [serde_json::json!(0), serde_json::json!(2), serde_json::json!("1")] {
+            let mut newer = raw.clone();
+            newer["version"] = version;
+            assert_eq!(decode(&Secret::new(newer.to_string()), &c, &origin), Err(SAVED_UNUSABLE));
         }
         raw["extra"] = Value::Bool(true);
         assert_eq!(decode(&Secret::new(raw.to_string()), &c, &origin), Err(SAVED_UNUSABLE));
