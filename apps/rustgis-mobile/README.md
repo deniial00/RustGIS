@@ -15,7 +15,7 @@ Once:
 rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --locked
 # A JDK (for keytool and apksigner), and an Android SDK in ~/Android/Sdk (or ANDROID_HOME), with:
-sdkmanager "ndk;27.2.12479018" "build-tools;36.0.0" "platforms;android-35" "platform-tools"
+sdkmanager "ndk;27.2.12479018" "build-tools;36.0.0" "platforms;android-36" "platform-tools"
 ```
 
 Then:
@@ -39,8 +39,8 @@ adb push parcels.gpkg /sdcard/Android/data/org.rustgis.mobile/files/
 An emulator for testing without a phone:
 
 ```sh
-sdkmanager "emulator" "system-images;android-35;default;x86_64"
-avdmanager create avd -n rustgis-spike -k "system-images;android-35;default;x86_64" -d pixel_6
+sdkmanager "emulator" "system-images;android-36;default;x86_64"
+avdmanager create avd -n rustgis-spike -k "system-images;android-36;default;x86_64" -d pixel_6
 emulator -avd rustgis-spike -no-window -no-audio -gpu swiftshader_indirect
 adb exec-out screencap -p > shot.png
 ```
@@ -316,6 +316,65 @@ TestFlight this way. None of it is automated in CI yet.
    in the background (tracks recorded with the screen off), that it downloads no code (plugins
    are off on iOS), and why App Transport Security is off (a project's map layers may be any
    `http://` server).
+
+### Release builds in CI
+
+`.github/workflows/mobile.yml` runs for each published release: it builds an Android APK for each
+architecture (arm64 for phones and tablets, x86_64 for emulators and some Chromebooks) and the App
+Bundle holding both, signed with the release key, and the iOS app, signed for the App Store; it
+attaches them to the release (`RustGIS-<version>-android-arm64.apk`,
+`RustGIS-<version>-android-x86_64.apk`, `RustGIS-<version>-android.aab` and
+`RustGIS-<version>-ios.ipa`, each with its `.sha256`) and uploads the iOS app to TestFlight, where
+the internal testers' group gets it. The bundle installs only through Google Play and the IPA only
+through TestFlight and the App Store; they are on the release for the stores and for the record. A
+manual run builds and signs both as workflow artifacts, and uploads to TestFlight only when asked.
+Building and signing are separate jobs: the build jobs run every crate's build script with no
+secret and hand on only the unsigned app, and the sign jobs run on fresh runners, from a checkout
+no build has run in (`build-apk.sh --sign-only`, `build-ios.sh --sign-only`). The signature vouches
+for what the build job made: what dependencies compile into the app is kept in hand by `Cargo.lock`
+and reviewed updates. The secrets its header lists are the `mobile-release` environment's, which
+only `main` and `v*` tags may use. A pull request that changes `apps/rustgis-mobile` builds both
+with no secrets: the APK signed with a throwaway debug key, the iOS app unsigned.
+
+The same run builds the Android App Bundle Google Play takes (`RustGIS-<version>-android.aab`),
+signed with the release key and uploaded in the Play Console. `build-apk.sh` makes it when
+`BUNDLETOOL` names Google's bundletool jar: the manifest linked in protobuf form, and the APK's
+dex, libraries and assets as the bundle's one module, signed by `--sign-only` with `jarsigner`. A
+library with a segment aligned to less than 16 KB fails the build, as Play refuses one for apps
+targeting Android 15 and later. The app targets API 36.
+
+The release key has both roles in Play App Signing. When the app is first set up in the Play
+Console, it is given as the app signing key (the Console's option to export and upload a key from
+a Java keystore), not a key Play makes, and no separate upload key is made, so the bundles are
+uploaded signed with it too (Play takes the app signing key as the upload key when there is no
+other). Android installs an update only when it is signed with the certificate the installed copy
+was: with one key, an APK from GitHub and a build from Play update each other. With a key Play
+makes, they can't, and someone moving between them must uninstall first.
+
+A release also releases the bundle on Google Play's **production** track
+(`.github/scripts/play_upload.py`, which calls the Play Developer API with no third-party Action):
+it reaches users once Google's review passes. Until the app's first release is published in Play
+Console, Play takes only drafts, so the release is made a draft there (and the run says so) for
+someone to roll out by hand. A pre-release goes to internal testing as a draft, never to
+production. A manual run with `play` uploads to the track and status it is given, by default an
+internal testing draft. Play refuses a version code it has: when its bundle with that code is the
+same file, that upload is released instead; otherwise (a manual run uploaded the same commit, built
+on another runner, so the files differ) the run fails saying so, and that build is released in
+Play Console. It needs a Google Cloud service account Play Console lets release, its
+JSON key in the `mobile-release` environment as `PLAY_SERVICE_ACCOUNT_JSON`:
+
+0. A new app's first bundle is uploaded in Play Console by hand (Test and release › Internal
+   testing): the API can't add one to an app that has none. RustGIS's was, on 2026-11-15.
+1. In Google Cloud (any project), enable the Google Play Android Developer API, create a service
+   account and a JSON key for it.
+2. In Play Console, Users and permissions › Invite new users: the service account's email, with
+   access to RustGIS only and the permissions to release to production and to testing tracks.
+3. `gh secret set PLAY_SERVICE_ACCOUNT_JSON -e mobile-release < key.json`, then delete `key.json`.
+
+The Android release key (`ANDROID_KEYSTORE_BASE64`) can't be replaced: an APK signed with
+another key doesn't install as an update of one signed with it. Keep a copy of the keystore and
+its password outside GitHub. The iOS certificate and profile expire after a year: renew them in
+the Apple Developer portal and set their secrets again.
 
 Files put in the app's Documents folder are opened once the window is up, as the pushed files are
 on Android:

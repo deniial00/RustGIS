@@ -915,6 +915,7 @@ fn projected2(p: &Node) -> Result<Node, String> {
     let mut items = vec![Item::Node(geographic2(base, false)?)];
     let unit = cs_unit(p, &LENGTH_UNIT);
     let to_m = factor(unit).unwrap_or(1.0);
+    let unusable_unit = unit.is_some() && factor(unit).is_none();
     if let Some(conv) = p.child("CONVERSION") {
         let method = conv.child_of(&["METHOD", "PROJECTION"]);
         let mapped = method.and_then(|m| lookup(m, METHODS, |r| (r.0, r.1)));
@@ -948,7 +949,7 @@ fn projected2(p: &Node) -> Result<Node, String> {
             items.push(Item::Node(Node::new("PARAMETER", name, [Item::Num(v)])));
         }
     }
-    items.push(Item::Node(Node::new("UNIT", unit.map_or("metre", Node::title), [Item::Num(to_m)])));
+    items.push(Item::Node(Node::new("UNIT", unit.map_or("metre", Node::title), (!unusable_unit).then_some(Item::Num(to_m)))));
     items.extend(axes(p));
     items.extend(authority(p));
     Ok(Node::new("PROJCS", p.title(), items))
@@ -1228,6 +1229,15 @@ fn geographic(g: &Node) -> Result<Crs, String> {
 
 /// A projected system: by EPSG code for the common names, else as a PROJ definition.
 fn projected(p: &Node) -> Result<Crs, String> {
+    let invalid_unit = p.child("UNIT").is_some_and(|unit| unit.num(0).is_none());
+    let invalid_axis = p
+        .child("GEOGCS")
+        .and_then(|g| g.child("DATUM"))
+        .and_then(|datum| datum.child_of(&["SPHEROID", "ELLIPSOID"]))
+        .is_some_and(|ellipsoid| ellipsoid.num(0).is_none());
+    if invalid_unit || invalid_axis {
+        return Err("a projected system with a unit or datum radius that isn't a finite number isn't supported".into());
+    }
     let name = norm(p.title());
     let method = norm(p.child("PROJECTION").map_or("", Node::title));
     let pseudo = method == "MERCATOR_AUXILIARY_SPHERE" || method == "POPULAR_VISUALISATION_PSEUDO_MERCATOR";
@@ -1717,6 +1727,12 @@ fn wgs84_like(datum: Option<&Node>) -> Option<&'static str> {
         | "SIRGAS_2000"
         | "SIRGAS2000"
         | "SISTEMA_DE_REFERENCIA_GEOCENTRICO_PARA_LAS_AMERICAS_2000" => Some("+ellps=GRS80 +towgs84=0,0,0"),
+        // TWD97, Taiwan's datum (EPSG:3824), including the 2020 realization the Ministry of the
+        // Interior's own data uses (`GCS_TWD97[2020]` on `D_TWD_1997`): EPSG's TWD97 to WGS 84
+        // (1) (EPSG:3830) is null too, to about 1 m. On GRS 1980 only, like MAGNA below.
+        "TWD_1997" | "TWD97" | "TAIWAN_DATUM_1997" => datum
+            .filter(|d| ellipsoid_matches(d, "+proj=longlat +ellps=GRS80"))
+            .map(|_| "+ellps=GRS80 +towgs84=0,0,0"),
         // MAGNA-SIRGAS, Colombia's densification of SIRGAS (EPSG:4686, and its 2018 realization):
         // null too, as the bundled EPSG:9377 (GRS 1980, no shift) has it (#1476), on that
         // ellipsoid only, so a definition naming another one keeps it.
@@ -2932,6 +2948,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn twd97_reads_as_wgs_84_without_a_note() {
+        // The .prj of the Ministry of the Interior's county boundaries (TWD97 2020 realization).
+        let geographic = r#"GEOGCS["GCS_TWD97[2020]",DATUM["D_TWD_1997",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        assert_eq!(read_wkt(geographic), Ok((Crs::LonLat, None)));
+        // The EPSG datum name, as OGC WKT writes it.
+        let ogc = geographic.replace("D_TWD_1997", "Taiwan_Datum_1997");
+        assert_eq!(read_wkt(&ogc), Ok((Crs::LonLat, None)));
+        // TWD97 / TM2 zone 121 (EPSG:3826), as ArcGIS writes it: no note either.
+        let tm2 = r#"PROJCS["TWD_1997_TM_Taiwan",GEOGCS["GCS_TWD_1997",DATUM["D_TWD_1997",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",250000.0],PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",121.0],PARAMETER["Scale_Factor",0.9999],PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]"#;
+        let (crs, note) = read_wkt(tm2).unwrap();
+        assert_eq!(note, None);
+        // Taipei 101, about (306 km, 2,770 km) in TM2.
+        let lonlat = crs.transformer().unwrap().to_lonlat(Coord::new(306_000.0, 2_770_000.0)).unwrap();
+        assert!((lonlat.x - 121.56).abs() < 0.01 && (lonlat.y - 25.03).abs() < 0.01, "{lonlat:?}");
+        // TWD67, the older datum on another ellipsoid, still gets its note.
+        let twd67 = r#"GEOGCS["GCS_TWD_1967",DATUM["D_TWD_1967",SPHEROID["GRS_1967_Truncated",6378160.0,298.25]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        assert!(read_wkt(twd67).unwrap().1.is_some_and(|n| n.contains("D_TWD_1967")));
+        // A file that names TWD97 on another spheroid keeps it, and its note.
+        let other =
+            geographic.replace(r#"SPHEROID["GRS_1980",6378137.0,298.257222101]"#, r#"SPHEROID["International_1924",6378388.0,297.0]"#);
+        let (crs, note) = read_wkt(&other).unwrap();
+        assert!(note.is_some_and(|n| n.contains("D_TWD_1997")));
+        let def = crs.custom_def().unwrap();
+        assert!((def.proj4.contains("6378388") || def.proj4.contains("+ellps=intl")) && !def.proj4.contains("GRS80"), "{}", def.proj4);
+    }
+
+    #[test]
     fn esri_national_datums_match_epsg() {
         for line in include_str!("esri_datum_corpus.tsv").lines().filter(|l| !l.starts_with('#')) {
             let fields: Vec<_> = line.split('\t').collect();
@@ -4122,6 +4165,50 @@ pub(crate) mod tests {
     /// Web Mercator's codes with a shift of zero, as GDAL writes them, are Web Mercator. Read from
     /// their parameters, as Mercator on an ellipsoid, points would be 21 km off.
     #[test]
+    fn projected_systems_refuse_present_unusable_units_and_radii() {
+        for original in [ESRI_32631, ESRI_3857] {
+            for (from, to) in [
+                (r#"UNIT["Meter",1.0]]"#, r#"UNIT["Meter",1e400]]"#),
+                (r#"UNIT["Meter",1.0]]"#, r#"UNIT["Meter"]]"#),
+                ("6378137.0,298.257223563", "1e400,298.257223563"),
+            ] {
+                let malformed = original.replace(from, to);
+                assert_ne!(malformed, original);
+                assert!(crs_from_wkt(&malformed).is_err(), "{:?}", crs_from_wkt(&malformed));
+            }
+        }
+        let wkt2 = include_str!("wkt2_corpus.tsv")
+            .lines()
+            .find(|l| l.contains("Popular Visualisation Pseudo Mercator"))
+            .and_then(|l| l.rsplit('\t').next())
+            .unwrap();
+        let mut parsed = parse(wkt2).unwrap();
+        // Remove the projected authority: this checks its supplied definition, not trusted EPSG.
+        parsed.items.retain(|i| !matches!(i, Item::Node(n) if n.name.eq_ignore_ascii_case("ID")));
+        let unit = cs_unit(&parsed, &LENGTH_UNIT).unwrap();
+        let title = unit.title().to_string();
+        for numbers in [vec![], vec![Item::Num(f64::INFINITY)]] {
+            let mut malformed = parsed.clone();
+            for item in &mut malformed.items {
+                if let Item::Node(n) = item {
+                    if n.name.eq_ignore_ascii_case("LENGTHUNIT") {
+                        *n = Node::new("LENGTHUNIT", &title, numbers.clone());
+                    } else if n.name.eq_ignore_ascii_case("AXIS") {
+                        for nested in &mut n.items {
+                            if let Item::Node(unit) = nested
+                                && unit.name.eq_ignore_ascii_case("LENGTHUNIT")
+                            {
+                                *unit = Node::new("LENGTHUNIT", &title, numbers.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(projected(&projected2(&malformed).unwrap()).is_err());
+        }
+    }
+
+    #[test]
     fn web_mercator_with_a_zero_shift_is_web_mercator() {
         // EPSG:3785, and GDAL 1's EPSG:900913.
         let popular = r#"PROJCS["Popular Visualisation CRS / Mercator",GEOGCS["Popular Visualisation CRS (deprecated)",DATUM["Popular_Visualisation_Datum",SPHEROID["Popular Visualisation Sphere",6378137,0,AUTHORITY["EPSG","7059"]],TOWGS84[0,0,0,0,0,0,0],AUTHORITY["EPSG","6055"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4055"]],PROJECTION["Mercator_1SP"],PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],EXTENSION["PROJ4","+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs"],AUTHORITY["EPSG","3785"]]"#;
@@ -4160,6 +4247,9 @@ pub(crate) mod tests {
             (r#""Central_Meridian",0.0"#, r#""Central_Meridian",10.0"#),
             (r#""Auxiliary_Sphere_Type",0.0"#, r#""Auxiliary_Sphere_Type",1.0"#),
             (r#"UNIT["Meter",1.0]]"#, r#"UNIT["Foot_US",0.3048006096012192]]"#),
+            (r#"UNIT["Meter",1.0]]"#, r#"UNIT["Meter",1e400]]"#),
+            (r#"UNIT["Meter",1.0]]"#, r#"UNIT["Meter"]]"#),
+            ("6378137.0,298.257223563", "1e400,298.257223563"),
         ] {
             let off = ESRI_3857.replace(from, to);
             assert_ne!(off, ESRI_3857, "{from}");

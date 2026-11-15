@@ -29,7 +29,7 @@ pub mod report;
 pub mod shadow;
 pub mod slots;
 pub mod source;
-pub use slots::{LayerRole, Slot, SlotAt, SlotPos, TileRole};
+pub use slots::{LayerRole, Slot, SlotPos, TileRole};
 pub mod symbol_by;
 pub mod symbology;
 pub mod tiles;
@@ -785,8 +785,24 @@ impl Layer {
 
     /// [`Layer::load_all`], with what of the source couldn't be read.
     pub fn load_all_counted(&self) -> Result<(Dataset, Unreadable), String> {
-        let Some(copy) = self.open_source()? else { return Ok((self.dataset.clone(), Unreadable::default())) };
-        let (mut ds, report) = copy.read_all()?;
+        let (ds, report) = self.load_all_reported()?;
+        Ok((ds, Unreadable { rows: report.skipped, dates: report.unread_dates, rounded: report.rounded_dates }))
+    }
+
+    /// A whole read with its complete reader report, including messages beyond rows and dates.
+    /// Callers decide which opening notices were already shown and which the new read discovered.
+    pub fn load_all_reported(&self) -> Result<(Dataset, rustgis_data::ReadReport), String> {
+        let Some(copy) = self.open_source()? else { return Ok((self.dataset.clone(), rustgis_data::ReadReport::default())) };
+        let (mut ds, mut report) = copy.read_all()?;
+        if let Some(info) = copy.info() {
+            ds.zm_dropped |= info.zm_dropped;
+            for note in &info.notes {
+                let message = format!("{}: {note}", info.name);
+                if !report.messages.contains(&message) {
+                    report.messages.push(message);
+                }
+            }
+        }
         ds.name = self.dataset.name.clone();
         ds.zm_dropped |= self.dataset.zm_dropped;
         if ds.features.is_empty() && ds.geometry_type == rustgis_data::GeometryType::None {
@@ -804,7 +820,7 @@ impl Layer {
             }
         }
         ds.source = self.dataset.source.clone();
-        Ok((ds, Unreadable { rows: report.skipped, dates: report.unread_dates, rounded: report.rounded_dates }))
+        Ok((ds, report))
     }
 
     /// A streamed layer's source, to export whole a chunk at a time, with a dataset of no
@@ -3164,27 +3180,6 @@ impl Layer {
             LayerRole::Raster | LayerRole::ZarrStore => self.raster.as_mut()?.output_slot_mut(role),
             LayerRole::GpkgPath => Some(&mut self.gpkg.as_mut()?.path),
             LayerRole::PostgisEditDatabase => Some(&mut self.postgis.as_mut()?.origin.database),
-        }
-    }
-}
-
-impl Map {
-    /// Bridge identity is independent of the address value; duplicate ids remain ambiguous.
-    pub fn slot_identity(&self, at: &SlotPos) -> Option<SlotAt> {
-        match at {
-            SlotPos::Group { group, child } => {
-                let g = self.service_groups.get(*group)?;
-                Some(SlotAt::Group {
-                    id: g.id,
-                    child: match child {
-                        Some(i) => Some(g.children.get(*i)?.layer),
-                        None => None,
-                    },
-                })
-            }
-            SlotPos::Tile { tile, role } => Some(SlotAt::Tile { id: self.tiles.get(*tile)?.id.clone(), role: *role }),
-            SlotPos::Terrain => Some(SlotAt::Terrain),
-            SlotPos::Layer { layer, role } => Some(SlotAt::Layer { id: self.layers.get(*layer)?.id, role: *role }),
         }
     }
 }
