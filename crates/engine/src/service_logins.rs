@@ -190,6 +190,9 @@ fn owner(value: &Secret, c: &Connection, origin: Option<&str>) -> Owner {
     }
     let Ok(Value::Object(o)) = serde_json::from_str::<Value>(text) else { return Owner::Damaged };
     match o.get("version").map(Value::as_u64) {
+        // A database password's envelope (`kind`, `address`, `password`) shares this account's id
+        // and has no version: another kind's value, never a damaged web login to replace or delete.
+        None | Some(None) if o.contains_key("kind") || o.contains_key("password") => return Owner::Other,
         None | Some(None) => return Owner::Damaged,
         Some(Some(1)) if o.keys().all(|k| FIELDS.contains(&k.as_str())) => {}
         Some(Some(_)) => return Owner::Other,
@@ -519,6 +522,14 @@ pub(crate) fn logout(s: &mut Session, c: &Connection) {
 pub(crate) fn retry(s: &mut Session, id: &str) {
     s.web_logins.failed.remove(id);
     s.web_logins.logged_out.remove(id);
+    s.web_logins.said.remove(id);
+}
+
+/// Forgets a failed read of the saved login of `id` and that it was said, after the saved login
+/// is deleted: a blank login then asks for the login instead of repeating the old failure. A
+/// logout stays in place.
+pub(crate) fn forget_failure(s: &mut Session, id: &str) {
+    s.web_logins.failed.remove(id);
     s.web_logins.said.remove(id);
 }
 

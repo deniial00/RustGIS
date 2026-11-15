@@ -408,6 +408,7 @@ fn forget_login(s: &mut Session, p: &Value) -> CmdResult {
     }
     let others = delete_web_login(&mut s.database_logins, &c, true)?.0;
     s.connections.set_remembered(&c.id, false);
+    web::forget_failure(s, &c.id);
     if others {
         s.warn(web::OTHERS_LEFT);
     }

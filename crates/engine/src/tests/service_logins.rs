@@ -1175,6 +1175,50 @@ fn forget_and_remember_leave_another_connections_login_and_clear_a_damaged_one()
 }
 
 #[test]
+fn a_database_password_under_a_web_connections_id_survives_forget_remember_edit_and_remove() {
+    let store = Arc::new(CountingStore::default());
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wms","address":"https://db-envelope1979.example/wms","auth":"header","keyName":"X-Key"}));
+    let account = format!("connection/{id}");
+    // A Postgres password saved by another session under the same connection id.
+    let database = Secret::new(json!({"kind":"postgres","address":"postgres:host=h dbname=g","password":"database-1979"}).to_string());
+    store.inner.save(&account, &database).unwrap();
+    let saved = store.inner.load(&account).unwrap();
+    let mark = s.notice_mark();
+    s.run("connection.forgetLogin", &json!({"id":id})).unwrap();
+    assert_eq!(store.inner.load(&account).unwrap(), saved);
+    assert_eq!(s.notices_since(mark).iter().filter(|n| n.text == web::OTHERS_LEFT).count(), 1);
+    let result = s.run("connection.login", &json!({"id":id,"apiKey":"web-1979","remember":true})).unwrap();
+    assert_eq!(result["warning"], web::NOT_REMEMBERED);
+    assert_eq!(store.inner.load(&account).unwrap(), saved);
+    s.run("connection.edit", &json!({"id":id,"address":"https://moved-db-envelope1979.example/wms"})).unwrap();
+    assert_eq!(store.inner.load(&account).unwrap(), saved);
+    let mut later = session(Some(store.clone()));
+    later.load_connections(&s.connections.to_json());
+    later.run("connection.remove", &json!({"id":id})).unwrap();
+    assert_eq!(store.inner.load(&account).unwrap(), saved);
+}
+
+#[test]
+fn forgetting_a_saved_login_clears_the_failed_read_it_leaves_behind() {
+    let store = Arc::new(CountingStore::default());
+    let origin = "https://forget-failed1979.example";
+    let mut s = session(Some(store.clone()));
+    let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
+    s.run("connection.login", &json!({"id":id,"apiKey":"failed-read-1979","remember":true})).unwrap();
+    let account = format!("connection/{id}");
+    store.inner.save(&account, &Secret::new("damaged-failed-read-1979")).unwrap();
+    let mut later = session(Some(store.clone()));
+    later.load_connections(&s.connections.to_json());
+    let c = later.connections.find(&id).unwrap().clone();
+    assert_eq!(web::known_secret(&mut later, &c).err().as_deref(), Some(web::SAVED_UNUSABLE));
+    later.run("connection.forgetLogin", &json!({"id":id})).unwrap();
+    assert_eq!(store.inner.load(&account).unwrap(), None);
+    let c = later.connections.find(&id).unwrap().clone();
+    assert_eq!(web::known_secret(&mut later, &c).err().as_deref(), Some(web::REQUIRED));
+}
+
+#[test]
 fn a_stale_remembered_marker_never_deletes_another_identitys_login() {
     for remove in [false, true] {
         let store = Arc::new(CountingStore::default());
