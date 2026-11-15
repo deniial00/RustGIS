@@ -807,7 +807,7 @@ fn failed_saved_login_reads_are_cached_until_explicit_login() {
         let mut s = session(Some(store.clone()));
         let id = new(&mut s, json!({"kind":"wms","address":format!("{origin}/wms"),"auth":"header","keyName":"X-Key"}));
         let mut prefs: Value = serde_json::from_str(&s.connections.to_json()).unwrap();
-        prefs["connections"][0]["remembered"] = json!(true);
+        prefs["connections"][0]["savedLogin"] = json!(true);
         let expected = if failure.is_some() {
             web::UNAVAILABLE
         } else {
@@ -1142,6 +1142,82 @@ fn remembering_preserves_unrecognized_envelopes_and_keeps_the_new_session_login(
         later.load_connections(&s.connections.to_json());
         assert_eq!(web::request(&mut later, Some(&id), "https://future-envelope.example/wms").unwrap_err(), web::SAVED_UNUSABLE);
     }
+}
+
+#[test]
+fn forget_and_remember_leave_another_connections_login_and_clear_a_damaged_one() {
+    let store = Arc::new(CountingStore::default());
+    let mut a = session(Some(store.clone()));
+    let id = new(&mut a, json!({"kind":"wms","address":"https://forget-owner.example/wms","auth":"header","keyName":"X-Key"}));
+    a.run("connection.login", &json!({"id":id,"apiKey":"owner-secret","remember":true})).unwrap();
+    let account = format!("connection/{id}");
+    let saved = store.inner.load(&account).unwrap();
+    // Another session numbers a different connection the same and forgets "its" login.
+    let mut b = session(Some(store.clone()));
+    assert_eq!(new(&mut b, json!({"kind":"wms","address":"https://forget-other.example/wms","auth":"header","keyName":"X-Key"})), id);
+    b.connections.set_remembered(&id, true);
+    let mark = b.notice_mark();
+    assert_eq!(b.run("connection.forgetLogin", &json!({"id":id})).unwrap()["remembered"], false);
+    assert_eq!(store.inner.load(&account).unwrap(), saved);
+    assert_eq!(b.notices_since(mark).iter().filter(|n| n.text == web::OTHERS_LEFT).count(), 1);
+    // A damaged value under the id is no one's: Forget deletes it, and Remember replaces it.
+    store.inner.save(&account, &Secret::new("damaged-owner-envelope")).unwrap();
+    let mark = a.notice_mark();
+    a.run("connection.forgetLogin", &json!({"id":id})).unwrap();
+    assert_eq!(store.inner.load(&account).unwrap(), None);
+    assert!(a.notices_since(mark).is_empty());
+    store.inner.save(&account, &Secret::new("damaged-owner-envelope")).unwrap();
+    let out = a.run("connection.login", &json!({"id":id,"apiKey":"replacement-owner","remember":true})).unwrap();
+    assert!(out["warning"].is_null());
+    let mut later = session(Some(store));
+    later.load_connections(&a.connections.to_json());
+    assert_eq!(header(&bound(&mut later, &id, "https://forget-owner.example/wms")).unwrap().1, "replacement-owner");
+}
+
+#[test]
+fn a_stale_remembered_marker_never_deletes_another_identitys_login() {
+    for remove in [false, true] {
+        let store = Arc::new(CountingStore::default());
+        let mut a = session(Some(store.clone()));
+        let id = new(&mut a, json!({"kind":"wms","address":"https://stale-owner.example/wms","auth":"header","keyName":"X-Key"}));
+        a.run("connection.login", &json!({"id":id,"apiKey":"first-secret","remember":true})).unwrap();
+        // Another session moves the connection to another origin and remembers a login there.
+        let mut b = session(Some(store.clone()));
+        b.load_connections(&a.connections.to_json());
+        b.run("connection.edit", &json!({"id":id,"address":"https://moved-owner.example/wms"})).unwrap();
+        b.run("connection.login", &json!({"id":id,"apiKey":"moved-secret","remember":true})).unwrap();
+        let account = format!("connection/{id}");
+        let saved = store.inner.load(&account).unwrap();
+        // This session still holds the old definition, marked remembered.
+        assert!(a.connections.find(&id).unwrap().remembered);
+        let (command, params) =
+            if remove { ("connection.remove", json!({"id":id})) } else { ("connection.edit", json!({"id":id,"keyName":"X-Other"})) };
+        a.run(command, &params).unwrap();
+        assert_eq!(store.inner.load(&account).unwrap(), saved, "remove={remove}");
+        let mut later = session(Some(store));
+        later.load_connections(&b.connections.to_json());
+        assert_eq!(header(&bound(&mut later, &id, "https://moved-owner.example/wms")).unwrap().1, "moved-secret");
+    }
+}
+
+#[test]
+fn a_web_saved_login_marker_is_written_where_an_older_reader_keeps_it() {
+    let mut s = session(None);
+    let web = new(&mut s, json!({"kind":"wms","address":"https://marker-field.example/wms","auth":"header","keyName":"X-Key"}));
+    let database = new(&mut s, json!({"kind":"postgres","address":"postgres:host=127.0.0.1 port=1 user=u dbname=gis"}));
+    assert!(s.connections.set_remembered(&web, true));
+    assert!(s.connections.set_remembered(&database, true));
+    let prefs: Value = serde_json::from_str(&s.connections.to_json()).unwrap();
+    let row = |id: &str| prefs["connections"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap().clone();
+    // An older RustGIS clears `remembered` on a web connection, but keeps a field it doesn't know.
+    assert_eq!(row(&web)["savedLogin"], true);
+    assert!(row(&web).get("remembered").is_none());
+    assert_eq!(row(&database)["remembered"], true);
+    assert!(row(&database).get("savedLogin").is_none());
+    let mut later = session(None);
+    later.load_connections(&prefs.to_string());
+    assert!(later.connections.find(&web).unwrap().remembered);
+    assert!(later.connections.find(&database).unwrap().remembered);
 }
 
 #[test]

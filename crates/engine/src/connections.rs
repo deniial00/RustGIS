@@ -15,6 +15,29 @@ pub const PREF: &str = "connections";
 /// The version of that preference this RustGIS reads and writes. One from a newer RustGIS isn't
 /// read, and is kept as it is.
 pub const VERSION: u64 = 1;
+/// A web connection's saved-login marker is written under its own field. An older RustGIS
+/// reads `remembered` as a database password's marker and clears it on a web connection, so it
+/// would save the preference without the marker; a field it doesn't know it keeps unchanged.
+const WEB_MARKER: &str = "savedLogin";
+
+fn web_row(row: &Map<String, Value>) -> bool {
+    row.get("kind").and_then(Value::as_str).is_some_and(|k| SERVICE_KINDS.contains(&k.trim()))
+}
+
+/// A saved row as [`Connection`] reads it: a web connection's [`WEB_MARKER`] as its marker.
+fn read_marker(mut row: Value) -> Value {
+    if let Value::Object(o) = &mut row
+        && web_row(o)
+    {
+        let saved = o.remove(WEB_MARKER);
+        o.remove("remembered");
+        if let Some(saved) = saved {
+            o.insert("remembered".into(), saved);
+        }
+    }
+    row
+}
+
 /// Why the preference wasn't read when it couldn't be (`{why}`), and what to do.
 const UNREADABLE: &str =
     "the saved connections couldn't be read ({why}); fix or remove \"connections\" in the preferences file to use or change them";
@@ -520,7 +543,7 @@ impl Connections {
         let mut stripped_flags = Vec::new();
         for row in rows {
             // Readability is checked even past the limit, without registering the login's name.
-            let read = serde_json::from_value::<Row>(row.clone()).ok().and_then(|r| {
+            let read = serde_json::from_value::<Row>(read_marker(row.clone())).ok().and_then(|r| {
                 let name = r.connection.name.trim().to_string();
                 let group = r.connection.group.trim().to_string();
                 let (c, stripped) = clean(r.connection).ok()?;
@@ -788,6 +811,12 @@ impl Connections {
         let mut rows: Vec<Value> = Vec::with_capacity(self.connections.len() + self.kept.rows.len());
         for c in &self.connections {
             let mut row = serde_json::to_value(c).unwrap_or(Value::Null);
+            if let Value::Object(o) = &mut row
+                && web_row(o)
+                && let Some(saved) = o.remove("remembered")
+            {
+                o.insert(WEB_MARKER.into(), saved);
+            }
             if let (Value::Object(row), Some(other)) = (&mut row, self.kept.fields.get(&c.id)) {
                 for (k, v) in other {
                     row.entry(k.clone()).or_insert_with(|| v.clone());

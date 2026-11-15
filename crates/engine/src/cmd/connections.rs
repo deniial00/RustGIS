@@ -399,23 +399,27 @@ fn logout(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 /// Deletes the login of a web-service connection saved on this computer. The login of this
-/// session keeps working.
+/// session keeps working. A value under its id that is another connection's (or a newer
+/// RustGIS's) is left, and said.
 fn forget_login(s: &mut Session, p: &Value) -> CmdResult {
     let c = found(s, p)?.clone();
     if !web::is_service(&c) {
         return Err(format!("{} connections have no saved web login (connection.forgetPassword, connection.forgetSavedKeys)", c.kind));
     }
-    delete_account(&mut s.database_logins, &c)?;
+    let others = delete_web_login(&mut s.database_logins, &c, true)?.0;
     s.connections.set_remembered(&c.id, false);
+    if others {
+        s.warn(web::OTHERS_LEFT);
+    }
     let c = s.connections.find(&c.id).cloned().unwrap_or(c);
     Ok(shown(s, &c))
 }
 
+/// Deletes a database password or S3 keys saved for `c` (a web login goes through
+/// [`delete_web_login`]).
 fn delete_account(logins: &mut crate::connections::DatabaseLogins, c: &Connection) -> Result<(), String> {
     let (marked, error) = if c.kind == "s3" {
         (c.saved_keys, keys::NOT_FORGOTTEN)
-    } else if web::is_service(c) {
-        (c.remembered, web::NOT_FORGOTTEN)
     } else {
         (c.remembered, "The saved password couldn't be deleted. The connection was left unchanged.")
     };
@@ -428,22 +432,35 @@ fn delete_account(logins: &mut crate::connections::DatabaseLogins, c: &Connectio
     }
 }
 
-/// Unmarked web connections may have been remembered by another session. Attempt cleanup when
-/// a store is available, but a refusal must not prevent a session-only edit or removal.
+/// Deletes a web connection's saved login if it is its own (or damaged), never another
+/// connection's under the same id: whether such a one was left, and a warning when a cleanup the
+/// connection didn't ask for couldn't be done. A connection marked remembered (or `strict`) is
+/// refused instead: the edit, removal or forget doesn't happen.
+fn delete_web_login(
+    logins: &mut crate::connections::DatabaseLogins,
+    c: &Connection,
+    strict: bool,
+) -> Result<(bool, Option<&'static str>), String> {
+    let strict = strict || c.remembered;
+    if !logins.has_store() {
+        return if c.remembered { Err(web::NOT_FORGOTTEN.into()) } else { Ok((false, None)) };
+    }
+    match web::forget_saved(logins, c) {
+        web::Forgetting::Done => Ok((false, None)),
+        web::Forgetting::Others => Ok((true, None)),
+        web::Forgetting::Refused if strict => Err(web::NOT_FORGOTTEN.into()),
+        web::Forgetting::Refused => Ok((
+            false,
+            Some("The connection was changed, but a saved login may remain on this computer because the credential store refused cleanup."),
+        )),
+    }
+}
+
+/// Deletes the saved credential a changed or removed definition leaves behind. A web
+/// connection's is deleted only when it is its own (see [`delete_web_login`]).
 fn delete_changed_account(logins: &mut crate::connections::DatabaseLogins, c: &Connection) -> Result<Option<&'static str>, String> {
-    if web::is_service(c) && !c.remembered {
-        let cleanup_failed = logins.has_store()
-            && match web::load(logins.secret_store(), c) {
-                // The id alone is not ownership: another session can reuse the same counter.
-                web::Loading::Found(_) => logins.delete(&c.id).is_err(),
-                web::Loading::Unavailable => true,
-                web::Loading::Missing | web::Loading::Unusable => false,
-            };
-        return Ok(if cleanup_failed {
-            Some("The connection was changed, but a saved login may remain on this computer because the credential store refused cleanup.")
-        } else {
-            None
-        });
+    if web::is_service(c) {
+        return delete_web_login(logins, c, false).map(|(_, warning)| warning);
     }
     delete_account(logins, c)?;
     Ok(None)

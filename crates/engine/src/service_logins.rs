@@ -41,6 +41,10 @@ pub const UNAVAILABLE: &str = "The saved login is unavailable. Enter it for this
 pub const NOT_REMEMBERED: &str = "The login is available for this session but was not remembered on this computer.";
 /// A saved login couldn't be deleted, so what needed it gone didn't happen.
 pub const NOT_FORGOTTEN: &str = "The saved login could not be forgotten. The connection was not changed.";
+/// Forget found a login under this connection's id saved for another connection (or by a newer
+/// RustGIS), and left it.
+pub const OTHERS_LEFT: &str =
+    "The login saved under this connection's id belongs to another connection or a newer RustGIS, so it was left unchanged.";
 /// Automatic reads respect a deliberate logout until an explicit login.
 pub const LOGGED_OUT: &str = "This connection is logged out. Log in explicitly to use it again.";
 /// A login typed for a plain http:// address without the confirmation.
@@ -164,7 +168,47 @@ pub fn load(store: Store<'_>, c: &Connection) -> Loading {
     }
 }
 
-/// Keeps the login of `c` on this computer, replacing an earlier one; whether it was kept.
+/// Whose a stored value is, for deciding whether to delete or overwrite it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Owner {
+    /// Saved for this connection's origin, method, user and header or parameter name.
+    Mine,
+    /// Not an envelope at all: no one can use it, so it never blocks this connection.
+    Damaged,
+    /// Another identity under the same id, or a newer RustGIS's envelope: left as it is.
+    Other,
+}
+
+const FIELDS: [&str; 6] = ["version", "origin", "auth", "user", "keyName", "secret"];
+
+/// Whose `value` is. It never looks at the secret, and an envelope from a newer version (another
+/// version, or fields this one doesn't know) is someone else's, never damaged.
+fn owner(value: &Secret, c: &Connection, origin: Option<&str>) -> Owner {
+    let text = value.expose();
+    if text.len() > MAX_STORED {
+        return Owner::Other;
+    }
+    let Ok(Value::Object(o)) = serde_json::from_str::<Value>(text) else { return Owner::Damaged };
+    match o.get("version").map(Value::as_u64) {
+        None | Some(None) => return Owner::Damaged,
+        Some(Some(1)) if o.keys().all(|k| FIELDS.contains(&k.as_str())) => {}
+        Some(Some(_)) => return Owner::Other,
+    }
+    let field = |name: &str| o.get(name).and_then(Value::as_str);
+    let (Some(saved_origin), Some(auth), Some(user), Some(key_name)) = (field("origin"), field("auth"), field("user"), field("keyName"))
+    else {
+        return Owner::Damaged;
+    };
+    if origin == Some(saved_origin) && auth == c.auth && user == c.user && key_name == c.key_name { Owner::Mine } else { Owner::Other }
+}
+
+/// Serializes each check-then-write of a stored login in this process, so two sessions can't
+/// both see an empty account and replace each other's. The store has no conditional write, so
+/// another process writing the same account can still race this.
+static STORE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Keeps the login of `c` on this computer, replacing an earlier one of its own or a damaged
+/// value; whether it was kept. Another connection's or a newer version's value is left unchanged.
 pub fn save(store: Store<'_>, c: &Connection, secret: &str) -> bool {
     let Some(store) = store else { return false };
     if c.id.is_empty() || c.auth.is_empty() {
@@ -172,14 +216,40 @@ pub fn save(store: Store<'_>, c: &Connection, secret: &str) -> bool {
     }
     let Some(origin) = login_origin(c) else { return false };
     let Ok(value) = encode(c, &origin, secret) else { return false };
-    // A keychain account can belong to another definition or a newer writer. An explicit
-    // replacement secret does not authorize discarding an envelope this version cannot read.
+    let _held = STORE_WRITE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match store.load(&account(&c.id)) {
-        Ok(Some(previous)) if decode(&previous, c, &origin).is_err() => return false,
+        Ok(Some(previous)) if owner(&previous, c, Some(&origin)) == Owner::Other => return false,
         Err(_) => return false,
         _ => {}
     }
     store.save(&account(&c.id), &value).is_ok()
+}
+
+/// What deleting the login saved for a web connection did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Forgetting {
+    /// Its own (or a damaged) value was deleted, or there was none.
+    Done,
+    /// The value under its id is another connection's or a newer RustGIS's: left unchanged.
+    Others,
+    /// The store couldn't be read or refused the deletion.
+    Refused,
+}
+
+/// Deletes the login saved for `c` when it is this connection's or damaged. The id alone isn't
+/// ownership: another session can number a different connection the same.
+pub fn forget_saved(logins: &mut crate::connections::DatabaseLogins, c: &Connection) -> Forgetting {
+    let Some(store) = logins.secret_store().cloned() else { return Forgetting::Refused };
+    let _held = STORE_WRITE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let value = match store.load(&account(&c.id)) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Forgetting::Done,
+        Err(_) => return Forgetting::Refused,
+    };
+    if owner(&value, c, login_origin(c).as_deref()) == Owner::Other {
+        return Forgetting::Others;
+    }
+    if logins.delete(&c.id).is_ok() { Forgetting::Done } else { Forgetting::Refused }
 }
 
 /// Whether `c` is a web-service connection (one that can log in with a method).

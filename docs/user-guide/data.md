@@ -1072,21 +1072,22 @@ connection. A missing or unavailable saved login leaves the connection waiting f
 login; it does not prevent session-only sign-in. The credential envelope is versioned; unknown
 versions are refused without rewriting the saved value. A failed store read is not retried merely
 by opening the source again: choose **Log In** or run `connection.login` explicitly to retry.
-**Remember** also leaves an existing envelope unchanged if this version cannot read it or it
-belongs to another connection identity. The newly entered login still works for the session,
-with a warning that it was not remembered. Use **Forget Saved Login** explicitly before replacing
-an unreadable entry.
+Deleting or replacing a saved login, by **Remember**, **Forget Saved Login**, or an edit or
+removal, first checks whose it is. Connection IDs are numbered per computer, so another
+connection, or a newer RustGIS, can have saved a login under the same ID. A login saved for this
+connection's origin, method, user and header or parameter name is replaced or deleted, and so is
+a damaged value that no version can read. A login saved for another connection or by a newer
+RustGIS is left unchanged: **Remember** then keeps the entered login for the session only, with a
+warning, and **Forget Saved Login** says the entry was left.
 Editing the origin, method, user or header or
 parameter name ends the login and deletes the saved one (a connection's kind doesn't change:
 make a new one); renaming or changing its path at the same origin keeps it. Removing a connection
 also deletes its saved login; duplicating it copies neither its session nor its saved login.
-If deletion is refused for a connection marked remembered, the edit or removal does not happen.
-An unmarked connection can still have a credential saved by another session: when a store is
-available, editing its login identity or removing it attempts cleanup only if the stored
-envelope matches the old origin, method, user and header or parameter name. An unrelated or
-unreadable entry is left untouched. If reading or deleting the entry fails, the change continues
-with a warning that a saved login may remain. This cleanup can ask to unlock the credential store
-even when the connection is unmarked.
+If the store refuses the deletion for a connection marked remembered, the edit or removal does
+not happen. A connection that isn't marked can still have a login saved by another session, so a
+store is checked for it too; if that fails, the change goes on with a warning that a saved login
+may remain. This check can ask to unlock the credential store even for a connection that isn't
+marked.
 
 **Forget Saved Login** (`connection.forgetLogin {"id":"c1"}`) deletes only the stored login,
 leaving the session's login usable. **Log Out** (`connection.logout`) ends the session login,
