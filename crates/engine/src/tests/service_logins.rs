@@ -2028,6 +2028,15 @@ fn a_key_in_the_address_is_left_out_and_its_parameter_offered_as_the_login() {
     let edited = s.run("connection.edit", &json!({"id":clean["id"],"address":format!("{origin}/clean?token=edited-757")})).unwrap();
     assert_eq!(edited["stripped"], true);
     assert_eq!(edited["strippedParameters"], json!(["token"]));
+    // A key written as a bare name (no `=`) is left out but never offered or quoted.
+    let mark = s.notice_mark();
+    let bare = s
+        .run("connection.new", &json!({"kind":"wmts","name":"Bare","address":format!("{origin}/bare?apikey9f3cRGSYNTHbare757&layer=a")}))
+        .unwrap();
+    assert_eq!(bare["stripped"], true, "{bare}");
+    assert!(bare.get("strippedParameters").is_none(), "{bare}");
+    let said = format!("{bare}{:?}", s.notices_since(mark));
+    assert!(!said.contains("RGSYNTHbare757"), "{said}");
 }
 
 /// A key in a query login is sent on the wire to the origin (and only as the parameter the

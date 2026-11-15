@@ -315,12 +315,13 @@ pub(crate) fn register_query_name(c: &Connection) -> Result<(), String> {
 
 /// The names (never the values) of the query parameters `given` had that `saved` lacks, which a
 /// query login can carry: the keys an address held and saving left out, to offer as the login's
-/// parameter. At most four, each once.
+/// parameter. At most four, each once. Only `name=value` pairs count: a bare segment can't be a
+/// login's parameter, and when it is a key written as a name, its text is the secret.
 pub fn stripped_parameters(given: &str, saved: &str) -> Vec<String> {
     use crate::render::rustgis_tiles::logins;
     fn names(address: &str) -> Vec<&str> {
         let query = address.split('#').next().and_then(|a| a.split_once('?')).map_or("", |(_, query)| query);
-        query.split('&').filter_map(|pair| pair.split('=').next()).filter(|name| !name.is_empty()).collect()
+        query.split('&').filter_map(|pair| pair.split_once('=').map(|(name, _)| name)).filter(|name| !name.is_empty()).collect()
     }
     let kept = names(saved);
     let mut left_out: Vec<String> = Vec::new();
