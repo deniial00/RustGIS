@@ -1688,7 +1688,8 @@ pub(super) fn read_limited_with_nodata(
         Some([x, xc, xr, y, yc, yr]) => {
             let affine = [x, xc * sx, xr * sy, y, yc * sx, yr * sy];
             let (bands, ow, oh, north_up) = super::north_up(&bands, w, h, affine, max)?;
-            turned = Some(turned_note(affine, (ow, oh), &north_up));
+            // The file's own placement, not the scaled one: its pixels are the ones it is coarser than.
+            turned = Some(turned_note([x, xc, xr, y, yc, yr], (ow, oh), &north_up));
             transform = north_up;
             (bands, ow, oh)
         }
@@ -1752,7 +1753,8 @@ pub(super) fn read_limited_with_nodata(
 
 /// What turning a rotated or skewed image north up says ([`super::north_up`]): its pixels are
 /// resampled, nearest pixel, onto square ones of the same area, coarser when the grid would pass the
-/// sample limit. `affine` is the image's, `(w, h)` the grid's size and `grid` its placement.
+/// sample limit. `affine` is the file's own, at full resolution, `(w, h)` the grid's size and `grid`
+/// its placement.
 fn turned_note(affine: [f64; 6], (w, h): (u32, u32), grid: &GeoTransform) -> String {
     let [_, xc, xr, _, yc, yr] = affine;
     let own = (xc * yr - xr * yc).abs().sqrt();
@@ -4214,5 +4216,17 @@ mod tests {
             let tif = typed::<GrayI64>(2, 2, samples, Some(file));
             assert_eq!(read(std::io::Cursor::new(tif), "c").unwrap().rounded.iter().sum::<u64>(), *counted, "no-data {file}");
         }
+    }
+
+    /// A rotated image read from an overview is compared with the file's own pixels (2 units here),
+    /// not the overview's scaled ones (4 units): a grid of 4-unit pixels is coarser than the file's.
+    #[test]
+    fn turned_note_compares_the_grid_with_the_files_own_pixels() {
+        let file = [0.0, 0.0, 2.0, 0.0, 2.0, 0.0];
+        let grid = |pixel: f64| GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: pixel, pixel_height: -pixel };
+        let coarser = turned_note(file, (8, 8), &grid(4.0));
+        assert!(coarser.contains("coarser than the file's (2.000)"), "{coarser}");
+        let same = turned_note(file, (8, 8), &grid(2.0));
+        assert!(!same.contains("coarser"), "{same}");
     }
 }

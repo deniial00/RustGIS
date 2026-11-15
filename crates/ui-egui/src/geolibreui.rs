@@ -51,8 +51,9 @@ pub fn start(app: &mut RustGisApp, p: &Value, claim: Option<u64>) -> Result<(), 
 }
 
 impl Read {
-    /// Polls one batch. Missing chunks retain the format's fill values; other errors stop it.
-    fn poll(&mut self) -> Option<Result<Vec<u8>, String>> {
+    /// Polls one batch. Missing chunks retain the format's fill values; other errors stop it. A
+    /// finished slice comes with what reading it said (its coordinate system, what it dropped).
+    fn poll(&mut self) -> Option<Result<(Vec<u8>, Vec<String>), String>> {
         let mut error = self.error.take();
         self.waiting.retain(|(key, slot)| match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
             Some(Ok(bytes)) => {
@@ -117,7 +118,10 @@ impl Read {
             return Some(
                 zarr::assemble(&store, &plan, &self.got, name, None)
                     .map_err(|e| e.to_string())
-                    .and_then(|r| zarr::write_project_slice(&r).map_err(|e| e.to_string())),
+                    .and_then(|r| {
+                        let tif = zarr::write_project_slice(&r).map_err(|e| e.to_string())?;
+                        Ok((tif, r.lost))
+                    }),
             );
         }
         if self.got.is_empty() && self.forbidden > 0 {
@@ -163,9 +167,14 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     }
     for (id, url, mut params, result) in done {
         match result {
-            Ok(bytes) => {
+            Ok((bytes, lost)) => {
                 params["geolibreZarr"] = json!(true);
+                // Said as a layer's read notices are (`zarrui`), named as the import's name.
+                let layer = params.get("name").and_then(Value::as_str).unwrap_or("Zarr").to_string();
                 app.add_landed(crate::serviceui::Landed { id, url, params, origin: None }, bytes);
+                for loss in lost {
+                    app.session.notify(crate::i18n::fmt("{layer}: {notice}", &[("layer", &layer), ("notice", &loss)]), false);
+                }
             }
             Err(e) => {
                 app.session.download_failed(id);
@@ -270,7 +279,26 @@ mod tests {
             read.got.insert(key.into(), values.iter().flat_map(|v| v.to_le_bytes()).collect());
         }
         read.phase = Some((store, plan));
-        assert!(!read.poll().unwrap().unwrap().is_empty());
+        assert!(!read.poll().unwrap().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn geolibre_zarr_slice_comes_with_what_reading_it_said() {
+        let mut metadata = metadata();
+        metadata["metadata"]["value/.zarray"]["chunks"] = json!([1, 2]);
+        let store = zarr::parse_store(&[(".zmetadata".into(), metadata.to_string().into_bytes())]).unwrap();
+        let plan = zarr::plan(&store, &zarr::Selection { variable: "value".into(), index: Vec::new(), window: None }).unwrap();
+        let mut read = reader(Vec::new());
+        let values = [("value/0.0", [1.0f64, 2.0]), ("value/1.0", [3.0, 4.0]), ("lat/0", [0.5, 1.5]), ("lon/0", [0.5, 1.5])];
+        for (key, value) in values {
+            read.got.insert(key.into(), value.iter().flat_map(|v| v.to_le_bytes()).collect());
+        }
+        read.phase = Some((store, plan));
+        // The store gives no coordinate system, so the WGS 84 reading is said with the slice, not dropped.
+        let (bytes, lost) = read.poll().unwrap().unwrap();
+        assert!(!bytes.is_empty());
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert!(lost[0].contains("doesn't say its coordinate system"), "{lost:?}");
     }
 
     #[test]

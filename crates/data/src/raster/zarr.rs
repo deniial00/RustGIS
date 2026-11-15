@@ -1600,18 +1600,25 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         dx = -dx;
     }
     let lonlat = geographic(yc) && geographic(xc);
-    let (crs, crs_note) = if lonlat {
+    let (crs, crs_notes): (Option<Crs>, Vec<String>) = if lonlat {
         // The axes are read as longitude/latitude, in the geographic system the store gives
         // (ED50, OSGB36, another body's), else as WGS 84 whatever it says; a shift it gives that
-        // isn't applied is still said.
+        // isn't applied is still said, and so is a system that isn't geographic or none at all.
         match crs_of(store, a) {
-            Some((c, note)) if c.is_geographic() => (Some(c), note),
-            given => (Some(Crs::LonLat), given.and_then(|(_, note)| note)),
+            Some((c, note)) if c.is_geographic() => (Some(c), note.into_iter().collect()),
+            Some((_, note)) => {
+                let assumed = super::assumed_wgs84_note("its coordinate system isn't geographic");
+                (Some(Crs::LonLat), note.into_iter().chain([assumed]).collect())
+            }
+            None => {
+                let assumed = super::assumed_wgs84_note("the store doesn't say its coordinate system");
+                (Some(Crs::LonLat), vec![assumed])
+            }
         }
     } else {
         match crs_of(store, a) {
-            Some((crs, note)) => (Some(crs), note),
-            None => (crs, crs.and_then(super::planetary::note_of)),
+            Some((crs, note)) => (Some(crs), note.into_iter().collect()),
+            None => (crs, crs.and_then(super::planetary::note_of).into_iter().collect()),
         }
     };
     let Some(crs) = crs else {
@@ -1650,7 +1657,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     if rounded > 0 {
         r.rounded = vec![rounded];
     }
-    r.lost.extend(crs_note);
+    r.lost.extend(crs_notes);
     Ok(r)
 }
 
@@ -2912,14 +2919,17 @@ mod tests {
             assert_eq!((r.crs, r.lost), (want, Vec::new()), "EPSG:{code}");
         }
         let wgs84 = wkt::to_wkt(Crs::LonLat).unwrap();
-        for attrs in [serde_json::json!({}), serde_json::json!({"crs_wkt": wgs84}), serde_json::json!({"crs_wkt": "EPSG:4326"})] {
+        for attrs in [serde_json::json!({"crs_wkt": wgs84}), serde_json::json!({"crs_wkt": "EPSG:4326"})] {
             let r = read(attrs.clone(), &lons);
             assert_eq!((r.crs, r.lost), (Crs::LonLat, Vec::new()), "{attrs}");
         }
-        // A projected system on degree axes: the axes win, as before.
+        // No system at all, or a projected one on degree axes: the axes win, and the WGS 84 reading is said.
+        let said = |why: &str| vec![crate::raster::assumed_wgs84_note(why)];
+        let r = read(serde_json::json!({}), &lons);
+        assert_eq!((r.crs, r.lost), (Crs::LonLat, said("the store doesn't say its coordinate system")), "no system");
         let utm17 = wkt::to_wkt(Crs::Epsg(32617)).unwrap();
         let r = read(serde_json::json!({"crs_wkt": utm17}), &lons);
-        assert_eq!((r.crs, r.lost), (Crs::LonLat, Vec::new()));
+        assert_eq!((r.crs, r.lost), (Crs::LonLat, said("its coordinate system isn't geographic")));
         // A geographic system's longitudes of 0–360 are turned to start at -180, as WGS 84's are.
         let r = read(serde_json::json!({"crs_wkt": ed50}), &[190.5, 191.5]);
         assert!(r.crs != Crs::LonLat);

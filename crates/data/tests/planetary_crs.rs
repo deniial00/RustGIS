@@ -846,6 +846,9 @@ fn geotiff_axes_of_the_earth_stay_wgs_84_and_feet_are_converted() {
     // A geographic file with its own Earth ellipsoid (Clarke 1866) is read as it was.
     let clarke = raster::read_bytes("clarke.tif", &geotiff(-180.0, &mars_geographic_keys(""), &[6_378_206.4, 294.978_698_2], "")).unwrap();
     assert_eq!(clarke.crs, Crs::LonLat);
+    // With no EPSG code its datum isn't read: said, once.
+    assert_eq!(clarke.lost.len(), 1, "{:?}", clarke.lost);
+    assert!(clarke.lost[0].contains("its datum isn't read"), "{:?}", clarke.lost);
     // The Earth's semi-major axis in feet (GeogLinearUnits 9002) is still the Earth's.
     let mut keys = mars_geographic_keys("");
     keys[3] += 1;
