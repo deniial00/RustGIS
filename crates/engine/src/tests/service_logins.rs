@@ -1987,8 +1987,13 @@ fn query_logins_send_the_key_only_to_their_origin_and_save_none() {
 fn a_key_in_the_address_is_left_out_and_its_parameter_offered_as_the_login() {
     let origin = "https://offer757.example.org";
     let mut s = session(None);
+    let mark = s.notice_mark();
     let made =
         s.run("connection.new", &json!({"kind":"wmts","address":format!("{origin}/wmts?api_key=typed-key-757&layer=a#frag")})).unwrap();
+    // Said as a notice too, so the CLI and Python hear it: once, naming the parameter, never the key.
+    let said = s.notices_since(mark);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].text.contains("(api_key)") && said[0].text.contains("API key in the query") && !said[0].text.contains("typed-key-757"));
     assert_eq!(made["stripped"], true);
     assert_eq!(made["strippedParameters"], json!(["api_key"]));
     assert_eq!(made["address"], format!("{origin}/wmts?layer=a"));
@@ -2008,7 +2013,9 @@ fn a_key_in_the_address_is_left_out_and_its_parameter_offered_as_the_login() {
     assert_eq!(crate::sources::redact(&format!("{origin}/other?ZQOffer757=typed-custom-757&x=1")), format!("{origin}/other?x=1"));
     assert!(crate::sources::holds_secret(&json!({"url":format!("{origin}/other?zqoffer757=typed-custom-757")})));
     // Clean addresses and ordinary parameters: no notice, nothing offered.
+    let mark = s.notice_mark();
     let clean = s.run("connection.new", &json!({"kind":"wmts","name":"Clean","address":format!("{origin}/clean?layer=a&empty=")})).unwrap();
+    assert!(s.notices_since(mark).is_empty(), "a clean address says nothing");
     assert!(clean.get("stripped").is_none() && clean.get("strippedParameters").is_none(), "{clean}");
     let plain = s
         .run(
@@ -2120,17 +2127,38 @@ fn rejected_query_commands_never_log_their_pasted_custom_key() {
         &json!({"name":"Clean control","kind":"wmts","address":address("layer2","clean"),"auth":"query","keyName":"zq_clean_control757"}),
     )
     .unwrap();
+    // An edit that leaves out `auth` keeps the saved query login: its keyName still names the key.
+    let query = s
+        .run("connection.new", &json!({"name":"Saved query","kind":"wmts","address":"https://rejected-log757.example/q","auth":"query","keyName":"zq_saved757"}))
+        .unwrap();
+    let no_auth = json!({"id":query["id"],"name":"Taken","address":address("zq_fresh_noauth757","RGSYNTH_rejected_noauth"),"keyName":"zq_fresh_noauth757"});
+    assert!(s.run("connection.edit", &no_auth).is_err());
+    // A database connection's address error never quotes a query login's key.
+    let db_error = s
+        .run(
+            "connection.new",
+            &json!({"kind":"postgres","address":address("zq_db757","RGSYNTH_rejected_db"),"auth":"query","keyName":"zq_db757"}),
+        )
+        .unwrap_err();
+    assert!(!db_error.contains("RGSYNTH_rejected_db") && db_error.contains("layer=a"), "{db_error}");
     let entries: Vec<_> = s.log.entries().filter(|e| e.command.starts_with("connection.")).collect();
     let raw = serde_json::to_string(&entries).unwrap();
-    assert!(!raw.contains("RGSYNTH_rejected_new") && !raw.contains("RGSYNTH_rejected_edit"), "{raw}");
+    for secret in ["RGSYNTH_rejected_new", "RGSYNTH_rejected_edit", "RGSYNTH_rejected_noauth", "RGSYNTH_rejected_db"] {
+        assert!(!raw.contains(secret), "{secret}: {raw}");
+    }
     assert!(raw.contains("layer=a") && raw.contains("layer2=clean"), "ordinary parameters stay in replayable log text: {raw}");
     for csv in [false, true] {
         let mut exported = Vec::new();
         s.log.write(&mut exported, csv).unwrap();
         let text = String::from_utf8(exported).unwrap();
-        assert!(!text.contains("RGSYNTH_rejected_new") && !text.contains("RGSYNTH_rejected_edit"), "csv={csv}: {text}");
+        assert!(
+            !["RGSYNTH_rejected_new", "RGSYNTH_rejected_edit", "RGSYNTH_rejected_noauth", "RGSYNTH_rejected_db"]
+                .iter()
+                .any(|k| text.contains(k)),
+            "csv={csv}: {text}"
+        );
     }
-    for key in ["zq_rejected_new757", "zq_rejected_edit757"] {
+    for key in ["zq_rejected_new757", "zq_rejected_edit757", "zq_fresh_noauth757", "zq_db757"] {
         let original = address(key, "RGSYNTH_unregistered");
         assert_eq!(crate::sources::redact(&original), original, "rejected command registered {key}");
     }

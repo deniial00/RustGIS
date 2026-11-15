@@ -350,7 +350,11 @@ pub fn clean(mut c: Connection) -> Result<(Connection, bool), String> {
     if t.len() > MAX_TEXT || t.chars().any(char::is_control) {
         return Err("a connection address must be at most 2048 bytes and contain no control characters".into());
     }
-    let stored = sources::redact(t);
+    // A query login's own parameter goes before anything quotes the address (an error included):
+    // its name may not be registered yet, so the generic redaction can't see it.
+    let query_name = Some(c.key_name.trim()).filter(|name| c.auth.trim().eq_ignore_ascii_case("query") && !name.is_empty());
+    let given = query_name.map_or_else(|| t.to_string(), |name| crate::render::rustgis_tiles::logins::without_query_parameter(t, name));
+    let stored = sources::redact(&given);
     let stripped = stored != t;
     if DATABASE_KINDS.contains(&c.kind.as_str()) {
         if stored.is_empty() || database_kind(&stored) != Some(c.kind.as_str()) {

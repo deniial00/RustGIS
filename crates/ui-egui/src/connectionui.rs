@@ -218,7 +218,6 @@ pub(crate) fn picker_combo(
 pub(crate) fn keep(app: &mut RustGisApp, p: Value) -> Result<String, String> {
     let v = app.run("connection.new", p)?;
     let id = v["id"].as_str().map(str::to_owned).ok_or_else(|| "connection.new returned no id".to_string())?;
-    stripped_notice(app, &v);
     app.session.notify(i18n::fmt("Saved as the connection {name}", &[("name", v["name"].as_str().unwrap_or(""))]), false);
     Ok(id)
 }
@@ -228,21 +227,6 @@ pub(crate) fn keep_button(ui: &mut egui::Ui) -> bool {
     ui.button(tl!("Save as Connection"))
         .on_hover_text(tl!("Keep this endpoint under Data Sources › Connections, without its password or keys"))
         .clicked()
-}
-
-fn stripped_notice(app: &mut RustGisApp, v: &Value) {
-    if v["stripped"] == true {
-        let names: Vec<&str> = v["strippedParameters"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        let text = if names.is_empty() {
-            tl!("A password or token in the address was left out of the saved connection definition.").to_string()
-        } else {
-            i18n::fmt(
-                "A password or token in the address ({names}) was left out of the saved connection definition. To send it, edit the connection: choose API key in the query, name that parameter, and give the key when you log in.",
-                &[("names", &names.join(", "))],
-            )
-        };
-        app.session.notify(text, false);
-    }
 }
 
 pub(crate) fn label(kind: &str) -> &'static str {
@@ -798,7 +782,6 @@ fn save(app: &mut RustGisApp) -> Result<(), String> {
         "connection.new"
     };
     let v = app.run(command, p)?;
-    stripped_notice(app, &v);
     let id = v["id"].as_str().map(str::to_owned).ok_or_else(|| "the connection has no id".to_string())?;
     // Kept at once: a Save tried again edits this connection rather than adding another.
     let created = app.ui.connection.id.is_none();

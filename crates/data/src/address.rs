@@ -81,17 +81,33 @@ pub fn normalized_name(raw: &str) -> Option<String> {
     decoded_name(raw, DecodeMode::Form).map(|s| letters(&s))
 }
 
-/// Whether a raw parameter name matches `name`, case-insensitively after bounded decoding.
-/// Unlike generic form-name classification, literal and decoded `+` remain `+` on every pass.
-/// An unresolved name is withheld rather than risk keeping a hidden credential.
+/// Whether a raw parameter name matches `name`, case-insensitively, as written or after any of
+/// its bounded decoding passes (a configured name is literal text, so an intermediate spelling
+/// can be it). Unlike generic form-name classification, literal and decoded `+` remain `+` on
+/// every pass. A name with no escape is compared as written, however long; an escaped one that
+/// is too long or still decodes after the budget is withheld rather than risk keeping a key.
 pub fn query_name_matches(raw: &str, name: &str) -> bool {
     if raw.eq_ignore_ascii_case(name) {
         return true;
     }
-    if !raw.bytes().any(|b| b == b'%' || b == b'\\') && raw.len() <= MAX_NAME_BYTES {
+    if !raw.bytes().any(|b| b == b'%' || b == b'\\') {
         return false;
     }
-    decoded_name(raw, DecodeMode::LiteralPlus).is_none_or(|decoded| decoded.eq_ignore_ascii_case(name.as_bytes()))
+    if raw.len() > MAX_NAME_BYTES {
+        return true;
+    }
+    let mut current = raw.as_bytes().to_vec();
+    for _ in 0..MAX_DECODE_PASSES {
+        let next = decode_pass(&current, DecodeMode::LiteralPlus);
+        if next == current {
+            return false;
+        }
+        if next.eq_ignore_ascii_case(name.as_bytes()) {
+            return true;
+        }
+        current = next;
+    }
+    decode_pass(&current, DecodeMode::LiteralPlus) != current
 }
 
 /// The query parameter names (ASCII, case-insensitive, punctuation preserved) saved web-service
@@ -632,7 +648,12 @@ mod tests {
         assert!(!query_name_matches("zq%2525252Bcustom757", "other"));
         assert!(query_name_matches("zq%252525252Bcustom757", "other"));
         assert!(!query_name_matches(&"a".repeat(MAX_NAME_BYTES), "other"));
-        assert!(query_name_matches(&"a".repeat(MAX_NAME_BYTES + 1), "other"));
+        assert!(!query_name_matches(&"a".repeat(MAX_NAME_BYTES + 1), "other"), "a long escape-free name is only itself");
+        assert!(query_name_matches(&format!("%41{}", "a".repeat(MAX_NAME_BYTES)), "other"), "a long escaped name is withheld");
+        // A configured literal name can be an intermediate spelling of the address's key.
+        assert!(query_name_matches("zq%2561custom757", "zq%61custom757"));
+        assert!(query_name_matches("zq%2561custom757", "zqacustom757"));
+        assert!(!query_name_matches("zq%2561custom757", "zq%62custom757"));
     }
 
     #[test]
