@@ -1356,7 +1356,16 @@ fn geographic(c: &Array) -> bool {
 fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
     let read = |t: &str| {
         let t = t.trim();
-        if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
+        if t.contains('[') {
+            super::wkt::read_wkt(t).ok()
+        } else {
+            Crs::parse(t).ok().map(|c| {
+                let note = super::wkt::typed_crs_note(t, c)
+                    .or_else(|| super::planetary::note_of(c))
+                    .or_else(|| c.lacks_datum_shift().then(|| NO_DATUM_SHIFT.to_string()));
+                (c, note)
+            })
+        }
     };
     let from = |x: &Array| {
         for k in ["crs_wkt", "spatial_ref", "crs", "proj4", "proj4text", "proj4_params"] {
@@ -1383,6 +1392,11 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
         .or_else(|| ["spatial_ref", "crs"].iter().filter_map(|n| store.array(n)).find_map(from))
 }
 
+/// What a coordinate system given as a PROJ definition says when it names an ellipsoid and no shift
+/// to WGS 84 ([`Crs::lacks_datum_shift`]), as a WKT's datum without one does.
+const NO_DATUM_SHIFT: &str =
+    "its datum has no conversion to WGS 84 in the definition, so positions may be off by up to a few hundred metres";
+
 /// One axis from its coordinates: the first cell's outer edge and the cell size, if the
 /// coordinates are evenly spaced (to within a fifth of a cell).
 fn axis(v: &[f64]) -> Option<(f64, f64)> {
@@ -1399,7 +1413,8 @@ fn axis(v: &[f64]) -> Option<(f64, f64)> {
 }
 
 /// Decodes the chunks a [`plan`] named (missing ones are the fill value) into a raster.
-/// `crs` is used when the store doesn't say its coordinate system.
+/// `crs` is used when the store doesn't say its coordinate system. A store whose coordinate
+/// arrays are in degrees is in the geographic system it gives (ED50, another body's), else WGS 84.
 pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, name: &str, crs: Option<Crs>) -> Result<Raster> {
     let a = store.array(&plan.var).ok_or_else(|| bad("the variable is gone"))?;
     let win = plan.window;
@@ -1586,18 +1601,25 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     }
     let lonlat = geographic(yc) && geographic(xc);
     let (crs, crs_note) = if lonlat {
-        // The axes are read as longitude/latitude, whatever the WKT says; a shift it gives that
+        // The axes are read as longitude/latitude, in the geographic system the store gives
+        // (ED50, OSGB36, another body's), else as WGS 84 whatever it says; a shift it gives that
         // isn't applied is still said.
-        (Some(Crs::LonLat), crs_of(store, a).and_then(|(_, note)| note))
+        match crs_of(store, a) {
+            Some((c, note)) if c.is_geographic() => (Some(c), note),
+            given => (Some(Crs::LonLat), given.and_then(|(_, note)| note)),
+        }
     } else {
-        crs_of(store, a).map_or((crs, None), |(crs, note)| (Some(crs), note))
+        match crs_of(store, a) {
+            Some((crs, note)) => (Some(crs), note),
+            None => (crs, crs.and_then(super::planetary::note_of)),
+        }
     };
     let Some(crs) = crs else {
         return Err(bad(format!("{}: the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)", a.path)));
     };
     // Longitudes of 0–360: a global grid is turned to start at -180; one wholly east of 180 is
     // moved by 360.
-    if crs == Crs::LonLat && x0 + dx * w as f64 > 180.5 {
+    if crs.is_geographic() && x0 + dx * w as f64 > 180.5 {
         if x0 >= 180.0 {
             x0 -= 360.0;
         } else if dx * w as f64 >= 359.0 && x0 > -1.0 - dx {
@@ -1616,9 +1638,11 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         (Kind::Float, _) => "Float32",
         (Kind::Int, 1) => "Int8",
         (Kind::Int, 2) => "Int16",
+        (Kind::Int, 8) => "Int64",
         (Kind::Int, _) => "Int32",
         (Kind::UInt, 1) | (Kind::Bool, _) => "UInt8",
         (Kind::UInt, 2) => "UInt16",
+        (Kind::UInt, 8) => "UInt64",
         (Kind::UInt, _) => "UInt32",
     };
     let data_type = if scale != 1.0 || offset != 0.0 { "Float32" } else { data_type };
@@ -1628,6 +1652,13 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     }
     r.lost.extend(crs_note);
     Ok(r)
+}
+
+/// Encodes a slice kept in a project (a web store's slice, directory window or summary). The
+/// GeoTIFF writer refuses systems its keys cannot preserve; explain the project limitation before
+/// handing any bytes to a layer, retaining the writer's reason.
+pub fn write_project_slice(raster: &Raster) -> Result<Vec<u8>> {
+    super::geotiff::write(raster, 0).map_err(|e| bad(format!("the slice can't be kept in a project as a GeoTIFF: {e}; no layer was added")))
 }
 
 // --- What a store holds --------------------------------------------------------------------------
@@ -2797,6 +2828,139 @@ mod tests {
             let r = assemble(&store, &p, &chunks, "elev", None).unwrap();
             assert_eq!(r.crs, Crs::LonLat, "{attrs}");
             assert_eq!(r.lost, lost, "{attrs}");
+        }
+    }
+
+    /// A store with longitude/latitude axes is in the geographic system it gives (ED50 with its
+    /// TOWGS84 shift, a datum with no shift, another body's), whether as WKT, a PROJ definition or an
+    /// EPSG code, not in WGS 84 (#2008). What reading it said is kept once: another body by its body,
+    /// a datum without a shift by its note. WGS 84 and a projected system the degrees contradict are
+    /// longitude/latitude, and a clean system says nothing.
+    #[test]
+    fn a_lonlat_stores_geographic_system_is_kept() {
+        use crate::raster::{planetary, wkt};
+        let coords = |dim: &str, n: usize| serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}], "fill_value": 0, "dimension_names": [dim]});
+        let bytes = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let read = |attrs: Value, lons: &[f64]| {
+            let elev = serde_json::json!({
+                "zarr_format": 3, "node_type": "array", "shape": [2, 2], "data_type": "int16",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+                "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0, "dimension_names": ["lat", "lon"], "attributes": attrs
+            });
+            let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+                "elev": elev, "lat": coords("lat", 2), "lon": coords("lon", 2),
+            }}});
+            let chunks = HashMap::from([
+                ("elev/c/0/0".to_string(), [1i16, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect()),
+                ("lat/c/0".to_string(), bytes(&[43.1, 43.0])),
+                ("lon/c/0".to_string(), bytes(lons)),
+            ]);
+            let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
+            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![], window: None }).unwrap();
+            assemble(&store, &p, &chunks, "elev", None).unwrap()
+        };
+        let lons = [-79.1, -79.0];
+        let ed50 = r#"GEOGCS["ED50",DATUM["European_Datum_1950",SPHEROID["International 1924",6378388,297],TOWGS84[-87,-98,-121,0,0,0,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]"#;
+        let local = r#"GEOGCS["Local",DATUM["Local datum",SPHEROID["Bessel 1841",6377397.155,299.1528128]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]"#;
+        let mars = r#"GEOGCS["Mars 2000",DATUM["D_Mars_2000",SPHEROID["Mars_2000_IAU_IAG",3396190,169.89444722361179]],PRIMEM["Reference_Meridian",0],UNIT["Degree",0.0174532925199433]]"#;
+        // The WKTs' own systems, with the notes reading them gives, kept: ED50 says nothing, the datum
+        // without a shift says so, and ED50's places aren't WGS 84's.
+        let (want, note) = wkt::read_wkt(ed50).unwrap();
+        let r = read(serde_json::json!({"crs_wkt": ed50}), &lons);
+        assert!(want != Crs::LonLat && want.is_geographic());
+        assert_eq!((r.crs, r.lost.clone()), (want, note.into_iter().collect::<Vec<_>>()), "{:?}", r.lost);
+        let moved = r.crs.transformer().unwrap().to_lonlat(rustgis_geom::Coord::new(10.0, 50.0)).unwrap();
+        assert!((moved.x - 10.0).abs() > 1e-4 || (moved.y - 50.0).abs() > 1e-4, "{moved:?}");
+        let osgb36 = wkt::to_wkt(Crs::Epsg(4277)).unwrap();
+        let (want, note) = wkt::read_wkt(&osgb36).unwrap();
+        let r = read(serde_json::json!({"crs_wkt": osgb36}), &lons);
+        assert!(want != Crs::LonLat && want.is_geographic());
+        assert_eq!((r.crs, r.lost), (want, note.into_iter().collect::<Vec<_>>()));
+        let (want, note) = wkt::read_wkt(local).unwrap();
+        let r = read(serde_json::json!({"crs_wkt": local}), &lons);
+        assert!(want != Crs::LonLat && want.is_geographic());
+        assert!(note.as_deref().is_some_and(|n| n.contains("has no conversion to WGS 84")), "{note:?}");
+        assert_eq!((r.crs, r.lost), (want, note.into_iter().collect::<Vec<_>>()));
+        // Another body's: kept, and said once, by its body.
+        let (want, note) = wkt::read_wkt(mars).unwrap();
+        assert!(want.is_planetary());
+        let r = read(serde_json::json!({"crs_wkt": mars}), &lons);
+        assert_eq!((r.crs, r.lost), (want, note.into_iter().collect::<Vec<_>>()));
+        let proj = "+proj=longlat +a=3396190 +b=3396190 +no_defs";
+        let want = Crs::parse(proj).unwrap();
+        assert!(want.is_planetary());
+        let r = read(serde_json::json!({"proj4": proj}), &lons);
+        assert_eq!((r.crs, r.lost), (want, planetary::note_of(want).into_iter().collect::<Vec<_>>()));
+        // A PROJ definition says what its WKT would: no datum shift is said once, a shift or a datum isn't.
+        for (def, said) in [
+            ("+proj=longlat +ellps=intl +no_defs", true),
+            ("+proj=longlat +ellps=intl +towgs84=-87,-98,-121,0,0,0,0 +no_defs", false),
+            ("+proj=longlat +datum=WGS84 +no_defs", false),
+        ] {
+            let want = Crs::parse(def).unwrap();
+            let r = read(serde_json::json!({"proj4": def}), &lons);
+            assert!(r.crs == want && want.is_geographic(), "{def}: {:?}", r.crs);
+            assert_eq!(r.lost, if said { vec![NO_DATUM_SHIFT.to_string()] } else { Vec::new() }, "{def}");
+        }
+        // An EPSG code is the system itself, and says what the same system's WKT says: nothing for
+        // WGS 84 or ED50.
+        for code in [4326u32, 4230] {
+            let want = Crs::from_epsg(code).unwrap();
+            let r = read(serde_json::json!({"epsg_code": code}), &lons);
+            assert_eq!((r.crs, r.lost), (want, Vec::new()), "EPSG:{code}");
+        }
+        let wgs84 = wkt::to_wkt(Crs::LonLat).unwrap();
+        for attrs in [serde_json::json!({}), serde_json::json!({"crs_wkt": wgs84}), serde_json::json!({"crs_wkt": "EPSG:4326"})] {
+            let r = read(attrs.clone(), &lons);
+            assert_eq!((r.crs, r.lost), (Crs::LonLat, Vec::new()), "{attrs}");
+        }
+        // A projected system on degree axes: the axes win, as before.
+        let utm17 = wkt::to_wkt(Crs::Epsg(32617)).unwrap();
+        let r = read(serde_json::json!({"crs_wkt": utm17}), &lons);
+        assert_eq!((r.crs, r.lost), (Crs::LonLat, Vec::new()));
+        // A geographic system's longitudes of 0–360 are turned to start at -180, as WGS 84's are.
+        let r = read(serde_json::json!({"crs_wkt": ed50}), &[190.5, 191.5]);
+        assert!(r.crs != Crs::LonLat);
+        assert_eq!(r.transform.origin_x, -170.0);
+    }
+
+    /// 8-byte integers are labelled `Int64` and `UInt64`, as a GeoTIFF's are, not as narrower types;
+    /// the values `f32` can't hold are still counted.
+    #[test]
+    fn eight_byte_integers_are_labelled_as_such() {
+        let coords = |dim: &str| serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [2], "data_type": "float64", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2]}}, "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}], "fill_value": 0, "dimension_names": [dim]});
+        let bytes = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let cases: [(&str, Vec<u8>, &str); 5] = [
+            ("int64", [1i64, (1 << 60) + 1, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect(), "Int64"),
+            ("uint64", [u64::MAX, 1, 2, 3].iter().flat_map(|v| v.to_le_bytes()).collect(), "UInt64"),
+            ("int32", [1i32, 16_777_217, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect(), "Int32"),
+            ("uint32", [1u32, 3, 4, u32::MAX].iter().flat_map(|v| v.to_le_bytes()).collect(), "UInt32"),
+            ("int16", [1i16, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect(), "Int16"),
+        ];
+        for (dtype, data, label) in cases {
+            let v = serde_json::json!({
+                "zarr_format": 3, "node_type": "array", "shape": [2, 2], "data_type": dtype,
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+                "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0, "dimension_names": ["lat", "lon"]
+            });
+            let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+                "v": v, "lat": coords("lat"), "lon": coords("lon"),
+            }}});
+            let chunks = HashMap::from([
+                ("v/c/0/0".to_string(), data),
+                ("lat/c/0".to_string(), bytes(&[43.1, 43.0])),
+                ("lon/c/0".to_string(), bytes(&[-79.1, -79.0])),
+            ]);
+            let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
+            let p = plan(&store, &Selection { variable: "v".into(), index: vec![], window: None }).unwrap();
+            let r = assemble(&store, &p, &chunks, "v", None).unwrap();
+            // Only the values f32 can't hold: 2^60 + 1, 2^64 - 1, 16,777,217, 2^32 - 1 (as 2^32).
+            let counted = u64::from(matches!(dtype, "int64" | "uint64" | "int32" | "uint32"));
+            assert_eq!((r.data_type.as_str(), r.rounded.iter().sum::<u64>()), (label, counted), "{dtype}");
         }
     }
 

@@ -2,7 +2,7 @@
 //! Uses the same metadata, planning and assembly functions as the dialog, keeping each import's
 //! state separate so simultaneous stores and a user-operated picker cannot overwrite each other.
 use crate::{RustGisApp, Slot};
-use rustgis_engine::data::raster::{geotiff, zarr};
+use rustgis_engine::data::raster::zarr;
 use rustgis_engine::render::rustgis_tiles::cache;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -117,7 +117,7 @@ impl Read {
             return Some(
                 zarr::assemble(&store, &plan, &self.got, name, None)
                     .map_err(|e| e.to_string())
-                    .and_then(|r| geotiff::write(&r, 0).map_err(|e| e.to_string())),
+                    .and_then(|r| zarr::write_project_slice(&r).map_err(|e| e.to_string())),
             );
         }
         if self.got.is_empty() && self.forbidden > 0 {

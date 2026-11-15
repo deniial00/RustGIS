@@ -23051,7 +23051,11 @@ fn an_ascii_grid_s_unread_prj_is_said_when_added() {
         s.run("layer.addData", &json!({"path": path})).unwrap();
         let notes: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).filter(|t| t.contains("the .prj file")).collect();
         assert_eq!(notes.len(), usize::from(said), "{name}: {:?}", s.notices_since(mark));
-        assert!(notes.iter().all(|n| n.contains(name) && n.contains("read as longitude/latitude")), "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains(name)), "{notes:?}");
+        if said {
+            assert!(notes[0].contains("GEOCCS") && notes[0].contains("WGS 84"), "{notes:?}");
+            assert!(!notes[0].contains("it doesn't say its coordinate system"), "{notes:?}");
+        }
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -26758,6 +26762,25 @@ fn zarr_store_with_days(tag: &str, attrs: &Value, projected: bool, days: &[i32])
     (dir, path)
 }
 
+/// A geographic store's datum is used to locate a WGS 84 query, including near a cell boundary.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_series_uses_its_geographic_datum() {
+    let _cache = zarr_cache_lock();
+    for def in ["+proj=longlat +ellps=intl +towgs84=0,10000,0 +no_defs", "EPSG:4326"] {
+        let crs = rustgis_data::raster::Crs::parse(def).unwrap();
+        let at = crs.transformer().unwrap().to_lonlat(rustgis_data::Coord::new(1.49, 30.0)).unwrap();
+        if def != "EPSG:4326" {
+            assert!(at.x > 1.5, "without the datum conversion this selects the adjacent cell: {at:?}");
+        }
+        let (dir, path) = zarr_store_with("series-geographic-datum", &json!({"crs": def}), false);
+        let mut s = Session::new(Project::default());
+        let r = s.run("zarr.series", &json!({"path": path, "variable": "t", "lon": at.x, "lat": at.y})).unwrap();
+        assert_eq!(r["values"], json!([8.0, 108.0, 208.0]), "{def}: {r}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 /// A store's own system bound to WGS 84 by a grid (NAD 27 by `conus`) isn't applied where a series
 /// places its point, which it says once, on a longitude/latitude grid or a projected one; WGS 84's
 /// systems say nothing (#1678).
@@ -26835,6 +26858,48 @@ fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
             assert_eq!(typed_said, usize::from(attrs == json!({}) && projected), "{attrs} following={following}: {notices:?}");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// A store by web address is kept in the project as a GeoTIFF, whose keys can't say every geographic
+/// system a store gives: one they can't (another body's, here) is refused saying so, where one they
+/// can (WGS 84) is added (#2008).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_web_zarr_whose_system_a_geotiff_cant_say_is_refused_saying_so() {
+    let f64s = |v: [f64; 2]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let coords = |dim: &str| {
+        json!({"zarr_format": 3, "node_type": "array", "shape": [2], "data_type": "float64",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2]}},
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}], "fill_value": 0, "dimension_names": [dim]})
+    };
+    let mars = r#"GEOGCS["Mars 2000",DATUM["D_Mars_2000",SPHEROID["Mars_2000_IAU_IAG",3396190,169.89444722361179]],PRIMEM["Reference_Meridian",0],UNIT["Degree",0.0174532925199433]]"#;
+    for (name, crs_wkt, kept) in [("mars", mars, false), ("wgs84", "EPSG:4326", true)] {
+        let elev = json!({"zarr_format": 3, "node_type": "array", "shape": [2, 2], "data_type": "int16",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+            "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+            "fill_value": 0, "dimension_names": ["lat", "lon"], "attributes": {"crs_wkt": crs_wkt}});
+        let root = json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+            "elev": elev, "lat": coords("lat"), "lon": coords("lon")}}});
+        let (base, _) = serve_ranged_files(vec![
+            (format!("/{name}.zarr/zarr.json"), root.to_string().into_bytes()),
+            (format!("/{name}.zarr/elev/c/0/0"), [1i16, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect()),
+            (format!("/{name}.zarr/lat/c/0"), f64s([43.1, 43.0])),
+            (format!("/{name}.zarr/lon/c/0"), f64s([-79.1, -79.0])),
+        ]);
+        let mut s = Session::new(Project::default());
+        let result = s.run("layer.addZarr", &json!({"url": format!("{base}/{name}.zarr"), "variable": "elev"}));
+        if kept {
+            assert!(result.is_ok(), "{name}: {result:?}");
+        } else {
+            let e = result.unwrap_err();
+            assert!(
+                e.contains("can't be kept in a project") && e.contains("GeoTIFF keys") && e.contains("no layer was added"),
+                "{name}: {e}"
+            );
+            assert!(s.map().layers.is_empty(), "{name}: no layer is added");
+        }
     }
 }
 
