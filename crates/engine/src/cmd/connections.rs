@@ -285,12 +285,13 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
                     && prepared.options.get("credentials").is_none_or(|v| v != "keys"))));
     let redactions = s.connections.redaction_counts();
     let slot = s.connections.connections.iter_mut().find(|c| c.id == old.id).ok_or("connection no longer exists")?;
-    crate::connections::register_query_name(&prepared)?;
     if credentials_changed {
         delete_account(&mut s.database_logins, &old)?;
         prepared.saved_keys = false;
         prepared.remembered = false;
     }
+    // Last before the commit: a failed step above must not reserve the name.
+    crate::connections::register_query_name(&prepared)?;
     let c = crate::connections::Connections::commit_update(slot, &mut s.connections.generation, prepared);
     if c.auth == "query" {
         s.connections.refresh_redaction();

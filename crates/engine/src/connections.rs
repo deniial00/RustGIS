@@ -114,10 +114,20 @@ struct Kept {
     cut: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum KeptReason {
+    /// From a newer RustGIS, or damaged.
+    Unreadable,
+    /// Readable, but past [`MAX_CONNECTIONS`].
+    PastLimit,
+    /// Readable, but its query login's parameter name can't be held for redaction this run.
+    NameRegistry,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct KeptRow {
     value: Value,
-    over_limit: bool,
+    reason: KeptReason,
 }
 
 impl Kept {
@@ -515,7 +525,16 @@ impl Connections {
                     && !ids.contains(&c.id)
             });
             let over_limit = read.is_some() && s.connections.len() >= MAX_CONNECTIONS;
-            let read = read.filter(|_| !over_limit).filter(|((c, _), _)| register_query_name(c).is_ok());
+            let read = read.filter(|_| !over_limit);
+            let registry_full = read.as_ref().is_some_and(|((c, _), _)| register_query_name(c).is_err());
+            let read = read.filter(|_| !registry_full);
+            let reason = if over_limit {
+                KeptReason::PastLimit
+            } else if registry_full {
+                KeptReason::NameRegistry
+            } else {
+                KeptReason::Unreadable
+            };
             let id = match &read {
                 Some(((c, _), _)) => c.id.clone(),
                 None => row.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -535,7 +554,7 @@ impl Connections {
                     s.connections.push(c);
                 }
                 None if holds_query_secret(&row) => s.kept.secrets += 1,
-                None => pending_rows.push((row, over_limit, id)),
+                None => pending_rows.push((row, reason, id)),
             }
         }
         // All accepted names are now known. Earlier addresses and opaque settings must be
@@ -554,7 +573,7 @@ impl Connections {
                 s.kept.fields.insert(id, other);
             }
         }
-        for (row, over_limit, id) in pending_rows {
+        for (row, reason, id) in pending_rows {
             if sources::holds_secret(&row) {
                 s.kept.secrets += 1;
             } else {
@@ -562,7 +581,7 @@ impl Connections {
                 if !id.is_empty() {
                     s.kept.ids.insert(id);
                 }
-                s.kept.rows.push(KeptRow { value: row, over_limit });
+                s.kept.rows.push(KeptRow { value: row, reason });
             }
         }
         // All IDs must be known before a name is accepted: a later row can reserve it.
@@ -585,9 +604,11 @@ impl Connections {
             return vec![format!("No saved connection is used, and none can be added: {why}. They are kept as they are.")];
         }
         let mut said = Vec::new();
-        let over_limit = k.rows.iter().filter(|row| row.over_limit).count();
-        if k.rows.len() > over_limit {
-            let n = k.rows.len() - over_limit;
+        let count = |reason| k.rows.iter().filter(|row| row.reason == reason).count();
+        let (unreadable, over_limit, registry) =
+            (count(KeptReason::Unreadable), count(KeptReason::PastLimit), count(KeptReason::NameRegistry));
+        if unreadable > 0 {
+            let n = unreadable;
             said.push(format!(
                 "{n} saved connection{} couldn't be read (from a newer RustGIS, or damaged): not listed, and kept as {} when connections are saved",
                 if n == 1 { "" } else { "s" },
@@ -599,6 +620,16 @@ impl Connections {
             said.push(format!(
                 "{n} saved connection{} past the {MAX_CONNECTIONS}-connection limit: not listed, and kept as {} when connections are saved",
                 if n == 1 { " is" } else { "s are" },
+                if n == 1 { "it was" } else { "they were" }
+            ));
+        }
+        if registry > 0 {
+            let n = registry;
+            said.push(format!(
+                "{n} saved connection{} a query parameter name past the {} this run can hold for redaction (restart RustGIS to use {}): not listed, and kept as {} when connections are saved",
+                if n == 1 { " uses" } else { "s use" },
+                rustgis_data::address::MAX_LOGIN_NAMES,
+                if n == 1 { "it" } else { "them" },
                 if n == 1 { "it was" } else { "they were" }
             ));
         }
@@ -1567,7 +1598,10 @@ mod tests {
         let clean = Connections::from_json(&json!({"connections":[row("https://refused757.example/wmts?layer=a")]}).to_string());
         assert!(clean.connections.is_empty());
         assert!(clean.to_json().contains("custom_unregistered757"), "a clean unread row is preserved");
-        assert!(!clean.unread().iter().any(|t| t.contains("dropped")));
+        // Readable, refused only because the registry is full: said as that, not as unreadable.
+        let said = clean.unread();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("query parameter name past the 256") && said[0].contains("restart RustGIS"), "{said:?}");
     }
 
     #[test]
