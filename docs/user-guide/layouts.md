@@ -296,8 +296,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     or browser: it draws what has arrived, then redraws once the pending legend pictures finish,
     not on every unrelated download. Desktop exports wait up to half a minute in all for each
     page's legend pictures (each page of a map series has its own wait), as they wait for the map's
-    tiles. A page drawn with a legend picture still missing stops the export, even if the picture
-    lands afterwards, rather than leave the file silently incomplete. The browser cannot wait:
+    tiles. A page drawn while a legend picture is still on its way stops the export, even if the
+    picture lands afterwards, rather than leave the file silently incomplete. The browser cannot wait:
     export again once the pictures have arrived.
   - **Its Layers section**: a checkbox for each layer of the frame's map (and each WMS or WMTS
     layer with a legend): untick one to leave it out of the legend while the map still draws it

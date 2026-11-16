@@ -478,7 +478,9 @@ fn draw_page(
                     // A legend wholly off the canvas (off the page, or outside the element asked
                     // for) shows none of its pictures: nothing to wait for or to be missing.
                     let on_canvas = element.is_some() || on_page(layout, e);
-                    if wait_legends && on_canvas {
+                    // The export's legend clock starts at the first picture actually on its way,
+                    // not at the first legend drawn: a ready legend leaves the budget untouched.
+                    if wait_legends && on_canvas && tile_legends_pending(map, scale, exclude) {
                         wait_for_tile_legends(map, scale, exclude, legend_deadline())?;
                     }
                     let opts = LegendOptions { show_no_data: *show_no_data, hide_other: *hide_other, exclude, labels, scale };
@@ -2197,8 +2199,8 @@ pub fn legends_pending(layout: &Layout, maps: &[Map]) -> bool {
     })
 }
 
-/// Refuses an export stopped during a legend wait, or that drew a legend without one of its
-/// pictures: it stays refused if the picture lands afterwards, as the file would still lack it.
+/// Refuses an export stopped during a legend wait, or that drew a legend whose picture was still
+/// on its way: it stays refused if the picture lands afterwards, as the file would still lack it.
 /// The browser cannot wait; it asks the caller to export again once the pictures land.
 pub(crate) fn finish_legends() -> Result<(), String> {
     rustgis_data::progress::check().map_err(|e| e.to_string())?;
@@ -3438,6 +3440,24 @@ mod tests {
         assert!(LEGEND_BUDGET.get().is_none(), "the budget ends with the export");
         let _next = legend_budget();
         assert!(LEGEND_BUDGET.get() == Some(None), "the next export starts afresh");
+    }
+
+    #[test]
+    fn a_legend_whose_picture_is_ready_does_not_start_the_exports_legend_clock() {
+        let url = "https://tiles.test/waits/ready-legend.png";
+        let fetch = crate::tiles::tests::hold_fetch(url);
+        let (page, mut maps) = legend_page(url);
+        assert!(tile_legends_pending(&maps[0], 1e6, &[]), "the picture is asked for");
+        fetch.recv_timeout(std::time::Duration::from_secs(5)).unwrap()(Ok(red_picture()));
+        wait_for_tile_legends(&maps[0], 1e6, &[], web_time::Instant::now() + LEGEND_WAIT).unwrap();
+        assert!(!tile_legends_pending(&maps[0], 1e6, &[]), "the picture has landed");
+        let _export = legend_budget();
+        render_drawing_inner(&page, &mut maps, 72.0, &PageInfo::default(), &mut None).unwrap();
+        assert!(LEGEND_BUDGET.get() == Some(None), "a legend with nothing to wait for leaves the clock unstarted");
+        assert!(finish_legends().is_ok());
+        // A later legend whose picture is first asked for now still gets the whole wait.
+        let before = web_time::Instant::now();
+        assert!(legend_deadline() >= before + LEGEND_WAIT);
     }
 
     #[test]
