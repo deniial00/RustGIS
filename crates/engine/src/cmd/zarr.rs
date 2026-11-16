@@ -1488,7 +1488,15 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         // Use the same system as a slice: degree axes retain a declared geographic datum, while
         // contradictory projected definitions still fall back to WGS 84.
         let given = zarr::grid_crs(&store, &var);
-        let crs = if zarr::is_lonlat_grid(&store, &var) {
+        let lonlat = zarr::is_lonlat_grid(&store, &var);
+        if lonlat {
+            // A typed system is only a fallback. Invalid text wasn't used on degree axes either.
+            let typed = if given.is_none() { src.crs.as_deref().and_then(|text| Crs::parse(text).ok()) } else { None };
+            if let Some(note) = zarr::lonlat_assumption(given.as_ref().map(|(c, _)| *c), typed) {
+                s.warn(format!("{var}: {note}"));
+            }
+        }
+        let crs = if lonlat {
             given.as_ref().map(|(c, _)| *c).filter(|c| c.is_geographic()).unwrap_or(Crs::LonLat)
         } else if let Some((c, _)) = &given {
             *c
@@ -1648,6 +1656,8 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         ));
     }
     let min_valid = super::cube::min_share(p)?;
+    // The name given, checked before the store is read.
+    let given = super::name_given(p, "the output's name", 200)?;
     let ZarrCube { zt, period } = zarr_cube(s, p)?;
     let steps = super::cube::steps(&zt.dates, period, p)?;
     let months = super::cube::months(p)?;
@@ -1666,7 +1676,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         let m: Vec<String> = months.iter().map(u32::to_string).collect();
         label = format!("{label} (months {})", m.join(","));
     }
-    let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or(label, |n| n.chars().take(200).collect());
+    let name = given.unwrap_or(label);
     let root = zt.store.clone();
     Ok(ReduceRun { zt, steps, stat, min_valid, name, root, variable: var })
 }

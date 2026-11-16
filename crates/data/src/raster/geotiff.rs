@@ -2388,6 +2388,28 @@ mod tests {
         assert!(r.width * r.height <= 200 && r.transform.pixel_width > 30.25);
         assert_eq!(r.lost.len(), 1, "{:?}", r.lost);
         assert!(r.lost[0].contains("coarser") && r.lost[0].contains("30.25"), "{:?}", r.lost);
+        // Decimation makes the source read coarser before north_up; compare to the original file.
+        let r = read_limited(reader(std::io::Cursor::new(&file)).unwrap(), "decimated", 50, None).unwrap();
+        assert_eq!(r.overview, Some((20, 10)));
+        assert!(r.width * r.height <= 50);
+        assert!(r.lost.iter().any(|n| n.contains("coarser than the file's (30.25)")), "{:?}", r.lost);
+        // A stored overview also uses the full-resolution affine for the comparison.
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            use tiff::encoder::{TiffEncoder, colortype};
+            let mut enc = TiffEncoder::new(&mut out).unwrap();
+            let mut image = enc.new_image::<colortype::Gray8>(20, 10).unwrap();
+            image.encoder().write_tag(Tag::Unknown(34264), &rotated[..]).unwrap();
+            let keys = [1u16, 1, 0, 1, 3072, 0, 1, 32633];
+            image.encoder().write_tag(Tag::GeoKeyDirectoryTag, &keys[..]).unwrap();
+            image.write_data(&[100u8; 200]).unwrap();
+            let mut image = enc.new_image::<colortype::Gray8>(10, 5).unwrap();
+            image.encoder().write_tag(Tag::NewSubfileType, 1u32).unwrap();
+            image.write_data(&[100u8; 50]).unwrap();
+        }
+        let r = read_limited(reader(std::io::Cursor::new(out.into_inner())).unwrap(), "overview", 50, None).unwrap();
+        assert_eq!(r.overview, Some((20, 10)));
+        assert!(r.lost.iter().any(|n| n.contains("coarser than the file's (30.25)")), "{:?}", r.lost);
         // The same image placed north up needs no resampling, and says nothing.
         let level = [30.0, 0.0, 0.0, 400_000.0, 0.0, -30.0, 0.0, 5_000_000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
         let r = read(std::io::Cursor::new(tests_support::matrix_tiff(level, false)), "level").unwrap();
@@ -4216,17 +4238,5 @@ mod tests {
             let tif = typed::<GrayI64>(2, 2, samples, Some(file));
             assert_eq!(read(std::io::Cursor::new(tif), "c").unwrap().rounded.iter().sum::<u64>(), *counted, "no-data {file}");
         }
-    }
-
-    /// A rotated image read from an overview is compared with the file's own pixels (2 units here),
-    /// not the overview's scaled ones (4 units): a grid of 4-unit pixels is coarser than the file's.
-    #[test]
-    fn turned_note_compares_the_grid_with_the_files_own_pixels() {
-        let file = [0.0, 0.0, 2.0, 0.0, 2.0, 0.0];
-        let grid = |pixel: f64| GeoTransform { origin_x: 0.0, origin_y: 0.0, pixel_width: pixel, pixel_height: -pixel };
-        let coarser = turned_note(file, (8, 8), &grid(4.0));
-        assert!(coarser.contains("coarser than the file's (2.000)"), "{coarser}");
-        let same = turned_note(file, (8, 8), &grid(2.0));
-        assert!(!same.contains("coarser"), "{same}");
     }
 }

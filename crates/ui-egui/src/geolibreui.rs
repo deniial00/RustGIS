@@ -115,14 +115,10 @@ impl Read {
                 )));
             }
             let name = self.params.get("name").and_then(Value::as_str).unwrap_or("Zarr");
-            return Some(
-                zarr::assemble(&store, &plan, &self.got, name, None)
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| {
-                        let tif = zarr::write_project_slice(&r).map_err(|e| e.to_string())?;
-                        Ok((tif, r.lost))
-                    }),
-            );
+            return Some(zarr::assemble(&store, &plan, &self.got, name, None).map_err(|e| e.to_string()).and_then(|r| {
+                let tif = zarr::write_project_slice(&r).map_err(|e| e.to_string())?;
+                Ok((tif, r.lost))
+            }));
         }
         if self.got.is_empty() && self.forbidden > 0 {
             return Some(Err(crate::i18n::fmt(
@@ -169,12 +165,14 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
         match result {
             Ok((bytes, lost)) => {
                 params["geolibreZarr"] = json!(true);
-                // Said as a layer's read notices are (`zarrui`), named as the import's name.
-                let layer = params.get("name").and_then(Value::as_str).unwrap_or("Zarr").to_string();
-                app.add_landed(crate::serviceui::Landed { id, url, params, origin: None }, bytes);
-                for loss in lost {
-                    app.session.notify(crate::i18n::fmt("{layer}: {notice}", &[("layer", &layer), ("notice", &loss)]), false);
+                // An old project's completion must not announce losses in the current project.
+                if app.session.download_continues(id).is_ok() {
+                    let layer = params.get("name").and_then(Value::as_str).unwrap_or("Zarr");
+                    for loss in lost {
+                        app.session.notify(crate::i18n::fmt("{layer}: {notice}", &[("layer", layer), ("notice", &loss)]), false);
+                    }
                 }
+                app.add_landed(crate::serviceui::Landed { id, url, params, origin: None }, bytes);
             }
             Err(e) => {
                 app.session.download_failed(id);
@@ -279,7 +277,10 @@ mod tests {
             read.got.insert(key.into(), values.iter().flat_map(|v| v.to_le_bytes()).collect());
         }
         read.phase = Some((store, plan));
-        assert!(!read.poll().unwrap().unwrap().0.is_empty());
+        let (bytes, _) = read.poll().unwrap().unwrap();
+        let r = rustgis_engine::data::raster::read_bytes("slice.tif", &bytes).unwrap();
+        assert_eq!(r.value(0, 0, 1), Some(1.0));
+        assert_eq!(r.value(0, 0, 0), None);
     }
 
     #[test]
@@ -296,7 +297,9 @@ mod tests {
         read.phase = Some((store, plan));
         // The store gives no coordinate system, so the WGS 84 reading is said with the slice, not dropped.
         let (bytes, lost) = read.poll().unwrap().unwrap();
-        assert!(!bytes.is_empty());
+        let r = rustgis_engine::data::raster::read_bytes("slice.tif", &bytes).unwrap();
+        assert_eq!(r.crs, rustgis_engine::data::raster::Crs::LonLat);
+        assert_eq!(r.value(0, 0, 1), Some(1.0));
         assert_eq!(lost.len(), 1, "{lost:?}");
         assert!(lost[0].contains("doesn't say its coordinate system"), "{lost:?}");
     }
@@ -343,6 +346,44 @@ mod tests {
         assert!(loaded.is_raster());
         assert_eq!(loaded.transparency, 25.0);
         assert!(app.session.map().layers.is_empty());
+    }
+
+    #[test]
+    fn geolibre_zarr_import_keeps_crs_loss_notes() {
+        for warned in [true, false] {
+            let code = if warned { 4267 } else { 4326 };
+            let mut metadata = metadata();
+            let wkt = rustgis_engine::data::raster::wkt::to_wkt(rustgis_engine::data::raster::Crs::from_epsg(code).unwrap()).unwrap();
+            let wkt = if warned {
+                format!(r#"{},EXTENSION["PROJ4","+proj=longlat +datum=NAD27 +nadgrids=ntv2_0.gsb"]]"#, wkt.strip_suffix(']').unwrap())
+            } else {
+                wkt
+            };
+            metadata["metadata"]["value/.zattrs"]["crs_wkt"] = json!(wkt);
+            let store = zarr::parse_store(&[(".zmetadata".into(), metadata.to_string().into_bytes())]).unwrap();
+            let plan = zarr::plan(&store, &zarr::Selection { variable: "value".into(), index: Vec::new(), window: None }).unwrap();
+            let mut app = RustGisApp::with_sample();
+            let (target, layer) = deferred_zarr(&mut app);
+            let mark = app.session.notice_mark();
+            let mut read = reader(Vec::new());
+            read.id = app.session.download_started();
+            read.params = json!({"name":"Overflow","geolibreLayer":{
+                "token":app.session.project.maps[target].layer(layer).unwrap().dataset.source,
+                "record":{"name":"Overflow"}
+            }});
+            for (key, values) in [("value/0.0", vec![1.0f64, 2.0, 3.0, 4.0]), ("lat/0", vec![0.5, 1.5]), ("lon/0", vec![0.5, 1.5])] {
+                read.got.insert(key.into(), values.iter().flat_map(|v| v.to_le_bytes()).collect());
+            }
+            read.phase = Some((store, plan));
+            app.ui.geolibre_zarr.push(read);
+            poll(&mut app, &egui::Context::default());
+            let loaded = app.session.project.maps[target].layer(layer).unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
+            assert_eq!(loaded.crs, rustgis_engine::data::raster::Crs::from_epsg(code).unwrap());
+            assert_eq!(loaded.value(0, 0, 1), Some(1.0));
+            let notices = app.session.notices_since(mark);
+            let warnings: Vec<_> = notices.iter().filter(|n| n.text.contains("ntv2_0.gsb") && n.text.contains("isn't applied")).collect();
+            assert_eq!(warnings.len(), usize::from(warned), "{code}: {notices:?}");
+        }
     }
 
     /// Uses the real importer to reserve a grouped URL layer without starting its read.

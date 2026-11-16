@@ -381,7 +381,15 @@ fn styled(l: &PlacedLabel) -> bool {
 /// none unless it is bold in the interface fonts and they have no heavier face
 /// ([`crate::fonts::bold_is_synthetic`]); an installed family's own faces are drawn as they are.
 pub fn thickening(l: &PlacedLabel, px: f32) -> f32 {
-    if l.bold && l.font.is_none() && crate::fonts::bold_is_synthetic() { crate::fonts::bold_thickening(px) } else { 0.0 }
+    if !l.bold || !crate::fonts::bold_is_synthetic() {
+        return 0.0;
+    }
+    // An export resolves the same named face that it draws. An unreadable face uses the
+    // interface fallback, just like a label without a family. The UI uses its own font readiness
+    // instead, so deciding an additional strike never asks it to read or parse a font file.
+    let named =
+        l.font.and_then(|i| crate::families::installed_now()?.get(usize::from(i))).and_then(|family| family_font(family, label_face(l)));
+    if named.is_none() { crate::fonts::bold_thickening(px) } else { 0.0 }
 }
 
 /// The face a label is drawn in.
@@ -537,11 +545,18 @@ const SLANT: f32 = 0.2126;
 /// and rightmost pixel offsets. With a negative spacing the letters can run backwards past the
 /// pen, and a slant moves their tops right and their descenders left; (0, 0) when nothing draws.
 pub fn styled_extent(text: &str, px: f32, face: Face, spacing: f32) -> (f32, f32) {
-    let Some((f, slanted)) = face_font(face) else { return (0.0, 0.0) };
+    styled_bounds(text, px, face, spacing).map_or((0.0, 0.0), |r| (r.left(), r.right()))
+}
+
+/// Ink bounds relative to the pen's start and the line's centre, measured as [`styled_at`]
+/// draws it. Whitespace has no bounds; fallback glyphs, spacing and synthetic italics count.
+pub(crate) fn styled_bounds(text: &str, px: f32, face: Face, spacing: f32) -> Option<Rect> {
+    let (f, slanted) = face_font(face)?;
     let sf = f.as_scaled(em(f, px));
     let base = (sf.ascent() + sf.descent()) / 2.0;
     let (glyphs, _) = shape(text, px, f, sans_beside(f, face));
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut top, mut bottom) = (f32::INFINITY, f32::NEG_INFINITY);
     for (i, (gf, id, x, _)) in glyphs.into_iter().enumerate() {
         // Measured as `styled_at` draws it.
         let italic = leans(face, f, slanted, gf);
@@ -551,8 +566,10 @@ pub fn styled_extent(text: &str, px: f32, face: Face, spacing: f32) -> (f32, f32
         let (lean_top, lean_bottom) = if italic { (SLANT * (base - bb.min.y), SLANT * (base - bb.max.y)) } else { (0.0, 0.0) };
         lo = lo.min(bb.min.x + lean_top.min(lean_bottom));
         hi = hi.max(bb.max.x + lean_top.max(lean_bottom) + if italic { 1.0 } else { 0.0 });
+        top = top.min(bb.min.y);
+        bottom = bottom.max(bb.max.y);
     }
-    if lo.is_finite() && hi.is_finite() { (lo, hi) } else { (0.0, 0.0) }
+    Rect::from_ltrb(lo, top, hi, bottom)
 }
 
 /// Draws `text` from `left` (pixels), its line centred on `cy`, at `px` in `face` with `spacing`
@@ -739,11 +756,18 @@ fn draw_upright(pm: &mut Canvas, l: &PlacedLabel, ppp: f32, ink: Ink) {
     // Bold with no heavier face to draw it in: each line drawn again a little to its right.
     let thick = thickening(l, px);
     let put = |pm: &mut Canvas, &(line, left, lw, y): &(&str, f32, f32, f32), color: Rgba, (dx, dy): (f32, f32)| {
-        for dx in std::iter::once(dx).chain((thick > 0.0).then_some(dx + thick)) {
-            if styled {
-                styled_at(pm, line, left + dx, y + dy, px, color, label_face(l), spacing);
+        for (strike, dx) in std::iter::once(dx).chain((thick > 0.0).then_some(dx + thick)).enumerate() {
+            let draw = |pm: &mut Canvas| {
+                if styled {
+                    styled_at(pm, line, left + dx, y + dy, px, color, label_face(l), spacing);
+                } else {
+                    draw_text(pm, line, left + lw / 2.0, y, px, color, l.bold, (dx, dy));
+                }
+            };
+            if strike == 0 {
+                draw(pm);
             } else {
-                draw_text(pm, line, left + lw / 2.0, y, px, color, l.bold, (dx, dy));
+                pm.decoration(draw);
             }
         }
     };
@@ -1079,6 +1103,7 @@ fn keep_glyphs(
             transform: Transform::from_row(1.0, 0.0, kx, 1.0, origin.0, origin.1),
             glyphs: run.iter().map(|&(i, &(_, id, x, ch))| crate::vector::Glyph { id, x: x + spacing * i as f32, ch }).collect(),
             halo: None,
+            decorative: false,
         });
     }
 }
@@ -1183,6 +1208,44 @@ mod spread_tests {
 
 #[cfg(test)]
 mod coverage_tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn synthetic_bold_exports_follow_the_baseline_once_as_text() {
+        if std::env::var_os("RUSTGIS_BOLD_EXPORT_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "text::coverage_tests::synthetic_bold_exports_follow_the_baseline_once_as_text", "--nocapture"])
+                .env("RUSTGIS_BOLD_EXPORT_CHILD", "1")
+                .env("RUSTGIS_BUILTIN_FONTS", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        assert!(crate::fonts::bold_is_synthetic());
+        for curved in [false, true] {
+            for angle in [0.0, std::f32::consts::FRAC_PI_2] {
+                let mut label = crate::tests::label("A", 100.0, None, 0.0);
+                (label.y, label.size, label.bold, label.font) = (100.0, 30.0, true, Some(u16::MAX));
+                let thick = super::thickening(&label, label.size * 1.33);
+                assert!(thick > 0.0, "an unavailable family uses synthetic-bold fallback");
+                if curved {
+                    label.glyphs = vec![crate::LabelGlyph { text: "A".into(), dx: 0.0, dy: 0.0, angle }];
+                } else {
+                    label.angle = Some(angle);
+                }
+                let mut canvas = crate::Canvas::recording(200, 200).unwrap();
+                super::draw(&mut canvas, &label, 1.0);
+                let (_, _, items) = canvas.into_drawing().unwrap().finish();
+                let runs: Vec<_> =
+                    items.iter().filter_map(|item| if let crate::vector::Item::Glyphs(run) = item { Some(run) } else { None }).collect();
+                assert_eq!(runs.len(), 2);
+                let (dx, dy) = (runs[1].transform.tx - runs[0].transform.tx, runs[1].transform.ty - runs[0].transform.ty);
+                assert!((dx - thick * angle.cos()).abs() < 1e-3 && (dy - thick * angle.sin()).abs() < 1e-3);
+                assert!(!runs[0].decorative && runs[1].decorative, "the extra visual strike does not duplicate accessible text");
+            }
+        }
+    }
+
     /// Large letters slanted by hand are solid: every row of an "I"'s stem has a fully covered
     /// pixel (rows that fell between pixels used to come out lighter, in stripes).
     #[test]

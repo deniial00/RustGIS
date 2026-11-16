@@ -1352,7 +1352,7 @@ pub fn read_converted(path: &Path, c: &gdal::Converted) -> Result<Raster> {
         let shown: Vec<&str> = c.others.iter().take(20).map(String::as_str).collect();
         let more = c.others.len().saturating_sub(shown.len());
         let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
-        r.lost.push(format!("it has more variables ({}{tail}): add one with \"layer\"", shown.join(", ")));
+        r.lost.push(format!("it has {} more variables ({}{tail}): add one with \"layer\"", c.others.len(), shown.join(", ")));
     }
     Ok(r)
 }
@@ -2415,11 +2415,17 @@ pub(crate) mod tests {
         let many = gdal::Converted {
             path: tif.clone(),
             subdataset: None,
-            others: (1..=25).map(|i| format!("band{i}")).collect(),
+            others: (1..=35).map(|i| format!("band{i}")).collect(),
             assumed_lonlat: false,
         };
         let r = read_converted(Path::new("/data/climate.nc"), &many).unwrap();
-        assert!(r.lost.iter().any(|n| n.contains("band20") && !n.contains("band21") && n.contains("and 5 more")), "{:?}", r.lost);
+        assert!(
+            r.lost
+                .iter()
+                .any(|n| n.contains("35 more variables") && n.contains("band20") && !n.contains("band21") && n.contains("and 15 more")),
+            "{:?}",
+            r.lost
+        );
         let clean = gdal::Converted { path: tif, subdataset: None, others: Vec::new(), assumed_lonlat: false };
         let r = read_converted(Path::new("/data/climate.nc"), &clean).unwrap();
         assert!(r.lost.is_empty(), "{:?}", r.lost);

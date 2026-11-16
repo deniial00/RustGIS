@@ -54,10 +54,17 @@ first and its points last, so its points are drawn on top, and a KML's ground ov
 them. A name given goes to the first map layer added, the bottom one (a standalone table only gets
 it when the file has no map layer). A GeoPackage adds its tables in name order, and a file read
 through GDAL keeps its layers in the file's order and orders only the types within each layer.
-GeoPackage attribute-only tables are not supported. Adding a whole file reports their count in
-one notice. Tile and other unsupported GeoPackage contents are also counted by type. The omission counts cover catalog entries without a registered geometry column; unknown content types are combined into one counted "other" group. Only contents registered in `gpkg_contents` are considered; arbitrary unregistered SQLite tables are ignored. Desktop uploads add their first feature table, with the existing note naming how many feature tables the file contains. Browser uploads with virtual generated `table_name` or `data_type` catalog columns cannot be evaluated and are refused with an explanation; materialize these columns or select a feature table explicitly. A file
-containing only attribute tables is refused with the count. Selecting a
-feature table explicitly adds only that table.
+GeoPackage attribute-only tables are not supported. Adding a whole file reports their count in one
+notice. Tile and other unsupported GeoPackage contents are also counted by type. The omission counts
+cover catalog entries without a registered geometry column; unknown content types are combined into
+one counted "other" group. Only contents registered in `gpkg_contents` are considered; arbitrary
+unregistered SQLite tables are ignored. Desktop uploads add their first feature table, with the
+existing note naming how many feature tables the file contains. Browser uploads with virtual
+generated `table_name` or `data_type` catalog columns cannot be evaluated and are refused with an
+explanation; materialize these columns or select a feature table explicitly. A file containing only
+attribute or tile tables is refused with the count. Selecting a feature table explicitly adds only
+that table.
+
 On the desktop, **Home › Add › Add Data › Add Folder…** connects a folder to the Browser; the web
 app does not offer folder connections.
 On the desktop, a file Add Data reads whole (a GeoTIFF or another raster, one GDAL converts, a
@@ -94,8 +101,20 @@ A zipped File Geodatabase must be unzipped first: on the desktop, add the
 **Home › Add › Add Data › Delimited Text…** asks for a CSV or a spreadsheet first, then lists its columns to pick the x and y (or WKT)
 ones from, with the coordinate system (such as `EPSG:2263`) and the separator (changing it reads
 the columns again); `info.fileColumns` lists them for scripts. Add Data finds them itself
-(columns named like longitude/latitude, easting/northing or geometry, and EWKT's `SRID=`) and
-says when coordinates aren't longitude/latitude. A CSV without coordinate columns, or a layer without geometry, opens as a
+(columns named like longitude/latitude, including GTFS `stop_lon`/`stop_lat`, easting/northing or
+geometry, and EWKT's `SRID=`). With no projected coordinate system or explicit column choices,
+a specific longitude/latitude pair is preferred over generic X/Y when it gives in-range,
+non-0,0 positions on at least as many rows as the first pair gives finite positions.
+That pair is used for the whole file.
+The published aliases `Longitude Decimal Degrees`/`Latitude Decimal Degrees` and
+`Longitutde`/`Lattitude` are recognised too. The dialog checks the first 1,000 rows of delimited
+text, or every row of a spreadsheet, to pick defaults. It recomputes unchanged defaults when you
+leave the coordinate-system box or press Enter; columns you picked stay picked. With a projected
+coordinate system, defaults prefer X/Y or easting/northing columns when the file also has
+longitude/latitude columns.
+Add Data checks all rows. Coordinates still outside degree ranges are counted in a
+notice. Points placed at exactly 0,0 are also counted in a notice: these often mean missing
+coordinates, but the points are kept. A CSV without coordinate columns, or a layer without geometry, opens as a
 standalone table, listed under the map in Layers; right-click it to open or remove it. Tables
 can share a name: commands and tools take a table's id (`info.project` lists them) as well as its
 name, which stands for the first table of that name. An id given as a number is never taken for
@@ -104,13 +123,15 @@ the table's name beside it (`input_name`). The **XY Table To Point** tool
 ([Geoprocessing](analysis.md), and a table's right-click menu) makes points of a table already in
 the project, from two fields of coordinates and their coordinate system. In a text field a single comma is the decimal separator
 (`1,234` is 1.234); thousands separators are not read.
+
 Excel `.xls` records, formula operands and sheet bounds are checked before opening, including
 sheets that were not selected. The workbook shares a memory budget across its sheets and retained
-metadata. Value and formula grids are counted separately, with conservative estimates for
-formula strings, defined names and sheet state. Formula-heavy workbooks can reach this budget
-before their value-grid limit. A file with damaged records or excessive allocations is refused with the reason. Normal
-cached formula values are read. A formula's direct cell reference to row 65,536 is currently
-refused because the XLS reader cannot handle that reference safely.
+metadata. Value and formula grids are counted separately, with conservative allocation estimates
+for formula strings, defined names and sheet state. Formula-heavy workbooks can reach this budget
+before their value-grid limit. A file with damaged records or excessive allocations is refused
+with the reason. Normal cached formula values are read. A formula's direct cell reference to
+row 65,536 is currently refused because the XLS reader cannot handle that reference safely.
+
 **Home › Add › Add Data › Graphics Layer** adds a layer for [drawn graphics](cartography.md#graphics),
 and **Data › Layer Templates** adds empty layers with ready-made schemas to draw into.
 
@@ -183,12 +204,17 @@ or other WKT:
   applied, and a `BOUNDCRS` without one (typed WKT also says its projection method's formula, as
   below). A Zarr store's `crs` says them only when the slice uses it: a store that gives its own
   system, or a longitude/latitude grid, doesn't. A Zarr store whose axes are longitude/latitude is
-  read in the geographic system it gives (a datum such as ED50, or another body's, said once), as WGS 84
-  when it gives none; a PROJ definition that names an ellipsoid and no datum shift says so, as a WKT's
-  datum without one does. Point time series use that geographic system too when locating a WGS 84
-  query. A web store's slice or a directory window is kept in a project as a GeoTIFF; if its keys cannot preserve the
-  declared system (such as another body's or a custom datum shift), adding it is refused
-  rather than relabelling it WGS 84. A PostGIS, MySQL or SQL Server layer's `crs` is
+  read in the geographic system it gives (a datum such as ED50, or another body's, said once).
+  With no system, or a projected system on degree axes, it uses WGS 84 and says so once for a
+  slice or a point series. When the store gives no system, the notice names a caller's
+  non-WGS84 `crs` that is ignored on those axes; explicit WGS 84 is not an assumption.
+  A declared store system takes precedence over the caller's fallback. A PROJ definition that names an ellipsoid
+  and no datum shift says so, as a WKT's datum without one does. Point time series use the
+  geographic system too when locating a WGS 84 query. A web store's slice or a directory window
+  is kept in a project as a GeoTIFF; if its keys cannot preserve the declared system (such as
+  another body's or a custom datum shift), adding it is refused rather than relabelling it
+  WGS 84. Imported slices retain the read notices that the GeoTIFF cannot carry.
+  A PostGIS, MySQL or SQL Server layer's `crs` is
   read only for a geometry with no SRID of its own, by its EPSG code, with the same two notices; a
   geometry that has an SRID ignores it, so nothing is said of it. A DuckDB query's `crs` isn't
   read by RustGIS: it goes to DuckDB, which transforms the geometry from it even when the
@@ -274,14 +300,19 @@ and more. RustGIS doesn't link to GDAL: each layer is converted once, by `ogr2og
 FlatGeobuf with a spatial index in WGS 84 (GDAL reprojects it), kept in the cache folder
 (`~/.cache/rustgis/gdal` on Linux, `~/Library/Caches/RustGIS/gdal` on macOS,
 `%LOCALAPPDATA%\RustGIS\cache\gdal` on Windows, or `RUSTGIS_GDAL_CACHE`). Adding the file again
-reuses the conversion until the file changes, and large layers stream like any large FlatGeobuf
-(below). Every layer of the file is added; a layer mixing geometry types is added as one layer
-per type, its points on top and its polygons at the bottom. Curves become straight segments, and
+reuses the conversion and its layer listing until the file's path, size or modification time
+changes (for a File Geodatabase folder, RustGIS checks its files too). Missing or unreadable
+cached listings are rebuilt; **Reload** always reads the source afresh. The first listing skips
+spatial extents but keeps feature counts to check for conversion losses. Large layers stream
+like any large FlatGeobuf (below). Every layer of the file is added; a layer mixing geometry
+types is added as one layer per type, its points on top and its polygons at the bottom. Curves become straight segments, and
 3D surfaces (an Esri multipatch, such as the buildings of swissBUILDINGS3D, is read as a TIN)
 become flat polygons, one part per face, without their heights. The conversion leaves out a
 feature it can't index, such as a polygon with no coordinates; when GDAL gives the layer's feature
 count, adding the file says how many were left out, also when it reuses a conversion. Projects
-remember the original file and convert it again if the cached copy is gone.
+remember the original file and convert it again if the cached copy is gone. A listing that runs
+past five minutes, or a conversion past thirty minutes, stops with an error naming the source
+file and the operation that exceeded its limit.
 
 ## SQL queries and DuckDB databases
 
@@ -640,8 +671,17 @@ page of their own: [Web Data](web-data.md).
 layer's addresses into points: a CSV of addresses without coordinates is added as a standalone table, then each row's address
 fields (`"address"`: a field, or several such as street, city and country, joined with commas)
 are looked up, each distinct address once. The result is a new point layer holding every field
-plus `geocoded`, what the geocoder called the place; rows that weren't found stay in its table
-without a point.
+plus `geocoded`, what the geocoder called the place, and a text field `match_status`:
+
+- `matched`: the geocoder returned a usable point for the row's address.
+- `unmatched`: the row has no usable point, including an empty address or a failed lookup.
+
+Rows that weren't found stay in its table without a point, and a notice counts them; filter
+`match_status = 'unmatched'` to review them. A field of the same name in the input is kept, and
+the generated field gets underscores appended until its name is unique (`match_status_`,
+`match_status__`, and so on); filter the generated field. `matched` means the geocoder returned a point, not that
+it is the exact address: it may be placed along the street or at a broader place. The geocoders
+don't give a match score, so there is none in the output.
 
 The geocoder is OpenStreetMap's public [Nominatim](https://nominatim.org) by default, or
 [Photon](https://photon.komoot.io) (`"provider": "photon"`). Their usage policies allow light
@@ -880,7 +920,7 @@ database tests run synchronously on desktop. The web app doesn't offer database 
 connections; saved database rows remain visible but cannot be opened or tested there. Earth
 Search and Planetary Computer remain available under **Library**.
 
-For a new web-service connection, enter its Basic password or header API key to test it before
+For a new web-service connection, enter its Basic password or header/query API key to test it before
 saving. The test uses only the entered login, not a saved service login or an S3 session login
 at the same address.
 For an `http://` address, tick the confirmation before sending the login unencrypted. After a test
@@ -1055,11 +1095,42 @@ header** (the header's name, such as `X-API-Key`, and the key) or **API key in t
 parameter's name, such as `api_key`, and the key). The connection keeps only the method, the user
 name and the header or parameter name, never the password or key.
 The password or key goes to `connection.login {"id":"c1","password":"…"}` (basic) or
-`{"id":"c1","apiKey":"…"}` and lasts only for this session. Web-service logins never access the
-computer's credential store. Editing the origin, method, user or header or parameter name ends
-the login (a connection's kind doesn't change: make a new one); renaming the connection or
-changing its path at the same origin does not. **Log Out**
-(`connection.logout`) removes the session login. Log in again when a new session needs it.
+`{"id":"c1","apiKey":"…"}` and lasts only for this session by default.
+On desktop, **Remember on this computer** is unchecked initially. Checking it
+(`"remember": true` in `connection.login`) saves the Basic password, header key or query key in
+the operating system's credential store: macOS Keychain, Windows Credential Manager or Secret
+Service. **Test** never remembers a login. If the store is absent, unavailable or refuses access,
+the entered login still works for this session and a warning says it was not remembered.
+An unchecked replacement stays session-only and leaves any previously saved login unchanged.
+The web app has no OS-store hook and remains session-only.
+
+A remembered login is read only when needed, for the same connection ID, exact origin (scheme,
+host and port), method, user and header or query parameter name. It is never borrowed by another
+connection. A missing or unavailable saved login leaves the connection waiting for an entered
+login; it does not prevent session-only sign-in. The credential envelope is versioned; unknown
+versions are refused without rewriting the saved value. A failed store read is not retried merely
+by opening the source again: choose **Log In** or run `connection.login` explicitly to retry.
+Deleting or replacing a saved login, by **Remember**, **Forget Saved Login**, or an edit or
+removal, first checks whose it is. Connection IDs are numbered per computer, so another
+connection, or a newer RustGIS, can have saved a login under the same ID. A login saved for this
+connection's origin, method, user and header or parameter name is replaced or deleted, and so is
+a damaged value that no version can read. A login saved for another connection or by a newer
+RustGIS is left unchanged: **Remember** then keeps the entered login for the session only, with a
+warning, and **Forget Saved Login** says the entry was left.
+Editing the origin, method, user or header or
+parameter name ends the login and deletes the saved one (a connection's kind doesn't change:
+make a new one); renaming or changing its path at the same origin keeps it. Removing a connection
+also deletes its saved login; duplicating it copies neither its session nor its saved login.
+If the store refuses the deletion for a connection marked remembered, the edit or removal does
+not happen. A connection that isn't marked can still have a login saved by another session, so a
+store is checked for it too; if that fails, the change goes on with a warning that a saved login
+may remain. This check can ask to unlock the credential store even for a connection that isn't
+marked.
+
+**Forget Saved Login** (`connection.forgetLogin {"id":"c1"}`) deletes only the stored login,
+leaving the session's login usable. **Log Out** (`connection.logout`) ends the session login,
+but keeps the stored one. Logout prevents automatic reuse for the rest of that session until
+an explicit login, including `connection.login {"id":"c1"}` to use the saved login again.
 
 An API key in the query suits services such as Planet's basemaps, whose address is
 `https://api.planet.com/basemaps/v1/mosaics/wmts?api_key=…`: save the connection as
@@ -1123,8 +1194,11 @@ to make one for its address. `connection.list` reports these as `loginRequests` 
 Logging in retries waiting remote rasters without changing their style. A dated layer also asks
 for the login covering dates at its recorded connection's origin, even when it reopens on a date
 hosted elsewhere. Those foreign-origin dates stay anonymous.
-CLI and Python use the same session-only `connection.login` commands. ArcGIS sign-in and tokens
-keep their own [ArcGIS sign-in](#web-data). A login ends with the session that made it.
+CLI and Python remain session-only unless `--use-saved-secrets` / `use_saved_secrets=True`
+opts into remembered logins, as for database passwords and S3 keys. An active login still ends
+with its session; only an explicitly remembered one can be loaded again.
+Earthdata Login and ArcGIS OAuth sign-in and tokens keep their own
+[sign-in rules](web-data.md); these web-service login controls do not change them.
 Unbound fetches never adopt another session's service login.
 Layers added by plugins stay anonymous, including after saving and reopening a project or adding
 a saved connection later. To use a connection's login, add the layer yourself through that connection.
@@ -1309,7 +1383,8 @@ Zstandard, as GDAL writes it; samples LERC marks invalid are no-data, and an alp
 LERC's mask is put back). JPEG-compressed YCbCr images are shown
 as RGB; other YCbCr and CMYK images aren't read. A rotated or skewed image is resampled (nearest pixel)
 to a north-up grid as it is read, and a notice gives the grid's size and cell, and says when the cell had
-to be coarser than the file's to stay within the sample limit. A GeoTIFF with no coordinate system whose
+to be coarser than the file's original full-resolution cells to stay within the sample limit,
+including when an overview or every few pixels of the image were read. A GeoTIFF with no coordinate system whose
 coordinates fit in degrees is read as WGS 84 with a notice, as is one whose own projection can't be read
 (the notice says why); metres of a system that can't be read are refused. The coordinate system is an EPSG code,
 or the file's own projection described in its GeoKeys (Albers, Lambert conformal conic, transverse
@@ -1464,8 +1539,16 @@ value isn't: chunks never written are left empty, but chunks missing from inside
 fill value. `scale_factor` and `add_offset` are applied. The coordinates must be evenly spaced (a curvilinear grid isn't read);
 longitude/latitude grids of 0–360° are turned to -180–180°, and projected ones take their
 coordinate system from the variable's grid mapping (`crs_wkt`, `spatial_ref`, an EPSG code) or
-`"crs"`. Blosclz-compressed and transposed chunks and shards inside shards aren't read yet, and
-say so. A store by web address must allow the browser to fetch it (CORS) for the web app;
+`"crs"`. A grid placed by the zarr-conventions `spatial:transform` (an affine transform with no
+rotation, pixel- or node-registered) reads no coordinates, and the transform wins over coordinates
+the store also holds. It is the variable's own, or that of the nearest group above it (up to 64
+levels up) that gives one, taken with that group's `spatial:shape`, which must be the variable's map's. Its map
+dimensions are those `spatial:dimensions` names. `proj:code`, `proj:wkt2` or `proj:epsg` give
+the coordinate system, after the variable's own attributes and its grid mapping, and before a
+`spatial_ref` or `crs` array beside it. A variable opened by its own address doesn't see its
+groups' attributes: open the store's address with `"variable"` instead.
+Blosclz-compressed and transposed chunks and shards inside shards aren't read yet, and say so. A
+store by web address must allow the browser to fetch it (CORS) for the web app;
 Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
 
 ```sh
@@ -1479,7 +1562,8 @@ coordinates (by byte range when they are stored uncompressed). In a sharded arra
 shard's index by range, then only the shard's chunks the window needs, one range each; a window
 over more than 4,096 of the shards' chunks reads its shards whole instead. A box is placed by the variable's
 coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
-`"cells"`. A box reaching past the grid is read within it, and says so; one over a longitude grid's
+`"cells"`. A grid placed by its `spatial:transform` places a box by arithmetic, whatever its
+size. A box reaching past the grid is read within it, and says so; one over a longitude grid's
 edge (0°/360°, or ±180°) is refused: give a box on each side (one round the whole globe is the
 whole grid); `raster.zarrInfo` with
 `"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells (a box within one cell is widened to two, and says so), and

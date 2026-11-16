@@ -135,6 +135,19 @@ pub(crate) fn caller_callback<T: Send + 'static>(
     })
 }
 
+/// A waiter's retry belongs to that request, independently of the shared loader that wakes it.
+/// Every subsequent stage still checks this captured lifetime and its own network ceiling.
+pub(crate) fn caller_retry<T: Send + 'static>(
+    then: Box<dyn FnOnce(Result<T, String>) + Send>,
+) -> Box<dyn FnOnce(Result<T, String>) + Send> {
+    let still = current_still();
+    Box::new(move |result| {
+        rustgis_data::source::remote::with_captured_still(still, || {
+            then(check_still(&current_still()).and(result));
+        });
+    })
+}
+
 type Fetcher = Box<dyn Fn(String, crate::address::Reach, FetchedDone, &'static [u16]) + Send + Sync>;
 /// Hands back a decoded picture: [`RAW`] pixels, or the encoded bytes it was given when it
 /// couldn't decode them (they are decoded here then).
@@ -232,6 +245,9 @@ fn lock() -> std::sync::MutexGuard<'static, Cache> {
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static CLEARS: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+/// The [`mbtiles::epoch`](crate::mbtiles::epoch) of the latest [`sign_out`]: an answer to a read
+/// asked for before it is not kept ([`land`]).
+static SIGNED_OUT: AtomicU64 = AtomicU64::new(0);
 
 /// Source revisions are locked before any retained cache. Publication and reload share this
 /// lock; callbacks and I/O must always run after releasing it.
@@ -374,9 +390,34 @@ impl PublicTemplate {
 
 fn split_url_parts(url: &str) -> Option<(String, &str, &str)> {
     let (scheme, rest) = url.split_once("://")?;
-    let sep = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let mut depth = 0usize;
+    let mut sep = rest.len();
+    for (at, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            '/' | '?' | '#' if depth == 0 => {
+                sep = at;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
     let authority = &rest[..sep];
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let mut depth = 0usize;
+    let mut host_at = 0usize;
+    for (at, ch) in authority.char_indices() {
+        match ch {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            '@' if depth == 0 => host_at = at + 1,
+            _ => {}
+        }
+    }
+    let authority = &authority[host_at..];
     if authority.is_empty() {
         return None;
     }
@@ -1048,6 +1089,21 @@ pub fn clear() {
     notify();
 }
 
+/// Forgets everything, as [`clear`], at the sign-out of a login the downloads use without a
+/// binding of their own (Earthdata, ArcGIS, Copernicus). A read under way with it that answers
+/// after this is not kept either, as [`login_gone`] does for a service login.
+pub fn sign_out() {
+    // Before the clear: an answer that lands between the two is dropped, one before goes with it.
+    SIGNED_OUT.fetch_max(crate::mbtiles::next_epoch(), Ordering::SeqCst);
+    clear();
+}
+
+/// Whether a read asked for at `asked_at` (an [`mbtiles::epoch`](crate::mbtiles::epoch)) began
+/// before the latest [`sign_out`].
+fn signed_out_since(asked_at: u64) -> bool {
+    asked_at < SIGNED_OUT.load(Ordering::SeqCst)
+}
+
 /// The resource a cache key reads: its address without a download budget, a byte range or a
 /// tail, and for a tile of a PMTiles, COG or MBTiles archive, the archive's address.
 fn resource_of(key: &str) -> &str {
@@ -1318,6 +1374,8 @@ impl Drop for Answer {
 
 /// Keeps what a fetch asked for at `asked_at` answered. A tile of an MBTiles file forgotten since may be
 /// of the old file, so it is dropped. Its slot went with the forget: one there now is a newer read's.
+/// One asked for before a [`sign_out`] may have been read with the login that ended: dropped too, and
+/// its slot, which the sign-out's clear kept pending, forgotten so the tile is asked for again.
 fn land(key: &str, entry: Option<Entry>, asked_at: u64, ceiling: crate::address::Reach) {
     if entry.is_some() && login_gone(key) {
         return;
@@ -1333,7 +1391,10 @@ fn land(key: &str, entry: Option<Entry>, asked_at: u64, ceiling: crate::address:
     // before its [`forget`] takes the lock, so a read that lands after it is seen here.
     let restricted = ceiling != crate::address::Reach::Public && ceiling_for(key) == crate::address::Reach::Public;
     // Asked for before the record of forgotten files was emptied, so it can't be told: read again.
-    match entry.filter(|_| !restricted && !crate::mbtiles::asked_before_emptied(key, asked_at)) {
+    // Asked for before a sign-out: read again, with whatever login is current now. Checked under
+    // the lock: the sign-out is recorded before its clear takes it.
+    let stale = crate::mbtiles::asked_before_emptied(key, asked_at) || signed_out_since(asked_at);
+    match entry.filter(|_| !restricted && !stale) {
         Some(entry) => keep_for(&mut c, key, entry, ceiling),
         // Never answered (or dropped by the fetcher): forgotten, fetched again when asked for.
         None => {
@@ -1965,13 +2026,8 @@ pub fn post_json_blocking(url: &str, body: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Like [`post_json_blocking`], to an address the user named: it may be on their own network, as
-/// a download from one is ([`download_blocking`]). Not for addresses a document pointed to.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn post_json_named_blocking(url: &str, body: &str) -> Result<Vec<u8>, String> {
-    post_json_named_blocking_with_origin(url, body).map(|f| f.bytes)
-}
-
-/// Like [`post_json_named_blocking`], preserving transport-observed provenance.
+/// a download from one is ([`download_blocking`]). Not for addresses a document pointed to. Keeps
+/// the transport-observed provenance with the bytes.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn post_json_named_blocking_with_origin(url: &str, body: &str) -> Result<Fetched, String> {
     let ceiling = ceiling_for(url);
@@ -2026,11 +2082,16 @@ pub fn tiff_header_length(value: &str) -> Option<u64> {
 /// the web), counted as a fetch under way. A request signed for S3 isn't made (its signature is
 /// for a GET): it answers with nothing known.
 pub fn head(url: &str, done: HeadDone) {
+    head_with_ceiling(url, ceiling_for(url), done);
+}
+
+/// Keeps a multi-request reader's original ceiling, narrowed by current restrictions.
+pub(crate) fn head_with_ceiling(url: &str, ceiling: crate::address::Reach, done: HeadDone) {
     if let Err(e) = check_current() {
         done(Err(e));
         return;
     }
-    let ceiling = ceiling_for(url);
+    let ceiling = ceiling.min(ceiling_for(url));
     let still = current_still();
     let done: HeadDone = Box::new(move |r| with_optional_still(still, || done(r)));
     if let Err(e) = crate::address::check_reach(url, ceiling) {
@@ -2108,11 +2169,18 @@ fn fetch_reached(url: String, ceiling: crate::address::Reach, done: FetchedDone,
 /// Like [`fetch_bytes`], counted as a fetch under way (so exports [`wait`] for it) and drawing
 /// again when it lands: for what the map needs before it can ask for tiles (a PMTiles header).
 pub(crate) fn fetch_counted(url: String, done: Done) {
+    let ceiling = ceiling_for(&url);
+    fetch_counted_with_ceiling(url, ceiling, done);
+}
+
+/// Counts a range read while retaining its reader's starting network ceiling.
+pub(crate) fn fetch_counted_with_ceiling(url: String, ceiling: crate::address::Reach, done: Done) {
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-    fetch_bytes(
+    fetch_reached(
         url,
+        ceiling,
         Box::new(move |r| {
-            done(r);
+            done(r.map(|f| f.bytes));
             finished();
         }),
         &[],
@@ -3100,7 +3168,7 @@ mod native {
                 super::with_progress(progress, || {
                     let _scope = capture.enter();
                     let r = super::check_current().map_err(Failure::from).and_then(|_| {
-                        get_fetched_omitting(&public_agent(timeout), &url, omit).map(|mut f| {
+                        fetch_answer(&public_agent(timeout), &url, Reach::Public, true, omit).map(|mut f| {
                             f.origin = f.origin.narrow_reach(Reach::Public);
                             f
                         })
@@ -3364,6 +3432,15 @@ mod native {
                 {
                     req = req.header("Authorization", &auth);
                 }
+                // A Copernicus Data Space sign-in's token goes to its data hosts only, asked for at
+                // each hop like Earthdata's (and renewed first when it is about to expire). A hop
+                // carrying it makes a refusal status-only: a server may echo the token back.
+                if !prepared.signed
+                    && let Some(auth) = crate::copernicus::authorization_fresh(&at)
+                {
+                    carried_login = true;
+                    req = req.header("Authorization", &auth);
+                }
                 // An ArcGIS sign-in's token goes to the portal and the servers it covers, asked for at
                 // each hop like Earthdata's.
                 if !prepared.signed
@@ -3386,6 +3463,9 @@ mod native {
                 // A data host refusing the request (or the token): say what to do.
                 if status == 401 && crate::earthdata::is_data_host(&at) {
                     return Err(Failure::without_answer("", crate::earthdata::refused_message(url), Reason::Status(status)));
+                }
+                if status == 401 && crate::copernicus::is_data_host(&at) {
+                    return Err(Failure::without_answer("", crate::copernicus::refused_message(url), Reason::Status(status)));
                 }
                 // A store that serves ranges but not the last bytes by their count (GitHub's release
                 // files, on Azure storage, answer `bytes=-n` with 501): the file's length from a
@@ -4330,7 +4410,10 @@ mod tests {
         let url = download_address("http://localhost:9/picture.png", 1024);
         native::download_public_within(url, std::time::Duration::from_secs(5), &[], Box::new(move |r| drop(tx.send(r))));
         let err = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap().unwrap_err().message;
-        assert!(err.contains("resolves to this computer or the local network"), "{err}");
+        assert!(
+            err.contains("resolves to this computer or the local network") || err.contains("can't point into the local network"),
+            "{err}"
+        );
     }
 
     /// A public download asked for by a request that has since ended sends nothing, as any
@@ -4880,6 +4963,80 @@ mod tests {
         assert!(logins::apply(&target).is_err());
         assert!(prepare_get(&plain).unwrap().signed);
         assert!(s3::disconnect(name));
+    }
+
+    /// A Copernicus Data Space token, from a fake Keycloak, read by fake data hosts on this
+    /// computer: refused without it, a range read with it, and never past a redirect elsewhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_copernicus_token_goes_to_its_data_hosts_only_and_never_past_a_redirect() {
+        let _turn = crate::cache::turn();
+        use crate::copernicus;
+        copernicus::logout();
+        let grant = r#"{"access_token":"synthetic-cdse-access","expires_in":1800,"refresh_expires_in":3600,"refresh_token":"synthetic-cdse-refresh"}"#;
+        let keycloak = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{grant}",
+            grant.len()
+        );
+        let (identity, _) = serve_recorded(vec![keycloak.into_bytes()]);
+        let (elsewhere, elsewhere_asked) =
+            serve_recorded(vec![b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nelse".to_vec()]);
+        let refused = br#"{"code":"DAT-ZIP-604","message":"Token not found"}"#;
+        let mut unauthorized = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            refused.len()
+        )
+        .into_bytes();
+        unauthorized.extend_from_slice(refused);
+        let partial =
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/100\r\nContent-Length: 4\r\nConnection: close\r\n\r\nII*\0".to_vec();
+        let away =
+            format!("HTTP/1.1 302 Found\r\nLocation: {elsewhere}/copy.tif\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes();
+        // A refusal that echoes the token back, in a header and in its body.
+        let echoed = "echo synthetic-cdse-access";
+        let forbidden = format!(
+            "HTTP/1.1 403 Forbidden
+x-request-id: synthetic-cdse-access
+Content-Length: {}
+Connection: close
+
+{echoed}",
+            echoed.len()
+        )
+        .into_bytes();
+        let (data, data_asked) = serve_recorded(vec![unauthorized, partial, away, forbidden]);
+        copernicus::TEST_HOSTS.lock().unwrap_or_else(|e| e.into_inner()).push(data.clone());
+        let agent = native::agent();
+        let file = format!("{data}/odata/v1/Products(abc)/Nodes(p)/Nodes(f.tif)/$value");
+
+        // Without a sign-in: the 401 says what to do.
+        let e = native::get(&agent, &format!("{file}{RANGE}0-3"), &[]).unwrap_err();
+        assert!(e.contains("f.tif: Copernicus Data Space asks for a sign-in") && e.contains("copernicus.login"), "{e}");
+        let asked = data_asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+        assert!(!asked.contains("authorization:"), "{asked}");
+
+        // Signed in: the range is read with the token.
+        copernicus::login_at(&identity, "synthetic.user@example.invalid", "synthetic-password", None).unwrap();
+        assert_eq!(native::get(&agent, &format!("{file}{RANGE}0-3"), &[]).unwrap(), b"II*\0");
+        let asked = data_asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+        assert!(asked.contains("authorization: bearer synthetic-cdse-access\r\n"), "{asked}");
+        assert!(asked.contains("range: bytes=0-3\r\n"), "{asked}");
+
+        // A redirect off the data hosts goes without it.
+        assert_eq!(native::get(&agent, &format!("{data}/away"), &[]).unwrap(), b"else");
+        let asked = data_asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+        assert!(asked.contains("authorization: bearer synthetic-cdse-access\r\n"), "{asked}");
+        let followed = elsewhere_asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+        assert!(followed.starts_with("get /copy.tif http/1.1\r\n"), "{followed}");
+        assert!(!followed.contains("authorization") && !followed.contains("synthetic-cdse"), "{followed}");
+
+        // A detailed download's refusal keeps no header or body from a hop that carried the token.
+        let failure = native::get_detailed(&agent, &format!("{data}/echo")).unwrap_err();
+        assert!(failure.answer.is_none(), "{failure:?}");
+        assert!(!format!("{failure:?}").contains("synthetic-cdse"), "{failure:?}");
+
+        copernicus::TEST_HOSTS.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| *h != data);
+        copernicus::logout();
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5960,6 +6117,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A read under way at a sign-out (Earthdata, ArcGIS, Copernicus) whose answer comes after it
+    /// isn't kept: the slot the sign-out's clear left pending is forgotten, and the next request
+    /// reads again. A local server holds its answer until the sign-out is over.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_answer_after_a_sign_out_is_not_kept() {
+        use std::io::Write;
+        let _turn = turn();
+        let timeout = Duration::from_secs(10);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/signed-out.json", listener.local_addr().unwrap());
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_request(&mut stream);
+                if i == 0 {
+                    arrived_tx.send(()).unwrap();
+                    release_rx.recv_timeout(timeout).unwrap();
+                }
+                let body = format!("{{\"read\":{i}}}");
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        assert!(matches!(get(&url, Want::Json), State::Pending));
+        arrived_rx.recv_timeout(timeout).unwrap();
+        sign_out();
+        assert!(matches!(lock().slots.get(&url).map(|s| &s.entry), Some(Entry::Pending)), "the clear keeps reads under way");
+        release_tx.send(()).unwrap();
+        wait(timeout);
+        assert!(!lock().slots.contains_key(&url), "an answer asked for before the sign-out was kept");
+        // Asked for again, after the sign-out: that answer is kept.
+        assert!(matches!(get(&url, Want::Json), State::Pending));
+        wait(timeout);
+        server.join().unwrap();
+        assert!(matches!(get(&url, Want::Json), State::Ready(p) if matches!(p.as_ref(), Payload::Json(v) if v["read"] == 1)));
+        clear();
     }
 
     /// A pending or dropped restricted fetch cannot blank a completed explicit layer.
@@ -7161,5 +7358,24 @@ mod tests {
         let agent = native::fixture_agent(listener, listener, false);
         let fetched = native::post_fetched_with(&agent, "http://internal.example/search", "{}", crate::address::Reach::Local).unwrap();
         assert_eq!(fetched.origin.reach(), crate::address::Reach::Local);
+    }
+    #[test]
+    fn switch_delimiters_do_not_split_a_restricted_template_authority() {
+        let _turn = turn();
+        let template = "http://{switch:127.0.0.1,unused/}/{z}/{x}/{y}.png";
+        restrict_to_public(template);
+        let tile = crate::template::expand(template, crate::template::TileId { z: 0, x: 0, y: 0 }, 256, false, &[]);
+        assert_eq!(ceiling_for(&tile), crate::address::Reach::Public);
+        assert!(matches!(get_tile(&tile, Want::Image), State::Failed(_)));
+    }
+    #[test]
+    fn unclosed_authority_placeholders_do_not_hide_a_local_host() {
+        let _turn = turn();
+        assert!(split_url_parts("http://a{b@10.0.0.5/x").is_none());
+        let template = "http://a{b@10.0.0.5/{z}/{x}/{y}.png";
+        restrict_to_public(template);
+        let tile = crate::template::expand(template, crate::template::TileId { z: 0, x: 0, y: 0 }, 256, false, &[]);
+        assert_eq!(ceiling_for(&tile), crate::address::Reach::Public);
+        assert!(matches!(get_tile(&tile, Want::Image), State::Failed(_)));
     }
 }
