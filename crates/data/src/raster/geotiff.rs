@@ -1115,7 +1115,8 @@ impl Chunks {
 
     /// Copies every `k`-th pixel each way of chunk `c` of `plane` (decoded as `values`) into
     /// `bands`, each `ow` pixels wide, counting in `rounded` (by band) the pixels copied whose bit
-    /// is set in `changed` (from [`rounded_bits`]).
+    /// is set in `changed` (from [`rounded_bits`]). Values of none of the chunk's shapes are an
+    /// error: a row length guessed from them would put pixels in other pixels' places.
     fn place(
         &self,
         bands: &mut [Vec<f32>],
@@ -1126,7 +1127,7 @@ impl Chunks {
         c: u32,
         k: u32,
         ow: usize,
-    ) {
+    ) -> Result<()> {
         let c = c % self.per_plane.max(1);
         let (x0, y0, cols, rows) = self.span(c);
         let k = u64::from(k.max(1));
@@ -1141,14 +1142,19 @@ impl Chunks {
         let stride = shapes
             .iter()
             .find(|(w, r)| w.saturating_mul(*r).saturating_mul(per_pixel) == values.len())
-            .map_or(values.len() / data_rows.max(1) / per_pixel, |(w, _)| *w)
-            .max(1);
+            .map(|(w, _)| (*w).max(1))
+            .ok_or_else(|| {
+                err(format!(
+                    "a strip or tile decodes to {} values, not the {dw} × {data_rows} pixels of {per_pixel} samples it holds",
+                    values.len()
+                ))
+            })?;
         let mut y = y0.div_ceil(k) * k;
         while y < y0 + rows {
             let mut x = x0.div_ceil(k) * k;
             while x < x0 + cols {
-                // A position `usize` can't count to (in the browser) is a pixel not placed, as one
-                // past the end of the values is.
+                // With `stride` one of the chunk's shapes, every position is inside `values`; the
+                // checked arithmetic only keeps a product from being computed unchecked.
                 let src = usize::try_from(y - y0)
                     .ok()
                     .and_then(|row| row.checked_mul(stride))
@@ -1172,6 +1178,7 @@ impl Chunks {
             }
             y += k;
         }
+        Ok(())
     }
 }
 
@@ -1227,7 +1234,7 @@ fn decimate<R: Read + Seek>(
             let (mut values, dt) = to_f32(buf, (ow, oh))?;
             super::lerc::blank(&mut values, gaps.as_deref());
             data_type = dt;
-            chunks.place(&mut bands, &values, changed.as_deref(), &mut rounded, plane, index, k, ow);
+            chunks.place(&mut bands, &values, changed.as_deref(), &mut rounded, plane, index, k, ow)?;
         }
         crate::progress::step(1)?;
     }
@@ -1297,10 +1304,16 @@ fn decimate_parallel(
                         Err(e) => return fail(e),
                     };
                     super::lerc::blank(&mut values, gaps.as_deref());
-                    if let Ok(mut o) = out.lock() {
-                        let (bands, data_type, rounded) = &mut *o;
-                        *data_type = dt;
-                        chunks.place(bands, &values, changed.as_deref(), rounded, plane, index, k, ow);
+                    let placed = match out.lock() {
+                        Ok(mut o) => {
+                            let (bands, data_type, rounded) = &mut *o;
+                            *data_type = dt;
+                            chunks.place(bands, &values, changed.as_deref(), rounded, plane, index, k, ow)
+                        }
+                        Err(_) => Err(err("a chunk couldn't be decoded")),
+                    };
+                    if let Err(e) = placed {
+                        return fail(e);
                     }
                 }
                 Err(e) => return fail(e),
@@ -2140,7 +2153,7 @@ mod tests {
                                 values.extend([value(x, y, 0), value(x, y, 1)]);
                             }
                         }
-                        chunks.place(&mut bands, &values, None, &mut [0, 0], plane, index, k, ow);
+                        chunks.place(&mut bands, &values, None, &mut [0, 0], plane, index, k, ow).unwrap();
                     }
                     for (s, band) in bands.iter().enumerate() {
                         let want: Vec<f32> =
@@ -2166,7 +2179,7 @@ mod tests {
             let mut values = vec![0.0f32; k as usize - 1];
             values[0] = 7.0;
             let mut band = vec![vec![f32::NAN; 4096]];
-            chunks.place(&mut band, &values, None, &mut [0], 0, 4095, k, if wide { 4096 } else { 1 });
+            chunks.place(&mut band, &values, None, &mut [0], 0, 4095, k, if wide { 4096 } else { 1 }).unwrap();
             assert_eq!(band[0].iter().filter(|v| !v.is_nan()).count(), 1, "wide {wide}");
             assert_eq!(band[0][4095], 7.0, "wide {wide}");
         }
@@ -2186,12 +2199,28 @@ mod tests {
         // Every second pixel keeps 4,294,967,292 and 4,294,967,294; the output isn't made (it would
         // hold 2 GiB): the walk ending is what is checked.
         let mut bands = vec![Vec::new()];
-        chunks.place(&mut bands, &[1.0, 2.0, 3.0], None, &mut [0], 0, last, 2, 1 << 31);
+        chunks.place(&mut bands, &[1.0, 2.0, 3.0], None, &mut [0], 0, last, 2, 1 << 31).unwrap();
         assert!(bands[0].is_empty());
         // Chunks of no width or height, and an image of no width, are nothing, not a division by 0.
         let none = chunk_grid(0, 0, 1, 1, 1);
         assert_eq!(none.count(), 0);
         assert_eq!(none.span(0), (0, 0, 0, 0));
+    }
+
+    /// A decoded strip or tile whose values make none of its shapes is refused: a row length
+    /// guessed from them would put pixels in other pixels' places, or leave them empty unsaid.
+    #[test]
+    fn a_chunk_of_none_of_its_shapes_is_refused_not_guessed() {
+        // One 4 × 2 tile; 5 values make neither 4 × 2 nor any padded shape.
+        let chunks = chunk_grid(4, 2, 4, 2, 1);
+        let mut bands = vec![vec![f32::NAN; 8]];
+        let e = chunks.place(&mut bands, &[1.0, 2.0, 3.0, 4.0, 5.0], None, &mut [0], 0, 0, 1, 4).unwrap_err().to_string();
+        assert!(e.contains("decodes to 5 values, not the 4 × 2 pixels"), "{e}");
+        assert!(bands[0].iter().all(|v| v.is_nan()), "nothing placed from a refused chunk");
+        // All 8 are placed where they belong.
+        let all: Vec<f32> = (0..8).map(|v| v as f32).collect();
+        chunks.place(&mut bands, &all, None, &mut [0], 0, 0, 1, 4).unwrap();
+        assert_eq!(bands[0], all);
     }
 
     /// Who holds the rights (the Copyright tag) is written by both writers and read back, as the

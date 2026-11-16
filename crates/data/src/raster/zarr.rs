@@ -937,6 +937,13 @@ fn blosc(d: &[u8], want: usize) -> Result<Vec<u8>> {
         } else if flags & 0x1 != 0 && typesize > 1 {
             block = unshuffle(&block, typesize);
         }
+        // Grown as Vec would (doubling), but never past the `nbytes` the blocks add up to, so a
+        // valid chunk holds no more than it did when `nbytes` was reserved at once.
+        if out.capacity() - out.len() < block.len() {
+            let rest = nbytes.saturating_sub(out.len()).max(block.len());
+            out.try_reserve_exact(rest.min(out.len().max(block.len())))
+                .map_err(|_| bad(format!("not enough memory for a blosc chunk of {nbytes} bytes")))?;
+        }
         out.extend_from_slice(&block);
     }
     if out.len() != nbytes {
@@ -2741,7 +2748,10 @@ mod tests {
         // Two full blocks split in four streams, then a shorter one that isn't split.
         let raw: Vec<u8> = (0..2700u32).flat_map(|v| ((v % 97) as f32 * 1.5).to_le_bytes()).collect();
         let f = blosc_blocks(&raw, 4, 4096);
-        assert_eq!(blosc(&f, raw.len()).unwrap(), raw);
+        let got = blosc(&f, raw.len()).unwrap();
+        assert_eq!(got, raw);
+        // Grown block by block from the frame's size, never holding more than the chunk.
+        assert!(f.len() < raw.len() && got.capacity() <= raw.len(), "capacity {} for {} bytes", got.capacity(), raw.len());
     }
 
     fn f32s(v: &[f32]) -> Vec<u8> {
