@@ -52,8 +52,15 @@ impl Sample {
             Ok(bytes) if bytes.is_empty() => Ok(Outcome::Missing),
             Err(e) if matches!(cache::http_status(&e), Some(204 | 404)) => Ok(Outcome::Missing),
             Ok(bytes) => {
-                let want = if self.vector { cache::Want::Vector } else { cache::Want::Image };
-                cache::decode(&bytes, want).map_err(|_| NOT_TILE.to_string())?;
+                if bytes.len() > cache::MAX_BYTES {
+                    return Err(NOT_TILE.into());
+                }
+                let decoded = if self.vector {
+                    crate::render::rustgis_tiles::mvt::check_sample(&bytes)
+                } else {
+                    cache::decode_image(&bytes).map(|_| ())
+                };
+                decoded.map_err(|_| NOT_TILE.to_string())?;
                 Ok(Outcome::Received)
             }
             Err(e) => Err(e),
@@ -65,4 +72,23 @@ impl Sample {
 pub enum Outcome {
     Received,
     Missing,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_sample_requires_name_and_version_but_not_features() {
+        let sample = Sample { zoom: 0, vector: true };
+        for invalid in [
+            &[0x1a, 0][..],            // Empty layer.
+            &[0x1a, 2, 0x78, 2],       // Version without name.
+            &[0x1a, 3, 0x0a, 1, b'a'], // Name without version.
+        ] {
+            assert_eq!(sample.check(Ok(invalid.to_vec())).err().as_deref(), Some(NOT_TILE));
+        }
+        let named_empty_layer = vec![0x1a, 5, 0x0a, 1, b'a', 0x78, 2];
+        assert!(matches!(sample.check(Ok(named_empty_layer)), Ok(Outcome::Received)));
+    }
 }

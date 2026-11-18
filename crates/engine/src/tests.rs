@@ -31901,12 +31901,18 @@ fn connection_xyz_default_name_and_path_key_notice() {
     let url = "https://tiles.example/{z}/{x}/{y}.png";
     let added = s.run("connection.new", &json!({"kind":"service","address":url})).unwrap();
     assert_eq!(added["name"], "tiles.example");
+    let subdomains = "https://{s}.basemaps.example/{z}/{x}/{y}.png";
+    let added = s.run("connection.new", &json!({"kind":"service","address":subdomains})).unwrap();
+    assert_eq!(added["name"], "basemaps.example");
+    assert_eq!(added["address"], subdomains);
     assert!(s.notices_since(mark).is_empty());
     let with_key = "https://tiles.example/services;key=fixture/tiles/{z}/{x}/{y}.png";
     let added = s.run("connection.new", &json!({"kind":"service","address":with_key,"name":"Relief"})).unwrap();
     assert_eq!(added["name"], "Relief");
     assert_eq!(added["address"], with_key);
-    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("URL path is saved as typed") && !n.text.contains("fixture")));
+    let notices = s.notices_since(mark);
+    assert!(notices.iter().any(|n| n.text.contains("URL path is saved as typed")));
+    assert!(notices.iter().all(|n| !n.text.contains("fixture")));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -31914,7 +31920,7 @@ fn connection_xyz_default_name_and_path_key_notice() {
 fn connection_test_fetches_one_xyz_tile_with_the_selected_login() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let png = tiny_skia::Pixmap::new(1, 1).unwrap().encode_png().unwrap();
     for (status, body, expected) in [
@@ -31925,10 +31931,21 @@ fn connection_test_fetches_one_xyz_tile_with_the_selected_login() {
         ("200 OK", b"<html>Login required</html>", Err("not a usable tile")),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let body = body.to_vec();
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (stream, _) = loop {
+                match listener.accept() {
+                    Ok(pair) => break pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(2)); // test-wait: pace accepts until the fixture deadline
+                    }
+                    Err(e) => panic!("sample request did not reach the fixture: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut reader = BufReader::new(stream);
             let mut request = String::new();
@@ -31946,6 +31963,7 @@ fn connection_test_fetches_one_xyz_tile_with_the_selected_login() {
         let url = format!("http://127.0.0.1:{port}/services;key=xyz-path-fixture/{{z}}/{{x}}/{{y}}.png");
         let c = s.run("connection.new", &json!({"kind":"service","address":url,"auth":"query","keyName":"rg_xyz_key"})).unwrap();
         let params = json!({"id":c["id"],"apiKey":"sample+key","allowInsecure":true});
+        let mark = s.notice_mark();
         let result = s.run("connection.test", &params);
         match expected {
             Ok(expected) => assert_eq!(result.unwrap()["result"], json!({"kind":"xyz","tile":[0,0,0],"status":expected})),
@@ -31953,7 +31971,15 @@ fn connection_test_fetches_one_xyz_tile_with_the_selected_login() {
                 let error = result.unwrap_err();
                 assert!(error.contains(expected) && !error.contains("sample") && !error.contains("xyz-path-fixture"), "{error}");
                 let history = s.diagnostics.report(rustgis_data::diagnostics::Filter::All);
-                assert!(history.contains(expected) && !history.contains("xyz-path-fixture"), "{history}");
+                assert!(history.contains(expected), "{history}");
+                for key in ["xyz-path-fixture", "sample+key", "sample%2Bkey"] {
+                    assert!(!history.contains(key), "{history}");
+                }
+            }
+        }
+        for notice in s.notices_since(mark) {
+            for key in ["xyz-path-fixture", "sample+key", "sample%2Bkey"] {
+                assert!(!notice.text.contains(key), "{notice:?}");
             }
         }
         assert_eq!(server.join().unwrap(), "GET /services;key=xyz-path-fixture/0/0/0.png?rg_xyz_key=sample%2Bkey HTTP/1.1\r\n");

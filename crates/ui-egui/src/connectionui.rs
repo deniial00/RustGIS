@@ -632,10 +632,8 @@ pub fn start_test(app: &mut RustGisApp) {
         let land = std::sync::Arc::downgrade(&slot);
         let watch = land.clone();
         cache::with_still(std::sync::Arc::new(move || watch.strong_count() != 0), || {
-            cache::download_limited_omitting(
+            cache::fetch_tile_sample(
                 &url,
-                cache::MAX_BYTES,
-                &[404],
                 Box::new(move |r| {
                     if let Some(land) = land.upgrade() {
                         let outcome = sample.check(r).map(|outcome| TestAnswer::Tile(sample, outcome));

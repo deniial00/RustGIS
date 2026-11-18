@@ -1030,9 +1030,10 @@ Database connections are used on the desktop only. S3 options are `region`, `buc
 `connection.test` lists the endpoint's tables, layers, records, collections or buckets.
 It also accepts an unsaved definition (`kind`, `address`, `name`, `group`, `options`) instead
 of `id`. With `probe: true`, it returns the secret-free address to fetch (`fetch: null` for
-databases). For service documents, pass the response text as `answer` with the same definition
-to parse it without a network request. Do not pass `answer` for an XYZ tile; database kinds ignore
-`answer` and test through their driver. An anonymous S3 test needs at least one named bucket.
+databases). For text responses, including S3 listing XML, pass the response as `answer` with the
+same definition to parse it without a network request. Do not pass `answer` for an XYZ tile;
+database kinds ignore it and test through their driver. An anonymous S3 test needs at least
+one named bucket.
 
 **Test** recognises XYZ coordinates (`{z}/{x}/{y}`, also `{zoom}` and `{-y}`) and quadkeys
 (`{q}` or `{quadkey}`) in the address. It fills in the URL (including `{s}` when present) and

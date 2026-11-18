@@ -515,7 +515,12 @@ pub fn clean(mut c: Connection) -> Result<(Connection, bool), String> {
             "AWS S3".into()
         } else if SERVICE_KINDS.contains(&c.kind.as_str()) && tile_test::is_template(&c.address) {
             login_origin(&c)
-                .and_then(|origin| origin.split_once("://").map(|(_, host)| host.trim_start_matches("{s}.").chars().take(80).collect()))
+                .or_else(|| {
+                    let (scheme, tail) = c.address.split_once("://")?;
+                    let host = tail.split(['/', '?', '#']).next()?.strip_prefix("{s}.")?;
+                    crate::render::rustgis_tiles::logins::origin(&format!("{scheme}://{host}"))
+                })
+                .and_then(|origin| origin.split_once("://").map(|(_, host)| host.chars().take(80).collect()))
                 .unwrap_or_else(|| "XYZ tiles".into())
         } else {
             sources::default_name(&c.address)
